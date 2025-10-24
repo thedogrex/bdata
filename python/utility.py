@@ -38,7 +38,7 @@ def download_file(base_path, file_name, date_range=None, folder=None):
 
   if os.path.exists(save_path):
     print("\nfile already exists! {}".format(save_path))
-    return
+    return save_path
   
   # make the directory
   if not os.path.exists(base_path):
@@ -46,6 +46,7 @@ def download_file(base_path, file_name, date_range=None, folder=None):
 
   try:
     download_url = get_download_url(download_path)
+    print(f'download url: {download_url}')
     dl_file = urllib.request.urlopen(download_url)
     length = dl_file.getheader('content-length')
     if length:
@@ -65,8 +66,11 @@ def download_file(base_path, file_name, date_range=None, folder=None):
         sys.stdout.write("\r[%s%s]" % ('#' * done, '.' * (50-done)) )    
         sys.stdout.flush()
 
+        return save_path
+
   except urllib.error.HTTPError:
     print("\nFile not found: {}".format(download_url))
+    return None
     pass
 
 def convert_to_date_object(d):

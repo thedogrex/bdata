@@ -1,128 +1,125 @@
-from db import DbProvider
-import asyncio
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
 
-db = DbProvider()
+def aggregate_timeframe(df, hours):
+    df = df.copy()
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="s", errors="coerce")
+    df = df.set_index("open_time").sort_index()
+    agg = df.resample(f"{hours}h").agg({
+        "open": "first",
+        "close": "last",
+        "high": "max",
+        "low": "min",
+        "volume": "sum"
+    }).dropna().reset_index()
+    agg["dir"] = (agg["close"] > agg["open"]).astype(int)
+    return agg
 
+def martingale_multi_tf(res):
+    # Convert DB tuples → DataFrame
+    df = pd.DataFrame(res, columns=["open_time", "open", "high", "low", "close", "volume"])
+    df = df.sort_values("open_time").reset_index(drop=True)
+
+    # Aggregate to higher TFs
+    df_4h = aggregate_timeframe(df, 4)
+    df_12h = aggregate_timeframe(df, 12)
+    df_24h = aggregate_timeframe(df, 24)
+
+    # Base direction (1h)
+    df["dir"] = (df["close"] > df["open"]).astype(int)
+
+    # Align aggregated frames back to 1h via interpolation
+    def align_dirs(base_len, higher_df):
+        return np.interp(
+            np.arange(base_len),
+            np.linspace(0, base_len - 1, len(higher_df)),
+            higher_df["dir"]
+        ).round().astype(int)
+
+    df["dir_4h"] = align_dirs(len(df), df_4h)
+    df["dir_12h"] = align_dirs(len(df), df_12h)
+    df["dir_24h"] = align_dirs(len(df), df_24h)
+
+    # === Build features for training ===
+    X, y = [], []
+    for i in range(10, len(df) - 1):
+        features = np.concatenate([
+            df["dir"].iloc[i-6:i].values,        # last 6 1h
+            df["dir_4h"].iloc[i-3:i].values,     # last 3 4h
+            df["dir_12h"].iloc[i-2:i].values,    # last 2 12h
+            [df["dir_24h"].iloc[i]]              # last 1 daily
+        ])
+        X.append(features)
+        y.append(df["dir"].iloc[i + 1])
+
+    X, y = np.array(X), np.array(y)
+
+    # === Split for training/testing ===
+    split_idx = int(len(X) * 0.98)
+    X_train, X_test = X[:split_idx], X[split_idx:]
+    y_train, y_test = y[:split_idx], y[split_idx:]
+
+    # === Normalize and fit ===
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+
+    model = RandomForestClassifier(n_estimators=200, max_depth=8, random_state=42)
+    model.fit(X_train, y_train)
+
+    # === Predict and simulate ===
+    probas = model.predict_proba(X_test)
+    preds = (probas[:, 1] > 0.5).astype(int)
+    conf = np.max(probas, axis=1)
+
+    payout = 1.92
+    balance = 1000
+    bet = 20
+    base_bet = 20
+    wins = 0
+    trades = 0
+
+    for p, real, c in zip(preds, y_test, conf):
+        if c < 0.6:
+            continue
+        trades += 1
+        if p == real:
+            balance += bet * (payout - 1)
+            wins += 1
+            bet = base_bet  # reset after win
+        else:
+            balance -= bet
+            bet *= 2
+            if bet > base_bet * 2 * 2 * 2 * 2 * 2:
+                bet = base_bet  # stop-loss reset
+
+    winrate = wins / trades if trades else 0
+    roi = (balance - 1000) / trades if trades else 0
+
+    print(f"\n=== Multi-TF Martingale Results ===")
+    print(f"Trades: {trades}")
+    print(f"Winrate: {winrate:.3f}")
+    print(f"Total Profit: {balance - 1000:.2f}")
+    print(f"Average Profit/Trade (ROI): {roi:.3f}")
+    print(f"Balance: {balance:.2f}")
+
+    return model, scaler
+
+# Example usage:
 async def run():
-    res = await db.select("candles", ["open_time", "open_price", "close_price", "dir"],
-                          None, 0, "ASC")
+    # Example `res` structure from your DB
+    # res = [(timestamp, open, high, low, close, volume), ...]
+    # Make sure timestamps are in seconds (UNIX)
+    import random, time
+    now = int(time.time())
+    res = [
+        (now - i * 3600, 100 + random.random(), 101 + random.random(), 99 - random.random(), 100 + random.uniform(-1, 1), random.random()*100)
+        for i in range(40000, 0, -1)
+    ]
+    martingale_multi_tf(res)
 
-
-    from collections import defaultdict, Counter
-
-    pattern_length = 5
-    patterns = []
-    pattern_start_times = defaultdict(list)
-
-    # Build patterns of 'dir' values
-    for i in range(len(res) - pattern_length + 1):
-        seq = ''.join(r[3] for r in res[i:i+pattern_length])
-        start_time = res[i][0]
-        patterns.append(seq)
-        pattern_start_times[seq].append(start_time)
-
-    # Count pattern occurrences
-    pattern_counts = Counter(patterns)
-
-    # Sort by frequency (rarest first)
-    sorted_patterns = sorted(pattern_counts.items(), key=lambda x: x[1])
-
-    # Print results
-    print(f"{'Pattern':<10} {'Count':<5} {'First open_time'}")
-    for pattern, count in sorted_patterns:
-        first_time = pattern_start_times[pattern][0]
-        print(f"{pattern:<10} {count:<5} {first_time}")
-
-
-    martingale_anti_pattern(res)
-
-
-from collections import Counter, defaultdict
-
-from collections import Counter
-
-def martingale_anti_pattern(res):
-    pattern_length = 5
-    total_bets = 24*7*4*12
-    base_bet = 40
-    multiplier = 2
-    max_steps = 5
-    START_N = 0
-    N_RAREST_PATTERNS = 2
-
-    dirs = [r[3] for r in res]
-
-    START_N = len(res) - total_bets
-
-    # Count all patterns
-    pattern_counts = Counter(''.join(dirs[i:i+pattern_length]) for i in range(len(dirs) - pattern_length))
-    rarest_patterns = [p for p, _ in pattern_counts.most_common()[:-N_RAREST_PATTERNS-1:-1]]
-
-    print(f"Rarest {len(rarest_patterns)} patterns:", rarest_patterns)
-
-    # Initialize bots
-    bots = {}
-    for pattern in rarest_patterns:
-        bots[pattern] = {
-            "pattern": pattern,
-            "profit": 0,
-            "loss_streak": 0,
-            "bet": base_bet,
-            "index": 0,  # which character in pattern we're on
-            "total_bets": 0,
-        }
-
-    for i in range(total_bets):
-        if i + START_N + pattern_length >= len(dirs):
-            break
-
-        current_window = ''.join(dirs[i+START_N:i+START_N+pattern_length])
-        next_dir = dirs[i+START_N+pattern_length]
-
-        print(f'                                               {current_window}')
-
-        for pattern, bot in bots.items():
-            # Determine anti-pattern bet: opposite of current index in pattern
-            pattern_char = pattern[bot["index"]]
-            bet_dir = 'D' if pattern_char == 'U' else 'U'
-
-            #print(f'-------------------------------------------BET {bet_dir}')
-
-            # Check if loss occurs
-            # Loss occurs if real next candle matches the pattern's current character
-            if next_dir == pattern_char:
-                # bot loses
-                bot["profit"] -= bot["bet"]
-                bot["loss_streak"] += 1
-
-
-                if bot["loss_streak"] >= max_steps:
-                    print(f'[{pattern}] -------------------------------------- STREAK LOSS bet: {bot["bet"]}',
-                          flush=True)
-                    bot["bet"] = base_bet
-                    bot["loss_streak"] = 0
-                    bot["index"] = 0
-                else:
-                    print(f'[{pattern}] loss {bot["bet"]} balance: {bot["profit"]}', flush=True)
-                    bot["bet"] *= multiplier
-                    bot["index"] = (bot["index"] + 1) % len(pattern)
-
-            else:
-                # bot win
-                bot["profit"] += bot["bet"]
-                bot["loss_streak"] = 0
-                bot["index"] = 0
-                print(f'[{pattern}] win {bot["bet"]} balance: {bot["profit"]}')
-                bot["bet"] = base_bet
-
-            bot["total_bets"] += 1
-
-    # Summary
-    total_profit = sum(bot["profit"] for bot in bots.values())
-    print("\n=== Simulation Completed ===")
-    for pattern, bot in bots.items():
-        print(f"[{pattern}] | Profit: {bot['profit']:.2f} | Bets: {bot['total_bets']}")
-    print(f"TOTAL PROFIT: {total_profit:.2f}")
-
-    return bots, total_profit
-asyncio.run(run())
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(run())

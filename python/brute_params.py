@@ -84,14 +84,15 @@ def grid_search_rf(X_train, y_train, X_test, y_test):
         preds = (probas[:, 1] > 0.5).astype(int)
         conf = np.max(probas, axis=1)
 
-        for konff in [0.51,0.52,0.53,0.54,0.55]:
+        for konff in [0.51,0.52,0.53,0.54,0.55,0.56]:
             # Simulate simple fixed-bet strategy
-            payout = 1.923
-            balance = 1000
-            bet = 20
+            payout = 1.96
+            balance = 0
+            bet = 50
             wins = 0
             trades = 0
-
+            lose_in_row = 0
+            max_lose_in_row = 0
             total_hours = len(preds)
 
             for p, real, c in zip(preds, y_test, conf):
@@ -101,12 +102,16 @@ def grid_search_rf(X_train, y_train, X_test, y_test):
                 if p == real:
                     wins += 1
                     balance += bet * (payout - 1)
+                    if max_lose_in_row < lose_in_row:
+                        max_lose_in_row = lose_in_row
+                    lose_in_row = 0
                 else:
                     balance -= bet
+                    lose_in_row+=1
 
             winrate = wins / trades if trades else 0
 
-            print(f'Session ends: trades: {trades}/{total_hours} {trades/total_hours} winrate:{winrate} balance: {balance} konfidence: {konff}')
+            print(f'Session ends: trades: {trades}/{total_hours} {trades/total_hours} winrate:{winrate} balance: {balance} konfidence: {konff} losesrow: {max_lose_in_row}')
 
             if winrate > best_winrate:
                 best_winrate = winrate
@@ -119,47 +124,6 @@ def grid_search_rf(X_train, y_train, X_test, y_test):
     print(f"Winrate: {best_winrate:.3f}, Final Balance: {best_balance:.2f}")
     return best_params
 
-# === Main martingale simulation ===
-def simulate_trading(X_train, y_train, X_test, y_test, rf_params):
-    scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test = scaler.transform(X_test)
-
-    model = RandomForestClassifier(
-        n_estimators=rf_params[0],
-        max_depth=rf_params[1],
-        min_samples_split=rf_params[2],
-        min_samples_leaf=rf_params[3],
-        random_state=42,
-        n_jobs=-1
-    )
-    model.fit(X_train, y_train)
-
-    probas = model.predict_proba(X_test)
-    preds = (probas[:, 1] > 0.5).astype(int)
-    conf = np.max(probas, axis=1)
-
-    payout = 1.923
-    balance = 1000
-    bet = 20
-    wins = 0
-    trades = 0
-
-    for p, real, c in zip(preds, y_test, conf):
-        if c < 0.54:  # skip low-confidence
-            continue
-        trades += 1
-        if p == real:
-            wins += 1
-            balance += bet * (payout - 1)
-        else:
-            balance -= bet
-
-    winrate = wins / trades if trades else 0
-    print(f"\n=== Final Simulation ===")
-    print(f"Trades: {trades}, Winrate: {winrate:.3f}, Balance: {balance:.2f}")
-    return model, scaler
-
 # === Run ===
 async def run():
     db = DbProvider()
@@ -171,15 +135,13 @@ async def run():
     X, y = build_features(df, lookback_hours=48)  # last 1 day; can increase
 
     # Split train/test (e.g., last 1000 samples for testing)
-    split_idx = len(X) - 1000
+    split_idx = len(X) - 24*7*4
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 
     # Grid search best RF parameters
     best_params = grid_search_rf(X_train, y_train, X_test, y_test)
 
-    # Simulate trading with best parameters
-    simulate_trading(X_train, y_train, X_test, y_test, best_params)
 
 if __name__ == "__main__":
     import asyncio

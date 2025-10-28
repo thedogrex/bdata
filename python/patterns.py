@@ -5,6 +5,7 @@ from sklearn.preprocessing import StandardScaler
 
 from db import DbProvider
 
+lookback_hours = 48
 
 def aggregate_timeframe(df, hours):
     df = df.copy()
@@ -47,12 +48,12 @@ def martingale_multi_tf(res):
 
     # === Build features for training ===
     X, y = [], []
-    for i in range(24, len(df) - 1):  # 24 hours = 1 day
+    for i in range(lookback_hours, len(df) - 1):
         features = np.concatenate([
-            df["dir"].iloc[i - 24:i].values,  # last 24 hourly candles (1 day)
-            df["dir_4h"].iloc[i - 6:i].values,  # last 6 4-hour candles (1 day)
-            df["dir_12h"].iloc[i - 2:i].values,  # last 2 12-hour candles (1 day)
-            df["dir_24h"].iloc[i - 1:i].values  # last 1 daily candle (1 day)
+            df["dir"].iloc[i - lookback_hours:i].values,  # last 1h candles
+            df["dir_4h"].iloc[i - lookback_hours//4:i].values,  # last 4h candles
+            df["dir_12h"].iloc[i - lookback_hours//12:i].values, # last 12h candles
+            df["dir_24h"].iloc[i - lookback_hours//24:i].values  # last 24h candles
         ])
         X.append(features)
         y.append(df["dir"].iloc[i + 1])
@@ -60,7 +61,7 @@ def martingale_multi_tf(res):
     X, y = np.array(X), np.array(y)
 
     # === Split for training/testing ===
-    split_idx = int(len(X) * 1) - 24*7*4*12
+    split_idx = int(len(X) * 1) - 24*7
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 
@@ -69,7 +70,12 @@ def martingale_multi_tf(res):
     X_train = scaler.fit_transform(X_train)
     X_test = scaler.transform(X_test)
 
-    model = RandomForestClassifier(n_estimators=200, max_depth=16, random_state=42)
+    #est:100 max_depth:16 min_split:2 min_leaf:1
+    model = RandomForestClassifier(n_estimators=200,
+                                   max_depth=8,
+                                   min_samples_split=4,
+                                   min_samples_leaf=1,
+                                   random_state=42)
     model.fit(X_train, y_train)
 
     # === Predict and simulate ===
@@ -77,11 +83,13 @@ def martingale_multi_tf(res):
     preds = (probas[:, 1] > 0.5).astype(int)
     conf = np.max(probas, axis=1)
 
-    payout = 1.923
-    balance = 1000
-    bet = 20
+    payout = 1.9607
+    balance = 0
+    bet = 1200
     wins = 0
     trades = 0
+
+    konf = 0.54
 
     n_hours = 0
     correct = 0
@@ -90,7 +98,7 @@ def martingale_multi_tf(res):
     max_not_correct_row = 0
     for p, real, c in zip(preds, y_test, conf):
         n_hours += 1
-        if c < 0.54:
+        if c < konf:
             continue  # skip low-confidence trades
 
         trades += 1
@@ -109,7 +117,7 @@ def martingale_multi_tf(res):
             print(f'[{trades}] prediction: {p} | real: {real} | balance: {balance}')
 
     winrate = wins / trades if trades else 0
-    roi = (balance - 1000) / trades if trades else 0
+    roi = (balance) / trades if trades else 0
 
     print(f'max_not_correct_in_row: {max_not_correct_row}')
 
@@ -118,7 +126,7 @@ def martingale_multi_tf(res):
     print(f'hours: {n_hours}')
     print(f"Winrate: {winrate:.3f}")
     print(f'correct/not correct: {correct}/{not_correct}')
-    print(f"Total Profit: {balance - 1000:.2f}")
+    print(f"Total Profit: {balance:.2f}")
     print(f"Average Profit/Trade (ROI): {roi:.3f}")
     print(f"Balance: {balance:.2f}")
 

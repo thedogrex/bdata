@@ -3,23 +3,26 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 
+from db import DbProvider
+
+
 def aggregate_timeframe(df, hours):
     df = df.copy()
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="s", errors="coerce")
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="us", errors="coerce")
     df = df.set_index("open_time").sort_index()
-    agg = df.resample(f"{hours}h").agg({
+
+    # Resample strictly by time
+    agg = df.resample(f"{hours}H").agg({
         "open": "first",
         "close": "last",
-        "high": "max",
-        "low": "min",
-        "volume": "sum"
     }).dropna().reset_index()
+
     agg["dir"] = (agg["close"] > agg["open"]).astype(int)
     return agg
 
 def martingale_multi_tf(res):
     # Convert DB tuples → DataFrame
-    df = pd.DataFrame(res, columns=["open_time", "open", "high", "low", "close", "volume"])
+    df = pd.DataFrame(res, columns=["open_time", "open", "close", "dir"])
     df = df.sort_values("open_time").reset_index(drop=True)
 
     # Aggregate to higher TFs
@@ -44,12 +47,12 @@ def martingale_multi_tf(res):
 
     # === Build features for training ===
     X, y = [], []
-    for i in range(10, len(df) - 1):
+    for i in range(24, len(df) - 1):
         features = np.concatenate([
-            df["dir"].iloc[i-6:i].values,        # last 6 1h
-            df["dir_4h"].iloc[i-3:i].values,     # last 3 4h
-            df["dir_12h"].iloc[i-2:i].values,    # last 2 12h
-            [df["dir_24h"].iloc[i]]              # last 1 daily
+            df["dir"].iloc[i - 24:i].values,  # last 24 1h
+            df["dir_4h"].iloc[i - 6:i].values,  # last 6 4h
+            df["dir_12h"].iloc[i - 4:i].values,  # last 4 12h
+            df["dir_24h"].iloc[i - 2:i].values  # last 2 daily
         ])
         X.append(features)
         y.append(df["dir"].iloc[i + 1])
@@ -57,7 +60,7 @@ def martingale_multi_tf(res):
     X, y = np.array(X), np.array(y)
 
     # === Split for training/testing ===
-    split_idx = int(len(X) * 0.98)
+    split_idx = int(len(X) * 1) - 24*7*4
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 
@@ -81,15 +84,22 @@ def martingale_multi_tf(res):
     wins = 0
     trades = 0
 
+    n_hours = 0
+    correct = 0
+    not_correct = 0
     for p, real, c in zip(preds, y_test, conf):
-        if c < 0.6:
+        n_hours+=1
+        if c < 0.54:
             continue
+
         trades += 1
         if p == real:
+            correct+=1
             balance += bet * (payout - 1)
             wins += 1
             bet = base_bet  # reset after win
         else:
+            not_correct+=1
             balance -= bet
             bet *= 2
             if bet > base_bet * 2 * 2 * 2 * 2 * 2:
@@ -100,7 +110,9 @@ def martingale_multi_tf(res):
 
     print(f"\n=== Multi-TF Martingale Results ===")
     print(f"Trades: {trades}")
+    print(f'hours: {n_hours}')
     print(f"Winrate: {winrate:.3f}")
+    print(f'correct/not correct: {correct}/{not_correct}')
     print(f"Total Profit: {balance - 1000:.2f}")
     print(f"Average Profit/Trade (ROI): {roi:.3f}")
     print(f"Balance: {balance:.2f}")
@@ -109,15 +121,9 @@ def martingale_multi_tf(res):
 
 # Example usage:
 async def run():
-    # Example `res` structure from your DB
-    # res = [(timestamp, open, high, low, close, volume), ...]
-    # Make sure timestamps are in seconds (UNIX)
-    import random, time
-    now = int(time.time())
-    res = [
-        (now - i * 3600, 100 + random.random(), 101 + random.random(), 99 - random.random(), 100 + random.uniform(-1, 1), random.random()*100)
-        for i in range(40000, 0, -1)
-    ]
+    db = DbProvider()
+    res = await db.select("candles", ["open_time", "open_price", "close_price", "dir"],
+                          None, 0, "ASC")
     martingale_multi_tf(res)
 
 if __name__ == "__main__":

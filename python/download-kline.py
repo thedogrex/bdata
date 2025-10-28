@@ -21,7 +21,6 @@ from utility import download_file, get_all_symbols, get_parser, get_start_end_da
   get_path
 
 db = DbProvider()
-TS_RE = re.compile(r'^\d{13}$')  # 13-digit milliseconds timestamp
 
 async def download_daily_klines(trading_type, symbols, num_symbols, intervals, dates, start_date, end_date, folder):
   current = 0
@@ -105,9 +104,13 @@ async def process_file_like(f):
             open_price = float(row[1])
             close_price = float(row[4])
             direction = "U" if close_price > open_price else "D"
+            optime = row[0]
 
+            # convert to nanoseconds
+            if(len(optime)==13):
+                optime = optime + '000'
 
-            await db.insert_one("candles", fields={"open_time": int(row[0]),
+            await db.insert_one("candles", fields={"open_time": int(optime),
                                              "open_price" :  open_price,
                                              "close_price" : close_price,
                                              "dir" : direction})
@@ -129,7 +132,7 @@ if __name__ == "__main__":
 
     print(dates)
 
-    start_date = '2025-01-01'
+    start_date = '2018-01-01'
 
     asyncio.run(download_daily_klines('spot', symbols, num_symbols, ["1h"], dates, start_date, None, folder))
 

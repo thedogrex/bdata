@@ -1,9 +1,9 @@
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
-import itertools
-from datetime import datetime
+from datetime import datetime, timezone
 from db import DbProvider
+
 
 # === Aggregate higher timeframes ===
 def aggregate_timeframe(df, hours):
@@ -17,6 +17,7 @@ def aggregate_timeframe(df, hours):
     agg["dir"] = (agg["close"] > agg["open"]).astype(int)
     return agg
 
+
 # === Align higher TF directions back to 1h ===
 def align_dirs(base_len, higher_df):
     return np.interp(
@@ -24,6 +25,7 @@ def align_dirs(base_len, higher_df):
         np.linspace(0, base_len - 1, len(higher_df)),
         higher_df["dir"]
     ).round().astype(int)
+
 
 # === Build features ===
 def build_features(df, lookback_hours=24):
@@ -38,16 +40,15 @@ def build_features(df, lookback_hours=24):
 
     X, y, times = [], [], []
     for i in range(lookback_hours, len(df) - 1):
-        features = np.concatenate([
-            df["dir"].iloc[i - lookback_hours:i].values,
-            df["dir_4h"].iloc[i - lookback_hours // 4:i].values,
-            df["dir_12h"].iloc[i - lookback_hours // 12:i].values,
-            df["dir_24h"].iloc[i - lookback_hours // 24:i].values
-        ])
+        features = np.concatenate([df["dir"].iloc[i - lookback_hours:i].values,
+                                   df["dir_4h"].iloc[i - lookback_hours // 4:i].values,
+                                   df["dir_12h"].iloc[i - lookback_hours // 12:i].values,
+                                   df["dir_24h"].iloc[i - lookback_hours // 24:i].values])
         X.append(features)
         y.append(df["dir"].iloc[i + 1])
         times.append(df["open_time"].iloc[i + 1])
     return np.array(X), np.array(y), np.array(times)
+
 
 # === Train RandomForest ===
 def train_rf(X_train, y_train):
@@ -62,113 +63,70 @@ def train_rf(X_train, y_train):
     model.fit(X_train, y_train)
     return model
 
-# === Predict one-step-ahead ===
-def backtest_hourly(df, model, lookback_hours=48, start_timestamp=None):
-    df = df.copy()
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="us", errors="coerce")
-    df["dir"] = (df["close"] > df["open"]).astype(int)
 
-    # выбираем октябрьские данные
-    df_oct = df[df["open_time"] >= pd.to_datetime(start_timestamp, unit="us")]
-    df_train = df[df["open_time"] < pd.to_datetime(start_timestamp, unit="us")]
+# === Predict the next hour's candle ===
+def predict_next_candle(model, df, lookback_hours=48, last_known_ts=None):
 
-    results = []
-    payout = 1.96
-    bet = 100
+    # Select the data up to the last known timestamp (October 27 in this case)
+    df_last = df[df["open_time"] < last_known_ts]
 
-    print('backtest starts')
+    # Build features for the most recent data
+    X_live, _, _ = build_features(df_last, lookback_hours=lookback_hours)
+    if len(X_live) == 0:
+        print("Not enough data to predict.")
+        return None
 
-    for i in range(len(df_oct)):
-        current_row = df_oct.iloc[i]
-        ts = current_row["open_time"]
+    # Reshape for prediction (the most recent features)
+    X_pred = X_live[-1].reshape(1, -1)
 
-        # Берём историю до текущего момента
-        hist = df[df["open_time"] < ts].tail(lookback_hours * 2)
-        X_live, _, _ = build_features(hist, lookback_hours=lookback_hours)
-        if len(X_live) == 0:
-            continue
-        X_pred = X_live[-1].reshape(1, -1)
+    # Predict the next candle
+    proba = model.predict_proba(X_pred)[0]
+    pred = int(proba[1] > 0.5)
+    conf = proba[1]
 
-        proba = model.predict_proba(X_pred)[0]
-        pred = int(proba[1] > 0.5)
-        conf = proba[1]
+    # Calculate the start time of the predicted candle (next hour)
+    predicted_time = last_known_ts # + 3_600_000_000
 
-        print(f'predict {proba}')
+    # Map the prediction to U (Up) or D (Down)
+    prediction = "U" if pred == 1 else "D"
 
-        real = int(current_row["dir"])
-        results.append({
-            "timestamp": ts,
-            "pred": pred,
-            "real": real,
-            "conf": conf
-        })
+    # Print the prediction and the predicted candle start time
+    print(f"Prediction for the candle starting at {predicted_time}: {prediction} (Confidence: {conf:.2f})")
+    return prediction, conf, predicted_time
 
-    return pd.DataFrame(results)
 
-# === Daily report ===
-def daily_stats(pred_df):
-    pred_df["date"] = pred_df["timestamp"].dt.date
-    out_lines = []
-    for day, group in pred_df.groupby("date"):
-        day_num = day.day
-        pred_seq = []
-        real_seq = []
-        stat_seq = []
-        wins, total = 0, 0
-        balance = 0
-        payout = 1.96
-        bet = 100
-
-        for i, row in enumerate(group.itertuples(), start=1):
-            p = "U" if row.pred == 1 else "D"
-            r = "U" if row.real == 1 else "D"
-            if row.pred == row.real:
-                s = "+"
-                wins += 1
-                balance += bet * (payout - 1)
-            else:
-                s = "-"
-                balance -= bet
-            total += 1
-            pred_seq.append(f"{i:02d}.{p}")
-            real_seq.append(f"{i:02d}.{r}")
-            stat_seq.append(f"{i:02d}.{s}")
-
-        winrate = wins / total * 100 if total > 0 else 0
-        out_lines.append(f"\nOCT: {day_num}")
-        out_lines.append("PRED: " + " ".join(pred_seq))
-        out_lines.append("RESU: " + " ".join(real_seq))
-        out_lines.append("STATS: " + " ".join(stat_seq))
-        out_lines.append(f"Winrate: {winrate:.1f}%  Balance: {balance:+.0f}")
-    return "\n".join(out_lines)
-
-# === Main async run ===
+# === Main async run to predict the next candle ===
 async def run():
     db = DbProvider()
     res = await db.select("candles", ["open_time", "open_price", "close_price", "dir"],
                           None, 0, "ASC")
-    df = pd.DataFrame(res, columns=["open_time", "open", "close", "dir"]).sort_values("open_time").reset_index(drop=True)
+    df = pd.DataFrame(res, columns=["open_time", "open", "close", "dir"]).reset_index(
+        drop=True)
 
-    # Разделение по времени (до 1 октября тренировка)
-    cutoff_ts = 1759276800000000  # timestamp 2024-09-30 00:00:00 UTC в микросекундах
+    # Use data up to the end of October 27 (2025-10-27 23:00:00)
+    cutoff_ts = 1759276800_000_000  # timestamp 2025-10-27 23:00:00 UTC in microseconds
+
+
+    # Filter the data for the training and test sets
     df_train = df[df["open_time"] < cutoff_ts]
     df_test = df[df["open_time"] >= cutoff_ts]
 
-    print(f'train len: {len(df_train)}')
-
-    # Обучаем модель на данных до октября
+    # Train the model on data up to the cutoff point
     X_train, y_train, _ = build_features(df_train, lookback_hours=48)
     model = train_rf(X_train, y_train)
 
-    print(f'model trained')
+    # Predict the first hour candle of October 28, 2025 (starting from 00:00:00)
+    prediction, confidence, predicted_time = predict_next_candle(model, df, lookback_hours=48,
+                                                                 last_known_ts=cutoff_ts)
 
-    # Прогоняем бэктест по октябрю
-    pred_df = backtest_hourly(df, model, lookback_hours=48, start_timestamp=cutoff_ts)
-    report = daily_stats(pred_df)
+    timestamp_s = predicted_time / 1_000_000
+    utc_datetime = datetime.fromtimestamp(timestamp_s, timezone.utc)
 
-    print(report)
+    # Output the prediction, confidence, and predicted candle start time
+    print(f"Predicted candle for the next hour ({utc_datetime}): {prediction} (Confidence: {confidence:.2f})")
 
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(run())

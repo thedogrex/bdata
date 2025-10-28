@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
-
+S = 36000000000 # 1hour value
 from db import DbProvider
 
 lookback_hours = 48

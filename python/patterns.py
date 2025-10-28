@@ -47,12 +47,12 @@ def martingale_multi_tf(res):
 
     # === Build features for training ===
     X, y = [], []
-    for i in range(24, len(df) - 1):
+    for i in range(24, len(df) - 1):  # 24 hours = 1 day
         features = np.concatenate([
-            df["dir"].iloc[i - 24:i].values,  # last 24 1h
-            df["dir_4h"].iloc[i - 6:i].values,  # last 6 4h
-            df["dir_12h"].iloc[i - 4:i].values,  # last 4 12h
-            df["dir_24h"].iloc[i - 2:i].values  # last 2 daily
+            df["dir"].iloc[i - 24:i].values,  # last 24 hourly candles (1 day)
+            df["dir_4h"].iloc[i - 6:i].values,  # last 6 4-hour candles (1 day)
+            df["dir_12h"].iloc[i - 2:i].values,  # last 2 12-hour candles (1 day)
+            df["dir_24h"].iloc[i - 1:i].values  # last 1 daily candle (1 day)
         ])
         X.append(features)
         y.append(df["dir"].iloc[i + 1])
@@ -60,7 +60,7 @@ def martingale_multi_tf(res):
     X, y = np.array(X), np.array(y)
 
     # === Split for training/testing ===
-    split_idx = int(len(X) * 1) - 24*7*4
+    split_idx = int(len(X) * 1) - 24*7*4*12
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 
@@ -69,7 +69,7 @@ def martingale_multi_tf(res):
     X_train = scaler.fit_transform(X_train)
     X_test = scaler.transform(X_test)
 
-    model = RandomForestClassifier(n_estimators=200, max_depth=8, random_state=42)
+    model = RandomForestClassifier(n_estimators=200, max_depth=16, random_state=42)
     model.fit(X_train, y_train)
 
     # === Predict and simulate ===
@@ -77,36 +77,41 @@ def martingale_multi_tf(res):
     preds = (probas[:, 1] > 0.5).astype(int)
     conf = np.max(probas, axis=1)
 
-    payout = 1.92
+    payout = 1.923
     balance = 1000
     bet = 20
-    base_bet = 20
     wins = 0
     trades = 0
 
     n_hours = 0
     correct = 0
     not_correct = 0
+    not_correct_row = 0
+    max_not_correct_row = 0
     for p, real, c in zip(preds, y_test, conf):
-        n_hours+=1
+        n_hours += 1
         if c < 0.54:
-            continue
+            continue  # skip low-confidence trades
 
         trades += 1
         if p == real:
-            correct+=1
-            balance += bet * (payout - 1)
+            correct += 1
             wins += 1
-            bet = base_bet  # reset after win
+            balance += bet * (payout - 1)
+            if max_not_correct_row < not_correct_row:
+                max_not_correct_row = not_correct_row
+            not_correct_row = 0
+            print(f'[{trades}] prediction: {p} | real: {real} | balance: {balance}')
         else:
-            not_correct+=1
-            balance -= bet
-            bet *= 2
-            if bet > base_bet * 2 * 2 * 2 * 2 * 2:
-                bet = base_bet  # stop-loss reset
+            not_correct += 1
+            not_correct_row +=1
+            balance -= bet  # lose only the fixed bet amount
+            print(f'[{trades}] prediction: {p} | real: {real} | balance: {balance}')
 
     winrate = wins / trades if trades else 0
     roi = (balance - 1000) / trades if trades else 0
+
+    print(f'max_not_correct_in_row: {max_not_correct_row}')
 
     print(f"\n=== Multi-TF Martingale Results ===")
     print(f"Trades: {trades}")

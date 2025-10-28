@@ -61,7 +61,7 @@ def martingale_multi_tf(res):
     X, y = np.array(X), np.array(y)
 
     # === Split for training/testing ===
-    split_idx = int(len(X) * 1) - 24*7
+    split_idx = int(len(X) * 1) - 24*7*4
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 
@@ -85,7 +85,7 @@ def martingale_multi_tf(res):
 
     payout = 1.9607
     balance = 0
-    bet = 1200
+    bet = 100
     wins = 0
     trades = 0
 

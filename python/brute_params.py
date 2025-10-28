@@ -88,7 +88,7 @@ def grid_search_rf(X_train, y_train, X_test, y_test):
             # Simulate simple fixed-bet strategy
             payout = 1.96
             balance = 0
-            bet = 50
+            bet = 100
             wins = 0
             trades = 0
             lose_in_row = 0
@@ -135,7 +135,7 @@ async def run():
     X, y = build_features(df, lookback_hours=48)  # last 1 day; can increase
 
     # Split train/test (e.g., last 1000 samples for testing)
-    split_idx = len(X) - 24*7*4
+    split_idx = len(X) - 24*7*4*12
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 

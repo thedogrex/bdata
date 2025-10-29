@@ -1,7 +1,9 @@
+import time
+
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from db import DbProvider
 
 
@@ -53,9 +55,9 @@ def build_features(df, lookback_hours=24):
 # === Train RandomForest ===
 def train_rf(X_train, y_train):
     model = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=12,
-        min_samples_split=2,
+        n_estimators=100,
+        max_depth=16,
+        min_samples_split=4,
         min_samples_leaf=1,
         random_state=42,
         n_jobs=-1
@@ -64,69 +66,126 @@ def train_rf(X_train, y_train):
     return model
 
 
-# === Predict the next hour's candle ===
+# === Predict next hour candle ===
 def predict_next_candle(model, df, lookback_hours=48, last_known_ts=None):
 
-    # Select the data up to the last known timestamp (October 27 in this case)
+    tbf = time.time()
     df_last = df[df["open_time"] < last_known_ts]
+    print(f'{time.time() - tbf} dataframe by time sort')
 
-    # Build features for the most recent data
+    tb = time.time()
     X_live, _, _ = build_features(df_last, lookback_hours=lookback_hours)
     if len(X_live) == 0:
         print("Not enough data to predict.")
         return None
+    print(f'{time.time()-tb} features build')
 
-    # Reshape for prediction (the most recent features)
     X_pred = X_live[-1].reshape(1, -1)
-
-    # Predict the next candle
     proba = model.predict_proba(X_pred)[0]
     pred = int(proba[1] > 0.5)
     conf = proba[1]
 
-    # Calculate the start time of the predicted candle (next hour)
-    predicted_time = last_known_ts # + 3_600_000_000
-
-    # Map the prediction to U (Up) or D (Down)
     prediction = "U" if pred == 1 else "D"
-
-    # Print the prediction and the predicted candle start time
-    print(f"Prediction for the candle starting at {predicted_time}: {prediction} (Confidence: {conf:.2f})")
-    return prediction, conf, predicted_time
+    return prediction, conf
 
 
-# === Main async run to predict the next candle ===
+# === Main async simulation for October 1st to 25th ===
 async def run():
     db = DbProvider()
     res = await db.select("candles", ["open_time", "open_price", "close_price", "dir"],
                           None, 0, "ASC")
-    df = pd.DataFrame(res, columns=["open_time", "open", "close", "dir"]).reset_index(
-        drop=True)
+    df = pd.DataFrame(res, columns=["open_time", "open", "close", "dir"]).reset_index(drop=True)
 
-    # Use data up to the end of October 27 (2025-10-27 23:00:00)
-    cutoff_ts = 1759276800_000_000  # timestamp 2025-10-27 23:00:00 UTC in microseconds
-
-
-    # Filter the data for the training and test sets
-    df_train = df[df["open_time"] < cutoff_ts]
-    df_test = df[df["open_time"] >= cutoff_ts]
-
-    # Train the model on data up to the cutoff point
+    # === Train the model up to the start of October 1 ===
+    df_train = df[df["open_time"] < int(datetime(2025, 10, 1, 0, 0, 0, tzinfo=timezone.utc).timestamp() * 1_000_000)]
     X_train, y_train, _ = build_features(df_train, lookback_hours=48)
     model = train_rf(X_train, y_train)
 
-    # Predict the first hour candle of October 28, 2025 (starting from 00:00:00)
-    prediction, confidence, predicted_time = predict_next_candle(model, df, lookback_hours=48,
-                                                                 last_known_ts=cutoff_ts)
+    # === Loop through each day from October 1st to October 25th ===
+    overall_wins = 0
+    overall_losses = 0
+    overall_balance = 0.0
 
-    timestamp_s = predicted_time / 1_000_000
-    utc_datetime = datetime.fromtimestamp(timestamp_s, timezone.utc)
+    for day in range(1, 26):
+        # === Filter data for the current day ===
+        start_time = datetime(2025, 10, day, 0, 0, 0, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(days=1)
 
-    # Output the prediction, confidence, and predicted candle start time
-    print(f"Predicted candle for the next hour ({utc_datetime}): {prediction} (Confidence: {confidence:.2f})")
+        start_ts = int(start_time.timestamp() * 1_000_000)
+        end_ts = int(end_time.timestamp() * 1_000_000)
+
+        df_day = df[(df["open_time"] >= start_ts) & (df["open_time"] < end_ts)]
+
+        # === Betting simulation parameters ===
+        balance = 0.0
+        bet_size = 100
+        win_coef = 1.96
+        wins = 0
+        losses = 0
+
+        # === Loop over each hour in the current day ===
+        for hour in range(24):
+            current_ts = df_day["open_time"].iloc[hour]
+
+            # Predict next candle
+            tt = time.time()
+            prediction, confidence = predict_next_candle(model, df, lookback_hours=48, last_known_ts=current_ts)
+            print(f'prediction time: {time.time()-tt}')
+
+            pred_dir = 1 if prediction == "U" else 0
+
+            # Display prediction info
+            ts_seconds = current_ts / 1_000_000
+            candle_time = datetime.fromtimestamp(ts_seconds, timezone.utc)
+            print(f"\n[{hour+1}/24] Candle at {candle_time} — Predicted: {prediction} (Conf: {confidence:.2f})")
+
+            # Get the real direction from the dataframe (actual values for the current day)
+            real_value = 1 if df_day["dir"].iloc[hour]=='U' else 0
+
+            # Simulate bet
+            if confidence < 0.53:
+                print('Skip due to low confidence')
+                continue
+
+            if real_value == pred_dir:
+                profit = bet_size * (win_coef - 1)
+                balance += profit
+                wins += 1
+                result = "WIN"
+            else:
+                balance -= bet_size
+                losses += 1
+                result = "LOSS"
+
+            print(f"→ Result: {result} | Current Balance: ${balance:.2f} pred: {pred_dir} real: {real_value}")
+
+        # === Daily Summary ===
+        daily_total_bets = wins + losses
+        daily_winrate = (wins / daily_total_bets) * 100 if daily_total_bets > 0 else 0
+
+        print("\n=== Daily Summary ===")
+        print(f"Day: {start_time.date()}")
+        print(f"Total Bets: {daily_total_bets}")
+        print(f"Wins: {wins} | Losses: {losses}")
+        print(f"Winrate: {daily_winrate:.2f}%")
+        print(f"Final Balance for the Day: ${balance:.2f}")
+
+        # Update overall stats
+        overall_wins += wins
+        overall_losses += losses
+        overall_balance += balance
+
+    # === Overall Summary ===
+    total_bets = overall_wins + overall_losses
+    overall_winrate = (overall_wins / total_bets) * 100 if total_bets > 0 else 0
+
+    print("\n=== Overall Simulation Summary ===")
+    print(f"Total Bets: {total_bets}")
+    print(f"Wins: {overall_wins} | Losses: {overall_losses}")
+    print(f"Winrate: {overall_winrate:.2f}%")
+    print(f"Final Overall Balance: ${overall_balance:.2f}")
 
 
 if __name__ == "__main__":
     import asyncio
-
     asyncio.run(run())

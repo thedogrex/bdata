@@ -5,6 +5,7 @@ from datetime import *
 import urllib.request
 from argparse import ArgumentParser, RawTextHelpFormatter, ArgumentTypeError
 from enums import *
+import zipfile
 
 def get_destination_dir(file_url, folder=None):
   store_directory = os.environ.get('STORE_DIRECTORY')
@@ -34,7 +35,6 @@ def download_file(base_path, file_name, date_range=None, folder=None):
     date_range = date_range.replace(" ","_")
     base_path = os.path.join(base_path, date_range)
   save_path = get_destination_dir(os.path.join(base_path, file_name), folder)
-  
 
   if os.path.exists(save_path):
     print("\nfile already exists! {}".format(save_path))
@@ -45,33 +45,50 @@ def download_file(base_path, file_name, date_range=None, folder=None):
     Path(get_destination_dir(base_path)).mkdir(parents=True, exist_ok=True)
 
   try:
-    download_url = get_download_url(download_path)
-    print(f'download url: {download_url}')
-    dl_file = urllib.request.urlopen(download_url)
-    length = dl_file.getheader('content-length')
-    if length:
-      length = int(length)
-      blocksize = max(4096,length//100)
+      download_url = get_download_url(download_path)
+      print(f'download url: {download_url}')
 
-    with open(save_path, 'wb') as out_file:
-      dl_progress = 0
-      print("\nFile Download: {}".format(save_path))
-      while True:
-        buf = dl_file.read(blocksize)   
-        if not buf:
-          break
-        dl_progress += len(buf)
-        out_file.write(buf)
-        done = int(50 * dl_progress / length)
-        sys.stdout.write("\r[%s%s]" % ('#' * done, '.' * (50-done)) )    
-        sys.stdout.flush()
+      for attempt in range(3):  # retry up to 3 times
+          try:
+              dl_file = urllib.request.urlopen(download_url, timeout=15)
+              length = dl_file.getheader('content-length')
+              if length:
+                  length = int(length)
+                  blocksize = max(4096, length // 100)
+              else:
+                  blocksize = 4096
 
-        return save_path
+              with open(save_path, 'wb') as out_file:
+                  dl_progress = 0
+                  print(f"\nFile Download: {save_path}")
+                  while True:
+                      buf = dl_file.read(blocksize)
+                      if not buf:
+                          break
+                      dl_progress += len(buf)
+                      out_file.write(buf)
+                      if length:
+                          done = int(50 * dl_progress / length)
+                          sys.stdout.write("\r[%s%s]" % ('#' * done, '.' * (50 - done)))
+                          sys.stdout.flush()
+                  print()
+
+              # check if the downloaded file is a valid zip
+              with zipfile.ZipFile(save_path, 'r') as z:
+                  if z.testzip() is None:
+                      return save_path  # success
+                  else:
+                      print(f"⚠ Corrupt zip detected, retrying... (attempt {attempt + 1})")
+
+          except Exception as e:
+              print(f"\n⚠ Attempt {attempt + 1} failed: {e}")
+
+      print(f"❌ Failed to download a valid zip after 3 attempts: {save_path}")
+      return None
 
   except urllib.error.HTTPError:
-    print("\nFile not found: {}".format(download_url))
-    return None
-    pass
+      print(f"\nFile not found: {download_url}")
+      return None
 
 def convert_to_date_object(d):
   year, month, day = [int(x) for x in d.split('-')]

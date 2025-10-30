@@ -22,9 +22,14 @@ from utility import download_file, get_all_symbols, get_parser, get_start_end_da
 
 db = DbProvider()
 
+global failed_files
+failed_files = []
+
 async def download_daily_klines(trading_type, symbols, num_symbols, intervals, dates, start_date, end_date, folder):
   current = 0
   date_range = None
+
+  global failed_files
 
   if start_date and end_date:
     date_range = start_date + " " + end_date
@@ -54,12 +59,36 @@ async def download_daily_klines(trading_type, symbols, num_symbols, intervals, d
           zip_path = download_file(path, file_name, date_range, folder)
 
           if zip_path:
-            await fill_in_zip_to_db(zip_path)
+            if is_zip_valid(zip_path):
+              await fill_in_zip_to_db(zip_path)
+            else:
+                failed_files.append(zip_path)  # список повреждённых файлов
+
 
     current += 1
 
 
+    with open('failed.txt', 'w', encoding='utf-8') as f:
+        for file_path in failed_files:
+            f.write(file_path + "\n")
+
+
+
+def is_zip_valid(path):
+    try:
+        with zipfile.ZipFile(path, 'r') as z:
+            bad_file = z.testzip()
+            if bad_file:
+                print(f"Corrupt file inside zip: {bad_file}")
+                return False
+            return True
+    except zipfile.BadZipFile:
+        print(f"Bad zip file: {path}")
+        return False
+
 async def fill_in_zip_to_db(path):
+
+    print(f'zip path: {path}')
     with zipfile.ZipFile(path, 'r') as z:
         csv_name = find_csv_in_zip(z)
         if csv_name is None:
@@ -101,19 +130,37 @@ async def process_file_like(f):
             continue
 
         if row[0].isdigit():
-            open_price = float(row[1])
-            close_price = float(row[4])
-            direction = "U" if close_price > open_price else "D"
+
+            open = float(row[1])
+            high = float(row[2])
+            low = float(row[3])
+            close = float(row[4])
+            volume = float(row[5])
+            close_time = int(row[6])
+            quota_volume = float(row[7])
+            trades = int(row[8])
+            taker_base_volume = float(row[9])
+            taker_quota_volume = float(row[10])
+
             optime = row[0]
 
             # convert to nanoseconds
             if(len(optime)==13):
                 optime = optime + '000'
 
-            await db.insert_one("candles", fields={"open_time": int(optime),
-                                             "open_price" :  open_price,
-                                             "close_price" : close_price,
-                                             "dir" : direction})
+            await db.insert_one("c_15m", fields={
+                'open_time' : int(optime),
+                'open' : open,
+                'high' : high,
+                'low' : low,
+                'close' : close,
+                'volume' : volume,
+                'close_time' : close_time,
+                'quota_volume' : quota_volume,
+                'trades' : trades,
+                'taker_base_volume' : taker_base_volume,
+                'taker_quota_volume' : taker_quota_volume
+            })
 
     print(f'candles {candles}')
 
@@ -132,7 +179,7 @@ if __name__ == "__main__":
 
     print(dates)
 
-    start_date = '2018-01-01'
+    start_date = '2017-09-01'
 
-    asyncio.run(download_daily_klines('spot', symbols, num_symbols, ["1h"], dates, start_date, None, folder))
+    asyncio.run(download_daily_klines('spot', symbols, num_symbols, ["15m"], dates, start_date, None, folder))
 

@@ -12,8 +12,8 @@ db = DbProvider()
 # === Constants ===
 WIN_COEF = 1.96          # payout multiplier
 BASE_BET = 3             # fixed base bet
-K_MOST_RARE_PATTERNS = 4 # simulate top-K rarest patterns
-MAX_PATTERN_LEN = 4      # max pattern length to search for
+K_MOST_RARE_PATTERNS = 2 # simulate top-K rarest patterns
+MAX_PATTERN_LEN = 6      # max pattern length to search for
 
 # === Utils ===
 def to_microseconds_timestamp(date_string: str) -> int:
@@ -178,15 +178,6 @@ async def simulate_betting(df, training_start_date, training_end_date, simulatio
         print(f"Sessions lost: {sessions_lost}")
         print("-" * 60)
 
-        # Daily summary
-        print("📅 Daily stats:")
-        for d, s in daily_stats.items():
-            print(
-                f"{d}: Profit={s['profit']:.2f}, Wins={s['wins']}, Losses={s['losses']}, "
-                f"MinBal={s['min_balance']:.2f}, MaxBal={s['max_balance']:.2f}"
-            )
-        print("=" * 80)
-
     # === Global summary ===
     total_wins = sum(p["wins"] for p in pattern_stats.values())
     total_losses = sum(p["losses"] for p in pattern_stats.values())
@@ -234,7 +225,7 @@ async def run_simulation():
         df,
         training_start_date="2020-01-01",
         training_end_date="2025-01-01",
-        simulation_start_date="2025-10-01",
+        simulation_start_date="2025-01-01",
         simulation_end_date="2025-11-01",
     )
 

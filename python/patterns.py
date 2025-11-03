@@ -1,144 +1,242 @@
 import pandas as pd
-import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
-S = 36000000000 # 1hour value
+import itertools
+from collections import Counter
+import asyncio
 from db import DbProvider
+import datetime
+import sys
+from io import StringIO
 
-lookback_hours = 48
+db = DbProvider()
 
-def aggregate_timeframe(df, hours):
-    df = df.copy()
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="us", errors="coerce")
-    df = df.set_index("open_time").sort_index()
+# === Constants ===
+WIN_COEF = 1.96          # payout multiplier
+BASE_BET = 3             # fixed base bet
+K_MOST_RARE_PATTERNS = 4 # simulate top-K rarest patterns
+MAX_PATTERN_LEN = 4      # max pattern length to search for
 
-    # Resample strictly by time
-    agg = df.resample(f"{hours}H").agg({
-        "open": "first",
-        "close": "last",
-    }).dropna().reset_index()
+# === Utils ===
+def to_microseconds_timestamp(date_string: str) -> int:
+    dt = datetime.datetime.strptime(date_string, "%Y-%m-%d")
+    return int(dt.timestamp() * 1_000_000)
 
-    agg["dir"] = (agg["close"] > agg["open"]).astype(int)
-    return agg
+# === Core Simulation with Logging, Daily Stats, and Pattern Tracking ===
+async def simulate_betting(df, training_start_date, training_end_date, simulation_start_date, simulation_end_date):
 
-def martingale_multi_tf(res):
-    # Convert DB tuples → DataFrame
-    df = pd.DataFrame(res, columns=["open_time", "open", "close", "dir"])
-    df = df.sort_values("open_time").reset_index(drop=True)
+    # --- setup logging to file and console ---
+    class TeeLogger:
+        def __init__(self, *streams):
+            self.streams = streams
+        def write(self, data):
+            for s in self.streams:
+                s.write(data)
+                s.flush()
+        def flush(self):
+            for s in self.streams:
+                s.flush()
 
-    # Aggregate to higher TFs
-    df_4h = aggregate_timeframe(df, 4)
-    df_12h = aggregate_timeframe(df, 12)
-    df_24h = aggregate_timeframe(df, 24)
+    log_file = open("logs.txt", "w", encoding="utf-8")
+    sys.stdout = TeeLogger(sys.__stdout__, log_file)
 
-    # Base direction (1h)
-    df["dir"] = (df["close"] > df["open"]).astype(int)
+    # === Convert to datetime and slice data ===
+    training_start = pd.to_datetime(to_microseconds_timestamp(training_start_date), unit="us")
+    training_end = pd.to_datetime(to_microseconds_timestamp(training_end_date), unit="us")
+    sim_start = pd.to_datetime(to_microseconds_timestamp(simulation_start_date), unit="us")
+    sim_end = pd.to_datetime(to_microseconds_timestamp(simulation_end_date), unit="us")
 
-    # Align aggregated frames back to 1h via interpolation
-    def align_dirs(base_len, higher_df):
-        return np.interp(
-            np.arange(base_len),
-            np.linspace(0, base_len - 1, len(higher_df)),
-            higher_df["dir"]
-        ).round().astype(int)
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="us")
+    df.set_index("open_time", inplace=True)
 
-    df["dir_4h"] = align_dirs(len(df), df_4h)
-    df["dir_12h"] = align_dirs(len(df), df_12h)
-    df["dir_24h"] = align_dirs(len(df), df_24h)
+    train_data = df[(df.index >= training_start) & (df.index <= training_end)]
+    sim_data = df[(df.index >= sim_start) & (df.index <= sim_end)]
 
-    # === Build features for training ===
-    X, y = [], []
-    for i in range(lookback_hours, len(df) - 1):
-        features = np.concatenate([
-            df["dir"].iloc[i - lookback_hours:i].values,  # last 1h candles
-            df["dir_4h"].iloc[i - lookback_hours//4:i].values,  # last 4h candles
-            df["dir_12h"].iloc[i - lookback_hours//12:i].values, # last 12h candles
-            df["dir_24h"].iloc[i - lookback_hours//24:i].values  # last 24h candles
-        ])
-        X.append(features)
-        y.append(df["dir"].iloc[i + 1])
+    print(f"Loaded {len(sim_data)} simulation candles")
 
-    X, y = np.array(X), np.array(y)
+    # === Find rare patterns ===
+    rare_patterns_df = await get_rare_patterns(train_data, N=MAX_PATTERN_LEN)
+    rare_patterns_df = rare_patterns_df.head(K_MOST_RARE_PATTERNS)
 
-    # === Split for training/testing ===
-    split_idx = int(len(X) * 1) - 24*7*4
-    X_train, X_test = X[:split_idx], X[split_idx:]
-    y_train, y_test = y[:split_idx], y[split_idx:]
+    # === Prepare simulation data ===
+    sim_data["direction"] = sim_data.apply(lambda x: "U" if x["close"] > x["open"] else "D", axis=1)
+    directions = sim_data["direction"].tolist()
+    dates = sim_data.index.date
 
-    # === Normalize and fit ===
-    scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test = scaler.transform(X_test)
+    # === Per-pattern simulation ===
+    pattern_stats = {}
 
-    #est:100 max_depth:16 min_split:2 min_leaf:1
-    model = RandomForestClassifier(n_estimators=200,
-                                   max_depth=8,
-                                   min_samples_split=4,
-                                   min_samples_leaf=1,
-                                   random_state=42)
-    model.fit(X_train, y_train)
+    for _, row in rare_patterns_df.iterrows():
+        pattern_tuple = row["pattern"]
+        pattern = "".join(["U" if x == 1 else "D" for x in pattern_tuple])
 
-    # === Predict and simulate ===
-    probas = model.predict_proba(X_test)
-    preds = (probas[:, 1] > 0.5).astype(int)
-    conf = np.max(probas, axis=1)
+        balance = 0.0
+        lose_streak = 0
+        wins = 0
+        losses = 0
+        min_balance = 0.0
+        max_balance = 0.0
+        max_bet = BASE_BET
+        total_bets = 0
+        sessions_lost = 0
 
-    payout = 1.9607
-    balance = 0
-    bet = 100
-    wins = 0
-    trades = 0
+        current_bet = BASE_BET
+        total_losses_amount = 0.0
 
-    konf = 0.54
+        daily_stats = {}
 
-    n_hours = 0
-    correct = 0
-    not_correct = 0
-    not_correct_row = 0
-    max_not_correct_row = 0
-    for p, real, c in zip(preds, y_test, conf):
-        n_hours += 1
-        if c < konf:
-            continue  # skip low-confidence trades
+        print(f"\n=== Starting Pattern {pattern} ===")
+        for i, real in enumerate(directions):
+            current_date = dates[i]
+            pattern_index = lose_streak % len(pattern)
+            expected = pattern[pattern_index]
+            bet_direction = "D" if expected == "U" else "U"
 
-        trades += 1
-        if p == real:
-            correct += 1
-            wins += 1
-            balance += bet * (payout - 1)
-            if max_not_correct_row < not_correct_row:
-                max_not_correct_row = not_correct_row
-            not_correct_row = 0
-            print(f'[{trades}] prediction: {p} | real: {real} | balance: {balance}')
-        else:
-            not_correct += 1
-            not_correct_row +=1
-            balance -= bet  # lose only the fixed bet amount
-            print(f'[{trades}] prediction: {p} | real: {real} | balance: {balance}')
+            # Visualize pattern progress
+            pattern_display = "".join(
+                [f"[{ch}]" if j == pattern_index else f" {ch} " for j, ch in enumerate(pattern)]
+            )
 
-    winrate = wins / trades if trades else 0
-    roi = (balance) / trades if trades else 0
+            total_bets += 1
 
-    print(f'max_not_correct_in_row: {max_not_correct_row}')
+            # Print last few candles
+            print(
+                f"[{i+1}/{len(directions)}] {sim_data.index[i].strftime('%Y-%m-%d %H:%M')} "
+                f"Real: {real} | Bet: {bet_direction} | Pattern: {pattern_display} | "
+                f"Bet: {current_bet:.2f} | Balance: {balance:.2f}"
+            )
 
-    print(f"\n=== Multi-TF Martingale Results ===")
-    print(f"Trades: {trades}")
-    print(f'hours: {n_hours}')
-    print(f"Winrate: {winrate:.3f}")
-    print(f'correct/not correct: {correct}/{not_correct}')
-    print(f"Total Profit: {balance:.2f}")
-    print(f"Average Profit/Trade (ROI): {roi:.3f}")
-    print(f"Balance: {balance:.2f}")
+            # Simulate result
+            if real == bet_direction:
+                profit = current_bet * (WIN_COEF - 1)
+                balance += profit
+                wins += 1
+                lose_streak = 0
+                total_losses_amount = 0.0
+                current_bet = BASE_BET
+            else:
+                balance -= current_bet
+                losses += 1
+                lose_streak += 1
+                total_losses_amount += current_bet
 
-    return model, scaler
+            max_bet = max(max_bet, current_bet)
+            min_balance = min(min_balance, balance)
+            max_balance = max(max_balance, balance)
 
-# Example usage:
-async def run():
-    db = DbProvider()
-    res = await db.select("candles", ["open_time", "open_price", "close_price", "dir"],
-                          None, 0, "ASC")
-    martingale_multi_tf(res)
+            # Daily stats
+            if current_date not in daily_stats:
+                daily_stats[current_date] = {
+                    "wins": 0,
+                    "losses": 0,
+                    "profit": 0.0,
+                    "min_balance": balance,
+                    "max_balance": balance,
+                }
+
+            daily_stats[current_date]["wins"] = wins
+            daily_stats[current_date]["losses"] = losses
+            daily_stats[current_date]["profit"] = balance
+            daily_stats[current_date]["min_balance"] = min(
+                daily_stats[current_date]["min_balance"], balance
+            )
+            daily_stats[current_date]["max_balance"] = max(
+                daily_stats[current_date]["max_balance"], balance
+            )
+
+            # update current bet if lose
+            if real != bet_direction:
+                current_bet = (total_losses_amount + BASE_BET) / (WIN_COEF - 1)
+
+            # Session lost (reset to base)
+            if lose_streak >= len(pattern):
+                sessions_lost += 1
+                lose_streak = 0
+                total_losses_amount = 0.0
+                current_bet = BASE_BET
+
+
+        # Store pattern results
+        pattern_stats[pattern] = {
+            "wins": wins,
+            "losses": losses,
+            "balance": balance,
+            "min_balance": min_balance,
+            "max_balance": max_balance,
+            "max_bet": max_bet,
+            "total_bets": total_bets,
+            "sessions_lost": sessions_lost,
+            "daily_stats": daily_stats,
+        }
+
+        # Pattern summary
+        print(f"\n=== Pattern {pattern} ===")
+        print(f"Bets: {total_bets}, Wins: {wins}, Losses: {losses}")
+        print(f"Win rate: {wins / (wins + losses) * 100:.2f}%")
+        print(f"Final balance: {balance:.2f}")
+        print(f"Min balance: {min_balance:.2f}")
+        print(f"Max balance: {max_balance:.2f}")
+        print(f"Max bet: {max_bet:.2f}")
+        print(f"Sessions lost: {sessions_lost}")
+        print("-" * 60)
+
+        # Daily summary
+        print("📅 Daily stats:")
+        for d, s in daily_stats.items():
+            print(
+                f"{d}: Profit={s['profit']:.2f}, Wins={s['wins']}, Losses={s['losses']}, "
+                f"MinBal={s['min_balance']:.2f}, MaxBal={s['max_balance']:.2f}"
+            )
+        print("=" * 80)
+
+    # === Global summary ===
+    total_wins = sum(p["wins"] for p in pattern_stats.values())
+    total_losses = sum(p["losses"] for p in pattern_stats.values())
+    total_balance = sum(p["balance"] for p in pattern_stats.values())
+    global_min_balance = min(p["min_balance"] for p in pattern_stats.values())
+    global_max_bet = max(p["max_bet"] for p in pattern_stats.values())
+    total_bets = sum(p["total_bets"] for p in pattern_stats.values())
+    global_sessions_lost = sum(p["sessions_lost"] for p in pattern_stats.values())
+
+    print("\n*** FINAL SUMMARY ACROSS ALL PATTERNS ***")
+    print(f"Total bets: {total_bets}")
+    print(f"Total wins: {total_wins}, Total losses: {total_losses}")
+    print(f"Overall win rate: {total_wins / (total_wins + total_losses) * 100:.2f}%")
+    print(f"Total balance across bots: {total_balance:.2f}")
+    print(f"Lowest balance reached (any bot): {global_min_balance:.2f}")
+    print(f"Max bet required (any bot): {global_max_bet:.2f}")
+    print(f"Total session losses: {global_sessions_lost}")
+    print("=" * 60)
+
+    # restore stdout
+    sys.stdout = sys.__stdout__
+    log_file.close()
+    print("✅ Logs saved to logs.txt")
+
+# === Rare Pattern Finder ===
+async def get_rare_patterns(df, N=MAX_PATTERN_LEN):
+    df["direction"] = (df["close"] > df["open"]).astype(int)
+    all_patterns = list(itertools.product([0, 1], repeat=N))
+    observed = [tuple(df["direction"].iloc[i:i+N]) for i in range(len(df) - N + 1)]
+    counts = Counter(observed)
+    counts.update({p: 0 for p in all_patterns if p not in counts})
+    df_counts = pd.DataFrame(counts.items(), columns=["pattern", "count"]).sort_values("count").reset_index(drop=True)
+    return df_counts
+
+# === Data Loader ===
+async def load_data():
+    res = await db.select("c_15m", ["open_time", "open", "close"], None, 0, "ASC")
+    df = pd.DataFrame(res, columns=["open_time", "open", "close"]).reset_index(drop=True)
+    return df
+
+# === Main Runner ===
+async def run_simulation():
+    df = await load_data()
+    await simulate_betting(
+        df,
+        training_start_date="2020-01-01",
+        training_end_date="2025-01-01",
+        simulation_start_date="2025-10-01",
+        simulation_end_date="2025-11-01",
+    )
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(run())
+    asyncio.run(run_simulation())

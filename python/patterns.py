@@ -13,7 +13,7 @@ db = DbProvider()
 WIN_COEF = 1.96          # payout multiplier
 BASE_BET = 3             # fixed base bet
 K_MOST_RARE_PATTERNS = 2 # simulate top-K rarest patterns
-MAX_PATTERN_LEN = 6      # max pattern length to search for
+MAX_PATTERN_LEN = 8      # max pattern length to search for
 
 # === Utils ===
 def to_microseconds_timestamp(date_string: str) -> int:
@@ -225,8 +225,8 @@ async def run_simulation():
         df,
         training_start_date="2020-01-01",
         training_end_date="2025-01-01",
-        simulation_start_date="2025-01-01",
-        simulation_end_date="2025-11-01",
+        simulation_start_date="2025-09-01",
+        simulation_end_date="2025-10-01",
     )
 
 if __name__ == "__main__":

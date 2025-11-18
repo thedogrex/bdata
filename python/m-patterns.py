@@ -7,13 +7,12 @@ import sys
 db = DbProvider()
 
 # === Constants ===
-WIN_COEF = 1.9607
-BASE_BET = 20
+WIN_COEF = 1.923
+BASE_BET = 5 / WIN_COEF
 
 # === Predefined patterns by length ===
 PREDEFINED_PATTERNS_BY_LENGTH = {
-    2: ["DD"],
-    3: ["DDD"],
+
     4: ["DDDD"],        # 3 patterns for length 4
     5: ["DDDDD"],              # 2 patterns for length 5
     6: ["DDDDDD"],           # 3 patterns for length 6
@@ -25,7 +24,7 @@ PREDEFINED_PATTERNS_BY_LENGTH = {
     #12: ["DDDDDDDDDDDD"]# 2 patterns for length 12
 }
 
-""""PREDEFINED_PATTERNS_BY_LENGTH = {
+"""PREDEFINED_PATTERNS_BY_LENGTH = {
     4: ["UUUU"],        # 3 patterns for length 4
     5: ["UUUUU"],              # 2 patterns for length 5
     6: ["UUUUUU"],           # 3 patterns for length 6
@@ -193,7 +192,7 @@ async def run_all_lengths():
         2024: list(range(1, 13)),  # full year
         2025: list(range(1, 12))   # Jan → Nov
     }
-    for length in range(2, 5):  # pattern lengths
+    for length in range(4, 9):  # pattern lengths
         await simulate_length_multi_year(df, years_months, length)
 
 if __name__ == "__main__":

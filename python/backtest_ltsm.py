@@ -2,13 +2,12 @@
 # -*- coding: utf-8 -*-
 
 import time
+import itertools
 import numpy as np
 import pandas as pd
 from db import DbProvider
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 
@@ -22,10 +21,10 @@ TRAIN_END_DATE   = "2025-06-30"
 TEST_START_DATE  = "2025-07-01"
 TEST_END_DATE    = "2025-12-31"
 
-SEQUENCE_LENGTH  = 24
-THRESHOLD_SIGNAL = 0.56
-
 TABLE_NAME = "c_15m"
+
+SEQUENCE_LENGTHS = [12, 24, 48]
+THRESHOLDS = [0.52, 0.55, 0.58, 0.6]
 
 # ============================
 
@@ -43,9 +42,6 @@ def date_to_ts(date_str, end_of_day=False):
     t = "23:59:59" if end_of_day else "00:00:00"
     return int(pd.Timestamp(f"{date_str} {t}").timestamp() * 1_000_000)
 
-def fmt_ts(ts):
-    return pd.to_datetime(ts // 1_000_000, unit='s').strftime("%Y-%m-%d %H:%M")
-
 def filter_df_by_dates(df, start_date, end_date):
     return df[
         (df.open_time >= date_to_ts(start_date, False)) &
@@ -57,7 +53,6 @@ def filter_df_by_dates(df, start_date, end_date):
 # ============================
 
 async def load_candles(table, start_date, end_date):
-    log(f"SQL load {start_date} → {end_date}")
     query = f"""
         SELECT open_time, open, high, low, close, volume
         FROM {table}
@@ -65,27 +60,22 @@ async def load_candles(table, start_date, end_date):
             {date_to_ts(start_date, False)} AND {date_to_ts(end_date, True)}
         ORDER BY open_time
     """
-    t0 = time.time()
     rows = await db.fetchall(query)
-    log(f"SQL rows={len(rows)} loaded in {time.time()-t0:.2f}s")
-
     df = pd.DataFrame(rows, columns=['open_time','open','high','low','close','volume'])
 
-    for col in ['open','high','low','close','volume']:
-        df[col] = df[col].astype(float)
+    for c in ['open','high','low','close','volume']:
+        df[c] = df[c].astype(float)
 
     df['future_direction'] = (df['close'].shift(-1) > df['open'].shift(-1)).astype(np.int8)
     df.dropna(inplace=True)
 
-    log(f"DataFrame prepared: {len(df)} rows")
     return df
 
 # ============================
 # FEATURES
 # ============================
 
-def add_features(df):
-    log("Feature engineering started")
+def add_features(df, sequence_length):
     df = df.copy()
 
     df['sma_10'] = df['close'].rolling(10).mean()
@@ -100,143 +90,122 @@ def add_features(df):
     df['volatility_1h'] = df['close'].rolling(4).std()
     df['momentum_1h'] = df['close'] - df['close'].shift(4)
 
-    lag_features = ['open','high','low','close','volume']
-    for col in lag_features:
-        for lag in range(1, SEQUENCE_LENGTH + 1):
+    for col in ['open','high','low','close','volume']:
+        for lag in range(1, sequence_length + 1):
             df[f"{col}_lag{lag}"] = df[col].shift(lag)
 
     df.fillna(0, inplace=True)
-
-    log("Feature engineering completed")
     return df
 
 # ============================
-# WALK-FORWARD XGBOOST
+# WALK FORWARD
 # ============================
 
-def walk_forward_online_xgb(model, X_test, y_test, times_test, threshold):
+def walk_forward(model, X_test, y_test, threshold):
     preds = []
-    probs = []
-    correct = []
-
-    correct_count = 0
-    incorrect_count = 0
-
-    log(f"Walk-forward start: {len(X_test)} samples")
 
     for i in range(len(X_test)):
-        x_input = X_test[i].reshape(1, -1)
-        prob = model.predict_proba(x_input)[0, 1]
+        prob = model.predict_proba(X_test[i].reshape(1, -1))[0, 1]
 
         if prob > threshold:
-            pred = 1
-        elif prob < (1 - threshold):
-            pred = 0
+            preds.append(1)
+        elif prob < 1 - threshold:
+            preds.append(0)
         else:
-            pred = -1
+            preds.append(-1)
 
-        preds.append(pred)
-        probs.append(prob)
+    preds = np.array(preds)
+    mask = preds != -1
 
-        if pred != -1:
-            is_correct = int(pred == y_test[i])
-            correct.append(is_correct)
+    if mask.sum() == 0:
+        return 0.0, 0
 
-            if is_correct:
-                correct_count += 1
-            else:
-                incorrect_count += 1
-        else:
-            correct.append(np.nan)
-
-        log(
-            f"{fmt_ts(times_test[i])} | "
-            f"prob={prob:.3f} | pred={pred} | real={y_test[i]} | "
-            f"correct={correct_count} | incorrect={incorrect_count}"
-        )
-
-    log("Walk-forward completed")
-    return np.array(preds), np.array(correct), np.array(probs)
+    acc = np.mean(preds[mask] == y_test[mask])
+    return acc, mask.sum()
 
 # ============================
-# PIPELINE
+# GRID SEARCH
 # ============================
 
-async def train_and_predict():
-    log("PIPELINE START")
-
-    df = await load_candles(
+async def grid_search():
+    df_raw = await load_candles(
         TABLE_NAME,
         min(TRAIN_START_DATE, TEST_START_DATE),
         max(TRAIN_END_DATE, TEST_END_DATE)
     )
 
-    df = add_features(df)
+    xgb_grid = {
+        "n_estimators": [200, 400],
+        "max_depth": [3, 5],
+        "learning_rate": [0.03, 0.06],
+        "subsample": [0.7, 0.85],
+        "colsample_bytree": [0.7, 0.85],
+    }
 
-    feature_cols = [c for c in df.columns if c not in ['open_time','future_direction']]
+    xgb_keys = list(xgb_grid.keys())
+    xgb_combos = list(itertools.product(*xgb_grid.values()))
 
-    df_train = filter_df_by_dates(df, TRAIN_START_DATE, TRAIN_END_DATE)
-    df_test  = filter_df_by_dates(df, TEST_START_DATE, TEST_END_DATE)
+    results = []
 
-    X_train = df_train[feature_cols].to_numpy()
-    y_train = df_train['future_direction'].to_numpy()
+    total = len(SEQUENCE_LENGTHS) * len(THRESHOLDS) * len(xgb_combos)
+    step = 0
 
-    X_test  = df_test[feature_cols].to_numpy()
-    y_test  = df_test['future_direction'].to_numpy()
-    times_test = df_test['open_time'].to_numpy()
+    for seq_len in SEQUENCE_LENGTHS:
+        log(f"FEATURES: sequence_length={seq_len}")
+        df = add_features(df_raw, seq_len)
 
-    log(f"Train samples={len(X_train)}, Test samples={len(X_test)}")
+        feature_cols = [c for c in df.columns if c not in ['open_time','future_direction']]
 
-    scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test  = scaler.transform(X_test)
+        train = filter_df_by_dates(df, TRAIN_START_DATE, TRAIN_END_DATE)
+        test  = filter_df_by_dates(df, TEST_START_DATE, TEST_END_DATE)
 
-    log("Training XGBoost model...")
-    model = xgb.XGBClassifier(
-        n_estimators=300,
-        max_depth=5,
-        learning_rate=0.06,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        eval_metric='logloss',
-        random_state=42
-    )
-    model.fit(X_train, y_train)
-    log("Training completed")
+        X_train = train[feature_cols].to_numpy()
+        y_train = train['future_direction'].to_numpy()
+        X_test  = test[feature_cols].to_numpy()
+        y_test  = test['future_direction'].to_numpy()
 
-    preds, correct, probs = walk_forward_online_xgb(
-        model,
-        X_test,
-        y_test,
-        times_test,
-        THRESHOLD_SIGNAL
-    )
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_test  = scaler.transform(X_test)
 
-    mask = preds != -1
-    acc = np.mean(preds[mask] == y_test[mask])
-    log(f"Accuracy (signals only): {acc:.4f}")
+        for params_vals in xgb_combos:
+            params = dict(zip(xgb_keys, params_vals))
 
-    return df_test, preds, correct, y_test, probs
+            model = xgb.XGBClassifier(
+                **params,
+                eval_metric="logloss",
+                random_state=42,
+                n_jobs=-1
+            )
 
-# ============================
-# PLOT
-# ============================
+            model.fit(X_train, y_train)
 
-def render_chart(df, preds, probs, y):
-    fig = make_subplots(rows=1, cols=1)
-    fig.add_trace(go.Candlestick(
-        x=pd.to_datetime(df['open_time'], unit='us'),
-        open=df['open'], high=df['high'], low=df['low'], close=df['close']
-    ))
-    fig.add_trace(go.Scatter(
-        x=pd.to_datetime(df['open_time'], unit='us'),
-        y=df['close'],
-        mode='markers',
-        marker=dict(color=['green' if p==1 else 'red' for p in preds], size=7),
-        text=[f"prob={p:.2f}, real={r}" for p,r in zip(probs,y)],
-        hoverinfo='text'
-    ))
-    fig.show()
+            for threshold in THRESHOLDS:
+                step += 1
+                acc, signals = walk_forward(model, X_test, y_test, threshold)
+
+                result = {
+                    "accuracy": acc,
+                    "signals": signals,
+                    "sequence_length": seq_len,
+                    "threshold": threshold,
+                    **params
+                }
+
+                results.append(result)
+
+                log(f"[{step}/{total}] acc={acc:.4f} signals={signals} {result}")
+
+    results = sorted(results, key=lambda x: (x["accuracy"], x["signals"]), reverse=True)
+
+    log("===== 🥇 BEST RESULT =====")
+    log(results[0])
+
+    log("===== 🏆 TOP 5 =====")
+    for r in results[:5]:
+        log(r)
+
+    return results
 
 # ============================
 # FASTAPI
@@ -244,11 +213,11 @@ def render_chart(df, preds, probs, y):
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    df_test, preds, correct, y_test, probs = await train_and_predict()
-    render_chart(df_test, preds, probs, y_test)
-    return HTMLResponse("<h2>Backtest finished</h2>")
+    await grid_search()
+    return HTMLResponse("<h2>Grid search finished. Check console.</h2>")
 
 # ============================
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)

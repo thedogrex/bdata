@@ -187,8 +187,8 @@ async def save_bruteforce_session(session: dict) -> int:
     query = """
         INSERT INTO bruteforce_sessions
             (strategy, param_grid_json, train_start, train_end, test_start, test_end,
-             tbl, horizon, window_size, total_combos, status)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             tbl, horizon, window_size, retrain_every, total_combos, combos_json, status)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     return await db.execute(query, (
         session["strategy"],
@@ -200,7 +200,9 @@ async def save_bruteforce_session(session: dict) -> int:
         session.get("table", "c_5m"),
         session.get("horizon", 1),
         session.get("window_size", 5000),
+        session.get("retrain_every", 500),
         session.get("total_combos", 0),
+        json.dumps(session.get("combos", []), ensure_ascii=False),
         "running",
     ))
 
@@ -221,7 +223,11 @@ async def update_bruteforce_session(bf_id: int, updates: dict) -> None:
 
 async def get_bruteforce_sessions(limit: int = 50) -> list[dict]:
     rows = await db.fetchall(
-        f"SELECT * FROM bruteforce_sessions ORDER BY created_at DESC LIMIT {limit}"
+        f"SELECT id, strategy, param_grid_json, train_start, train_end, "
+        f"test_start, test_end, tbl, horizon, window_size, retrain_every, "
+        f"total_combos, completed, best_accuracy, best_params_json, "
+        f"status, total_time_sec, elapsed_before_pause, created_at "
+        f"FROM bruteforce_sessions ORDER BY created_at DESC LIMIT {limit}"
     )
     results = []
     for r in rows:
@@ -236,15 +242,70 @@ async def get_bruteforce_sessions(limit: int = 50) -> list[dict]:
             "table": r[7],
             "horizon": r[8],
             "window_size": r[9],
-            "total_combos": r[10],
-            "completed": r[11],
-            "best_accuracy": r[12],
-            "best_params": json.loads(r[13]) if r[13] else {},
-            "status": r[14],
-            "total_time_sec": r[15],
-            "created_at": str(r[16]) if r[16] else "",
+            "retrain_every": r[10],
+            "total_combos": r[11],
+            "completed": r[12],
+            "best_accuracy": r[13],
+            "best_params": json.loads(r[14]) if r[14] else {},
+            "status": r[15],
+            "total_time_sec": r[16],
+            "elapsed_before_pause": r[17],
+            "created_at": str(r[18]) if r[18] else "",
         })
     return results
+
+
+async def get_bruteforce_session_by_id(bf_id: int) -> Optional[dict]:
+    """Load a single BF session with full data including combos_json for resume."""
+    row = await db.fetchone(
+        "SELECT id, strategy, param_grid_json, train_start, train_end, "
+        "test_start, test_end, tbl, horizon, window_size, retrain_every, "
+        "total_combos, combos_json, completed, best_accuracy, best_params_json, "
+        "status, total_time_sec, elapsed_before_pause, created_at "
+        "FROM bruteforce_sessions WHERE id = %s", (bf_id,)
+    )
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "strategy": row[1],
+        "param_grid": json.loads(row[2]) if row[2] else {},
+        "train_start": row[3],
+        "train_end": row[4],
+        "test_start": row[5],
+        "test_end": row[6],
+        "table": row[7],
+        "horizon": row[8],
+        "window_size": row[9],
+        "retrain_every": row[10],
+        "total_combos": row[11],
+        "combos": json.loads(row[12]) if row[12] else [],
+        "completed": row[13],
+        "best_accuracy": row[14],
+        "best_params": json.loads(row[15]) if row[15] else {},
+        "status": row[16],
+        "total_time_sec": row[17],
+        "elapsed_before_pause": row[18],
+        "created_at": str(row[19]) if row[19] else "",
+    }
+
+
+async def get_completed_combo_indices(bf_id: int) -> set[str]:
+    """Get set of normalized params JSON strings for completed combos in a BF session."""
+    rows = await db.fetchall(
+        "SELECT params_json FROM backtest_runs WHERE bruteforce_id = %s",
+        (bf_id,)
+    )
+    result = set()
+    for r in rows:
+        if r[0]:
+            try:
+                # Normalize: parse and re-dump with sort_keys for consistent matching
+                parsed = json.loads(r[0])
+                result.add(json.dumps(parsed, sort_keys=True, ensure_ascii=False))
+            except (json.JSONDecodeError, TypeError):
+                result.add(r[0])
+    return result
 
 
 async def get_best_runs(limit: int = 20, horizon: int = 1) -> list[dict]:

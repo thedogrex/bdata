@@ -77,3 +77,13 @@ CREATE TABLE IF NOT EXISTS bruteforce_sessions (
     INDEX idx_status (status),
     INDEX idx_best (best_accuracy DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================
+-- v2: Brute-force checkpoint persistence
+-- Allows pause → shutdown → restart → resume
+-- ============================================
+
+ALTER TABLE bruteforce_sessions
+    ADD COLUMN IF NOT EXISTS retrain_every INT NOT NULL DEFAULT 500 AFTER window_size,
+    ADD COLUMN IF NOT EXISTS combos_json LONGTEXT AFTER total_combos,
+    ADD COLUMN IF NOT EXISTS elapsed_before_pause FLOAT NOT NULL DEFAULT 0 AFTER total_time_sec;

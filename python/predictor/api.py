@@ -13,9 +13,9 @@ from predictor.strategies import list_strategies, STRATEGY_REGISTRY
 from predictor.db_history import (
     save_backtest_run, get_history, get_history_detail,
     delete_run, clear_history,
-    get_bruteforce_sessions, get_best_runs,
+    get_bruteforce_sessions, get_bruteforce_session_by_id, get_best_runs,
 )
-from predictor.bruteforce import run_bruteforce, get_default_grid, build_combos
+from predictor.bruteforce import run_bruteforce, resume_bruteforce, get_default_grid, build_combos
 from predictor.task_manager import task_mgr
 
 app = FastAPI(title="Candle Predictor & Backtester", version="3.0.0")
@@ -217,6 +217,25 @@ async def api_run_bruteforce(req: BruteforceRequest):
 @app.get("/api/bruteforce/sessions")
 async def api_bruteforce_sessions():
     return await get_bruteforce_sessions()
+
+
+@app.post("/api/bruteforce/resume/{bf_id}")
+async def api_resume_bruteforce(bf_id: int):
+    """Resume a paused/interrupted brute-force session from its DB checkpoint."""
+    session = await get_bruteforce_session_by_id(bf_id)
+    if not session:
+        return JSONResponse(status_code=404, content={"error": f"Session {bf_id} not found"})
+    if session["status"] == "done":
+        return JSONResponse(status_code=400, content={"error": f"Session {bf_id} is already completed"})
+
+    remaining = session["total_combos"] - session["completed"]
+
+    async def _run(progress):
+        return await resume_bruteforce(bf_id=bf_id, progress=progress)
+
+    label = f"Resume BF#{bf_id} {session['strategy']} H{session['horizon']} ({remaining} remaining)"
+    task_id = task_mgr.enqueue("bruteforce", label, _run, total=session["total_combos"])
+    return {"task_id": task_id, "status": "queued", "label": label, "bf_id": bf_id, "remaining": remaining}
 
 
 # ==================== TASK QUEUE ====================
@@ -797,9 +816,20 @@ async function loadBfSessions(){
   try{const res=await fetch(API+'/api/bruteforce/sessions');const data=await res.json();
     const el=document.getElementById('bf-sessions');
     if(!data.length){el.innerHTML='<p class="text-slate-400 text-sm">No sessions yet.</p>';return}
-    let html='<table><thead><tr><th>ID</th><th>Strategy</th><th>H</th><th>Combos</th><th>Best</th><th>Status</th><th>Time</th><th>Date</th></tr></thead><tbody>';
-    data.forEach(s=>{html+=`<tr><td>${s.id}</td><td class="font-medium">${s.strategy}</td><td>${s.horizon}</td><td>${s.completed}/${s.total_combos}</td><td class="${accClass(s.best_accuracy)} font-bold">${s.best_accuracy}%</td><td>${statusBadge(s.status)}</td><td>${s.total_time_sec}s</td><td class="text-slate-400 text-xs">${s.created_at}</td></tr>`});
+    let html='<table><thead><tr><th>ID</th><th>Strategy</th><th>H</th><th>Combos</th><th>Best</th><th>Status</th><th>Time</th><th>Date</th><th></th></tr></thead><tbody>';
+    data.forEach(s=>{
+      const canResume=s.status==='paused'||s.status==='running';
+      const resumeBtn=canResume?`<button onclick="resumeBf(${s.id})" class="btn btn-green text-xs">Resume</button>`:'';
+      const viewBtn=`<button onclick="loadHistory();document.getElementById('hist-strategy').value='';switchTab('history')" class="text-blue-400 text-xs hover:underline ml-1">runs</button>`;
+      html+=`<tr><td>${s.id}</td><td class="font-medium">${s.strategy}</td><td>${s.horizon}</td><td>${s.completed}/${s.total_combos}</td><td class="${accClass(s.best_accuracy)} font-bold">${s.best_accuracy}%</td><td>${statusBadge(s.status)}</td><td>${s.total_time_sec}s</td><td class="text-slate-400 text-xs">${s.created_at}</td><td class="flex gap-1">${resumeBtn}${viewBtn}</td></tr>`});
     html+='</tbody></table>';el.innerHTML=html}catch(e){}
+}
+async function resumeBf(bfId){
+  const res=await fetch(API+'/api/bruteforce/resume/'+bfId,{method:'POST'});
+  const data=await res.json();
+  if(data.error){alert(data.error);return}
+  activeTaskId=data.task_id;
+  loadBfSessions();
 }
 
 // ===== HISTORY =====
@@ -811,12 +841,48 @@ async function loadHistory(){
   if(strategy)url+='&strategy='+strategy;if(minAcc)url+='&min_accuracy='+minAcc;
   try{const res=await fetch(url);const data=await res.json();const el=document.getElementById('history-list');
     if(!data.length){el.innerHTML='<div class="card p-6 text-center text-slate-400">No results.</div>';return}
-    let html='<div class="card p-6"><table><thead><tr><th>ID</th><th>Strategy</th><th>Test Period</th><th>Win</th><th>Horizons</th><th>Time</th><th>Date</th><th></th></tr></thead><tbody>';
+
+    // Group BF runs by bruteforce_id
+    const bfGroups={};const standalone=[];
     data.forEach(r=>{
-      const hs=Object.entries(r.horizons||{}).map(([h,d])=>d.error?`H${h}:err`:`H${h}:<span class="${accClass(d.accuracy_pct)}">${d.accuracy_pct}%</span>`).join(' | ');
-      const bf=r.is_bruteforce?'<span class="badge badge-bf ml-1">BF</span>':'';
-      html+=`<tr class="cursor-pointer" onclick="showDetail(${r.id})"><td>${r.id}</td><td class="font-medium">${r.strategy}${bf}</td><td class="text-xs">${r.test_period||''}</td><td>${r.window_size||'?'}</td><td>${hs}</td><td>${r.total_time_sec}s</td><td class="text-slate-400 text-xs">${r.created_at||''}</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
-    html+='</tbody></table></div>';el.innerHTML=html}catch(e){console.error(e)}
+      if(r.is_bruteforce && r.bruteforce_id){
+        if(!bfGroups[r.bruteforce_id])bfGroups[r.bruteforce_id]={runs:[],strategy:r.strategy,bf_id:r.bruteforce_id};
+        bfGroups[r.bruteforce_id].runs.push(r);
+      }else{standalone.push(r)}
+    });
+
+    let html='<div class="card p-6">';
+
+    // Render BF groups first
+    const bfIds=Object.keys(bfGroups).sort((a,b)=>b-a);
+    bfIds.forEach(bfId=>{
+      const g=bfGroups[bfId];
+      const best=g.runs.reduce((b,r)=>{
+        const acc=Object.values(r.horizons||{}).reduce((m,h)=>Math.max(m,h.accuracy_pct||0),0);
+        return acc>b.acc?{acc,r}:b;
+      },{acc:0,r:null});
+      html+=`<details class="mb-3 p-3 rounded-lg" style="background:#0f172a;border:1px solid #334155">
+        <summary class="cursor-pointer flex items-center justify-between">
+          <span><span class="badge badge-bf">BF#${bfId}</span> <b class="ml-2">${g.strategy}</b> <span class="text-slate-400 text-xs ml-2">${g.runs.length} runs</span></span>
+          <span class="${accClass(best.acc)} font-bold">Best: ${best.acc}%</span>
+        </summary>
+        <table class="mt-2"><thead><tr><th>ID</th><th>Params</th><th>Win</th><th>Horizons</th><th>Time</th><th></th></tr></thead><tbody>`;
+      g.runs.forEach(r=>{
+        const hs=Object.entries(r.horizons||{}).map(([h,d])=>d.error?`H${h}:err`:`H${h}:<span class="${accClass(d.accuracy_pct)}">${d.accuracy_pct}%</span>`).join(' | ');
+        const ps=JSON.stringify(r.params||{}).substring(0,80);
+        html+=`<tr class="cursor-pointer" onclick="showDetail(${r.id})"><td>${r.id}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td><td>${r.window_size||'?'}</td><td>${hs}</td><td>${r.total_time_sec}s</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
+      html+=`</tbody></table></details>`;
+    });
+
+    // Render standalone runs
+    if(standalone.length){
+      html+=`<table><thead><tr><th>ID</th><th>Strategy</th><th>Test Period</th><th>Win</th><th>Horizons</th><th>Time</th><th>Date</th><th></th></tr></thead><tbody>`;
+      standalone.forEach(r=>{
+        const hs=Object.entries(r.horizons||{}).map(([h,d])=>d.error?`H${h}:err`:`H${h}:<span class="${accClass(d.accuracy_pct)}">${d.accuracy_pct}%</span>`).join(' | ');
+        html+=`<tr class="cursor-pointer" onclick="showDetail(${r.id})"><td>${r.id}</td><td class="font-medium">${r.strategy}</td><td class="text-xs">${r.test_period||''}</td><td>${r.window_size||'?'}</td><td>${hs}</td><td>${r.total_time_sec}s</td><td class="text-slate-400 text-xs">${r.created_at||''}</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
+      html+=`</tbody></table>`;
+    }
+    html+='</div>';el.innerHTML=html}catch(e){console.error(e)}
 }
 async function showDetail(id){try{const res=await fetch(API+'/api/history/'+id);const data=await res.json();if(data.error){alert(data.error);return}switchTab('backtest');renderResult(data,'bt-results')}catch(e){alert(e.message)}}
 async function deleteRun(id){if(!confirm('Delete #'+id+'?'))return;await fetch(API+'/api/history/'+id,{method:'DELETE'});loadHistory()}

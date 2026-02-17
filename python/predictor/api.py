@@ -870,7 +870,7 @@ async function loadHistory(){
       g.runs.forEach(r=>{
         const hs=Object.entries(r.horizons||{}).map(([h,d])=>d.error?`H${h}:err`:`H${h}:<span class="${accClass(d.accuracy_pct)}">${d.accuracy_pct}%</span>`).join(' | ');
         const ps=JSON.stringify(r.params||{}).substring(0,80);
-        html+=`<tr class="cursor-pointer" onclick="showDetail(${r.id})"><td>${r.id}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td><td>${r.window_size||'?'}</td><td>${hs}</td><td>${r.total_time_sec}s</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
+        html+=`<tr class="cursor-pointer hover:bg-slate-700" onclick="event.stopPropagation();showDetail(${r.id})"><td>${r.id}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td><td>${r.window_size||'?'}</td><td>${hs}</td><td>${r.total_time_sec}s</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
       html+=`</tbody></table></details>`;
     });
 
@@ -884,7 +884,7 @@ async function loadHistory(){
     }
     html+='</div>';el.innerHTML=html}catch(e){console.error(e)}
 }
-async function showDetail(id){try{const res=await fetch(API+'/api/history/'+id);const data=await res.json();if(data.error){alert(data.error);return}switchTab('backtest');renderResult(data,'bt-results')}catch(e){alert(e.message)}}
+async function showDetail(id){try{const res=await fetch(API+'/api/history/'+id);const data=await res.json();if(data.error){alert(data.error);return}switchTab('backtest');renderResult(data,'bt-results');document.getElementById('bt-results').scrollIntoView({behavior:'smooth',block:'start'})}catch(e){alert(e.message)}}
 async function deleteRun(id){if(!confirm('Delete #'+id+'?'))return;await fetch(API+'/api/history/'+id,{method:'DELETE'});loadHistory()}
 async function clearAllHistory(){if(!confirm('Delete ALL?'))return;await fetch(API+'/api/history',{method:'DELETE'});loadHistory()}
 

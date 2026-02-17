@@ -38,8 +38,25 @@ class RSIMeanReversionStrategy(BaseStrategy):
         }
 
     def fit(self, df: pd.DataFrame, horizon: int = 1) -> None:
-        # Rule-based strategy — no training needed
-        pass
+        # Learn adaptive thresholds from training window
+        if "rsi_14" not in df.columns:
+            df = add_technical_features(df)
+
+        period = self.params["rsi_period"]
+        rsi_col = f"rsi_{period}" if f"rsi_{period}" in df.columns else "rsi_14"
+        rsi = df[rsi_col].dropna().values
+
+        if len(rsi) > 100:
+            self._rsi_median = float(np.median(rsi))
+            self._rsi_p10 = float(np.percentile(rsi, 10))
+            self._rsi_p90 = float(np.percentile(rsi, 90))
+            bb = df["bb_pos"].dropna().values if "bb_pos" in df.columns else None
+            self._bb_median = float(np.median(bb)) if bb is not None and len(bb) > 100 else 0.5
+        else:
+            self._rsi_median = 50.0
+            self._rsi_p10 = None
+            self._rsi_p90 = None
+            self._bb_median = 0.5
 
     def predict_proba(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
         # Use pre-computed features if available, else compute
@@ -55,8 +72,15 @@ class RSIMeanReversionStrategy(BaseStrategy):
         rsi = np.nan_to_num(rsi, nan=50.0)
         bb_pos = df["bb_pos"].values.copy() if "bb_pos" in df.columns else np.full(len(df), 0.5)
 
-        oversold = self.params["rsi_oversold"]
-        overbought = self.params["rsi_overbought"]
+        # Blend fixed thresholds with adaptive percentiles from fit()
+        base_oversold = self.params["rsi_oversold"]
+        base_overbought = self.params["rsi_overbought"]
+        if hasattr(self, '_rsi_p10') and self._rsi_p10 is not None:
+            oversold = (base_oversold + self._rsi_p10) / 2
+            overbought = (base_overbought + self._rsi_p90) / 2
+        else:
+            oversold = base_oversold
+            overbought = base_overbought
 
         # Vectorized RSI signal
         proba = np.full(len(rsi), 0.5)

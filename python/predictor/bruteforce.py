@@ -4,7 +4,9 @@ import itertools
 import json
 from typing import Any, TYPE_CHECKING
 
-from predictor.backtester import run_backtest
+from predictor.backtester import (
+    run_backtest, preload_backtest_data, run_backtest_vectorized, RULE_BASED_STRATEGIES,
+)
 from predictor.db_history import (
     save_backtest_run,
     save_bruteforce_session,
@@ -34,7 +36,7 @@ PARAM_GRIDS: dict[str, dict[str, list]] = {
         "rsi_overbought": [65, 70, 75, 80],
         "bb_low": [0.15, 0.2, 0.25],
         "bb_high": [0.75, 0.8, 0.85],
-        "window_size": [2000, 3000, 5000],
+        "window_size": [2000, 3000, 5000, 8000],
     },
     "momentum": {
         "ema_fast": [3, 5, 8],
@@ -44,12 +46,12 @@ PARAM_GRIDS: dict[str, dict[str, list]] = {
         "volume_weight": [0.1, 0.2, 0.3],
         "momentum_weight": [0.1, 0.15, 0.2],
         "volume_surge_threshold": [1.3, 1.5, 2.0],
-        "window_size": [2000, 5000, 8000],
+        "window_size": [2000, 3000, 5000, 8000],
     },
     "pattern_sequence": {
         "lookback_lengths": [[3, 4, 5], [4, 5, 6, 7], [3, 4, 5, 6, 7], [5, 6, 7, 8]],
         "min_occurrences": [3, 5, 10, 20],
-        "window_size": [2000, 5000],
+        # window_size not included: pattern counting is context-independent
     },
 }
 
@@ -100,6 +102,18 @@ async def _run_bf_loop(
     if progress:
         progress.total = total
         progress.extra["bruteforce_id"] = bf_id
+
+    # ── Preload data once for ALL combos ──
+    preloaded = await preload_backtest_data(
+        train_start, train_end, test_start, test_end, [horizon], table, progress,
+    )
+    if not preloaded["test_indices"]:
+        raise RuntimeError("No test data found in the given range")
+
+    is_fast = strategy in RULE_BASED_STRATEGIES
+    mode = "FAST vectorized" if is_fast else "moving-window (preloaded)"
+    print(f"[BF {bf_id}] Data preloaded: {len(preloaded['df_feat'])} candles, "
+          f"{len(preloaded['test_indices'])} test | {mode} mode", flush=True)
 
     t0 = time.time()
 
@@ -152,18 +166,40 @@ async def _run_bf_loop(
 
         try:
             combo_t0 = time.time()
-            result = await run_backtest(
-                strategy_name=strategy,
-                strategy_params=strat_params,
-                train_start=train_start,
-                train_end=train_end,
-                test_start=test_start,
-                test_end=test_end,
-                horizons=[horizon],
-                table=table,
-                window_size=ws,
-                retrain_every=retrain_every,
-            )
+
+            if is_fast:
+                # Vectorized: single predict call on full test set (~0.01s)
+                result = run_backtest_vectorized(
+                    strategy_name=strategy,
+                    strategy_params=strat_params,
+                    preloaded=preloaded,
+                    horizons=[horizon],
+                    window_size=ws,
+                    retrain_every=retrain_every,
+                    train_start=train_start,
+                    train_end=train_end,
+                    test_start=test_start,
+                    test_end=test_end,
+                    table=table,
+                )
+            else:
+                # Moving-window with preloaded data (skip data reload)
+                result = await run_backtest(
+                    strategy_name=strategy,
+                    strategy_params=strat_params,
+                    train_start=train_start,
+                    train_end=train_end,
+                    test_start=test_start,
+                    test_end=test_end,
+                    horizons=[horizon],
+                    table=table,
+                    window_size=ws,
+                    retrain_every=retrain_every,
+                    preloaded=preloaded,
+                )
+
+            if isinstance(result, dict) and result.get("error"):
+                raise RuntimeError(str(result.get("error")))
 
             result["is_bruteforce"] = True
             result["bruteforce_id"] = bf_id
@@ -201,7 +237,11 @@ async def _run_bf_loop(
                 progress.extra["last_combo_time_sec"] = round(combo_elapsed, 2)
                 progress.phase = progress_last_phase
 
-            print(f"[BF {bf_id}] {completed}/{total} | acc={acc}% | best={best_accuracy}%", flush=True)
+            print(f"[BF {bf_id}] {completed}/{total} | ws={ws} | acc={acc}% | best={best_accuracy}% | {round(combo_elapsed,1)}s", flush=True)
+
+            # Yield to event loop periodically in fast mode for UI updates
+            if is_fast and completed % 20 == 0:
+                await asyncio.sleep(0)
 
         except Exception as e:
             from predictor.task_manager import CancelledError
@@ -218,7 +258,16 @@ async def _run_bf_loop(
                 })
                 raise
             completed += 1
-            print(f"[BF {bf_id}] {completed}/{total} ERROR: {e}", flush=True)
+
+            elapsed_now = time.time() - t0
+            await update_bruteforce_session(bf_id, {
+                "completed": completed,
+                "best_accuracy": best_accuracy,
+                "best_params_json": best_params,
+                "total_time_sec": round(elapsed_before + elapsed_now, 2),
+            })
+
+            print(f"[BF {bf_id}] {completed}/{total} | ws={ws} ERROR: {e}", flush=True)
 
     total_time = elapsed_before + (time.time() - t0)
 

@@ -164,11 +164,67 @@ async def get_history(limit: int = 100, strategy: Optional[str] = None,
 
 
 async def get_history_detail(run_id: int) -> Optional[dict]:
-    rows = await get_history(limit=99999)
-    for r in rows:
-        if r["id"] == run_id:
-            return r
-    return None
+    """Load a single backtest run with its horizon data by run_id."""
+    row = await db.fetchone(
+        "SELECT id, strategy, params_json, train_start, train_end, "
+        "test_start, test_end, tbl, window_size, train_candles, test_candles, "
+        "total_time_sec, is_bruteforce, bruteforce_id, created_at "
+        "FROM backtest_runs WHERE id = %s", (run_id,)
+    )
+    if not row:
+        return None
+
+    run = {
+        "id": row[0],
+        "strategy": row[1],
+        "params": json.loads(row[2]) if row[2] else {},
+        "train_start": row[3],
+        "train_end": row[4],
+        "test_start": row[5],
+        "test_end": row[6],
+        "train_period": f"{row[3]} -> {row[4]}",
+        "test_period": f"{row[5]} -> {row[6]}",
+        "table": row[7],
+        "window_size": row[8],
+        "train_candles": row[9],
+        "test_candles": row[10],
+        "total_time_sec": row[11],
+        "is_bruteforce": bool(row[12]),
+        "bruteforce_id": row[13],
+        "created_at": str(row[14]) if row[14] else "",
+        "horizons": {},
+    }
+
+    h_rows = await db.fetchall(
+        "SELECT * FROM backtest_horizons WHERE run_id = %s ORDER BY horizon", (run_id,)
+    )
+    for hr in h_rows:
+        run["horizons"][str(hr[2])] = {
+            "accuracy": hr[3],
+            "accuracy_pct": hr[4],
+            "total_candles": hr[5],
+            "signals": hr[6],
+            "skipped": hr[7],
+            "correct": hr[8],
+            "wrong": hr[9],
+            "up_predictions": hr[10],
+            "up_correct": hr[11],
+            "up_accuracy": hr[12],
+            "down_predictions": hr[13],
+            "down_correct": hr[14],
+            "down_accuracy": hr[15],
+            "streaks": {
+                "max_win_streak": hr[16],
+                "max_lose_streak": hr[17],
+            },
+            "fit_time_sec": hr[18],
+            "predict_time_sec": hr[19],
+            "monthly": json.loads(hr[20]) if hr[20] else [],
+            "daily": json.loads(hr[21]) if hr[21] else [],
+            "confidence_distribution": json.loads(hr[22]) if hr[22] else {},
+        }
+
+    return run
 
 
 async def delete_run(run_id: int) -> bool:

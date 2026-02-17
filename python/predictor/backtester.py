@@ -12,6 +12,9 @@ if TYPE_CHECKING:
     from predictor.task_manager import TaskProgress
 
 
+RULE_BASED_STRATEGIES = {"rsi_mean_reversion", "momentum"}
+
+
 async def run_backtest(
     strategy_name: str,
     strategy_params: dict | None,
@@ -24,6 +27,7 @@ async def run_backtest(
     window_size: int = 5000,
     retrain_every: int = 500,
     progress: "TaskProgress | None" = None,
+    preloaded: dict | None = None,
 ) -> dict:
     """
     Moving-window backtest with progress tracking and pause/cancel support.
@@ -34,34 +38,42 @@ async def run_backtest(
 
     t0 = time.time()
 
-    # ── Phase 1: Load candle data ──
-    if progress:
-        progress.phase = "Phase 1/3: Loading candle data from DB..."
-        await asyncio.sleep(0)
+    if preloaded:
+        # Reuse preloaded data (skip expensive data loading + feature computation)
+        df_raw = preloaded["df_raw"]
+        df_feat = preloaded["df_feat"]
+        test_indices = preloaded["test_indices"]
+        load_time = preloaded["load_time"]
+        feat_time = preloaded["feat_time"]
+    else:
+        # ── Phase 1: Load candle data ──
+        if progress:
+            progress.phase = "Phase 1/3: Loading candle data from DB..."
+            await asyncio.sleep(0)
 
-    df_raw = await load_candles(table, train_start, test_end)
-    df_raw = add_direction(df_raw)
-    max_horizon = max(horizons)
-    df_raw = add_future_directions(df_raw, horizons)
-    df_raw = df_raw.reset_index(drop=True)
+        df_raw = await load_candles(table, train_start, test_end)
+        df_raw = add_direction(df_raw)
+        max_horizon = max(horizons)
+        df_raw = add_future_directions(df_raw, horizons)
+        df_raw = df_raw.reset_index(drop=True)
 
-    load_time = time.time() - t0
+        load_time = time.time() - t0
 
-    if progress:
-        progress.phase = f"Phase 2/3: Computing technical features for {len(df_raw)} candles..."
-        await asyncio.sleep(0)
+        if progress:
+            progress.phase = f"Phase 2/3: Computing technical features for {len(df_raw)} candles..."
+            await asyncio.sleep(0)
 
-    # ── Phase 2: Pre-compute ALL technical features ONCE ──
-    t_feat = time.time()
-    df_feat = add_technical_features(df_raw)
-    feat_time = time.time() - t_feat
+        # ── Phase 2: Pre-compute ALL technical features ONCE ──
+        t_feat = time.time()
+        df_feat = add_technical_features(df_raw)
+        feat_time = time.time() - t_feat
 
-    # Find test start index
-    test_start_us = date_to_us(test_start)
-    test_end_us = date_to_us(test_end, True)
-    test_indices = df_feat.index[
-        (df_feat["open_time"] >= test_start_us) & (df_feat["open_time"] <= test_end_us)
-    ].tolist()
+        # Find test start index
+        test_start_us = date_to_us(test_start)
+        test_end_us = date_to_us(test_end, True)
+        test_indices = df_feat.index[
+            (df_feat["open_time"] >= test_start_us) & (df_feat["open_time"] <= test_end_us)
+        ].tolist()
 
     if not test_indices:
         return {"error": "No test data found in the given range"}
@@ -251,6 +263,200 @@ async def run_backtest(
         "total_time_sec": round(total_time, 2),
         "load_time_sec": round(load_time, 2),
         "feature_time_sec": round(feat_time, 2),
+    }
+
+
+async def preload_backtest_data(
+    train_start: str,
+    train_end: str,
+    test_start: str,
+    test_end: str,
+    horizons: list[int],
+    table: str = "c_5m",
+    progress: "TaskProgress | None" = None,
+) -> dict:
+    """Load candle data and compute features once, for reuse across brute-force combos."""
+    t0 = time.time()
+
+    if progress:
+        progress.phase = "Preloading candle data from DB..."
+        await asyncio.sleep(0)
+
+    df_raw = await load_candles(table, train_start, test_end)
+    df_raw = add_direction(df_raw)
+    df_raw = add_future_directions(df_raw, horizons)
+    df_raw = df_raw.reset_index(drop=True)
+    load_time = time.time() - t0
+
+    if progress:
+        progress.phase = f"Computing technical features for {len(df_raw)} candles..."
+        await asyncio.sleep(0)
+
+    t_feat = time.time()
+    df_feat = add_technical_features(df_raw)
+    feat_time = time.time() - t_feat
+
+    test_start_us = date_to_us(test_start)
+    test_end_us = date_to_us(test_end, True)
+    test_indices = df_feat.index[
+        (df_feat["open_time"] >= test_start_us) & (df_feat["open_time"] <= test_end_us)
+    ].tolist()
+
+    return {
+        "df_raw": df_raw,
+        "df_feat": df_feat,
+        "test_indices": test_indices,
+        "load_time": round(load_time, 2),
+        "feat_time": round(feat_time, 2),
+    }
+
+
+def run_backtest_vectorized(
+    strategy_name: str,
+    strategy_params: dict | None,
+    preloaded: dict,
+    horizons: list[int],
+    window_size: int,
+    retrain_every: int,
+    train_start: str,
+    train_end: str,
+    test_start: str,
+    test_end: str,
+    table: str,
+) -> dict:
+    """
+    Ultra-fast backtest for rule-based strategies (RSI, Momentum).
+    Calls predict/predict_proba ONCE on the full test set — no moving window.
+    ~100-1000x faster per combo than run_backtest.
+    """
+    df_feat = preloaded["df_feat"]
+    df_raw = preloaded["df_raw"]
+    test_indices = preloaded["test_indices"]
+
+    if not test_indices:
+        return {"error": "No test data found in the given range"}
+
+    t0 = time.time()
+    test_start_idx = test_indices[0]
+    actual_window = min(window_size, test_start_idx)
+
+    results_by_horizon = {}
+
+    for horizon in horizons:
+        t1 = time.time()
+        target_col = f"future_dir_{horizon}"
+
+        # Filter valid test indices (must have future direction available)
+        valid_test = np.array([
+            i for i in test_indices
+            if i + horizon < len(df_feat) and not pd.isna(df_feat.at[i, target_col])
+        ])
+
+        if len(valid_test) == 0:
+            results_by_horizon[str(horizon)] = {
+                "error": "No predictions generated",
+                "total_candles": len(test_indices),
+                "signals": 0,
+            }
+            continue
+
+        # Get test data as contiguous DataFrame
+        df_test = df_feat.iloc[valid_test].reset_index(drop=True)
+
+        # Training window: last `window_size` candles before test start
+        train_lo = max(0, test_start_idx - actual_window)
+        df_train = df_feat.iloc[train_lo:test_start_idx].reset_index(drop=True)
+
+        # Create strategy, fit on training window, predict on full test set
+        strategy = get_strategy(strategy_name, strategy_params)
+        strategy.fit(df_train, horizon)  # learns adaptive stats from training window
+        pred_arr = strategy.predict(df_test, horizon)
+        prob_arr = strategy.predict_proba(df_test, horizon)
+
+        actuals = df_feat[target_col].iloc[valid_test].values.astype(int)
+        preds = pred_arr.astype(int)
+        probas = prob_arr.astype(float)
+
+        valid_mask = preds != -1
+        total_candles_tested = len(preds)
+
+        if valid_mask.sum() == 0:
+            results_by_horizon[str(horizon)] = {
+                "error": "All predictions were SKIP (confidence too low)",
+                "total_candles": total_candles_tested,
+                "signals": 0,
+            }
+            continue
+
+        y_true = actuals[valid_mask]
+        y_pred = preds[valid_mask]
+        y_prob = probas[valid_mask]
+        y_idxs = valid_test[valid_mask]
+
+        correct = int((y_true == y_pred).sum())
+        total_signals = int(valid_mask.sum())
+        accuracy = correct / total_signals
+
+        up_pred_mask = y_pred == 1
+        down_pred_mask = y_pred == 0
+        up_correct = int((y_true[up_pred_mask] == 1).sum()) if up_pred_mask.sum() > 0 else 0
+        down_correct = int((y_true[down_pred_mask] == 0).sum()) if down_pred_mask.sum() > 0 else 0
+        up_total = int(up_pred_mask.sum())
+        down_total = int(down_pred_mask.sum())
+
+        test_times = pd.to_datetime(df_raw["open_time"].iloc[y_idxs].values, unit="us")
+        monthly = _monthly_breakdown(test_times.values, y_true, y_pred)
+        daily = _daily_breakdown(test_times.values, y_true, y_pred)
+        conf_dist = _confidence_distribution(y_prob)
+        streaks = _streak_analysis(y_true, y_pred)
+
+        fit_time = time.time() - t1
+
+        results_by_horizon[str(horizon)] = {
+            "accuracy": round(accuracy, 6),
+            "accuracy_pct": round(accuracy * 100, 2),
+            "total_candles": total_candles_tested,
+            "signals": total_signals,
+            "skipped": total_candles_tested - total_signals,
+            "correct": correct,
+            "wrong": total_signals - correct,
+            "up_predictions": up_total,
+            "up_correct": up_correct,
+            "up_accuracy": round(up_correct / up_total * 100, 2) if up_total > 0 else 0,
+            "down_predictions": down_total,
+            "down_correct": down_correct,
+            "down_accuracy": round(down_correct / down_total * 100, 2) if down_total > 0 else 0,
+            "monthly": monthly,
+            "daily": daily,
+            "confidence_distribution": conf_dist,
+            "streaks": streaks,
+            "fit_time_sec": round(fit_time, 4),
+            "train_count": 0,
+            "total_train_time_sec": 0,
+            "predict_time_sec": round(fit_time, 4),
+        }
+
+    total_time = time.time() - t0
+    resolved_params = strategy_params if strategy_params else get_strategy(strategy_name).params
+
+    return {
+        "strategy": strategy_name,
+        "params": resolved_params,
+        "train_start": train_start,
+        "train_end": train_end,
+        "test_start": test_start,
+        "test_end": test_end,
+        "train_period": f"{train_start} -> {train_end}",
+        "test_period": f"{test_start} -> {test_end}",
+        "train_candles": actual_window,
+        "test_candles": len(test_indices),
+        "table": table,
+        "window_size": window_size,
+        "retrain_every": retrain_every,
+        "horizons": results_by_horizon,
+        "total_time_sec": round(total_time, 4),
+        "load_time_sec": preloaded["load_time"],
+        "feature_time_sec": preloaded["feat_time"],
     }
 
 

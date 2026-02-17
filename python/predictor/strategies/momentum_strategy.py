@@ -40,7 +40,25 @@ class MomentumStrategy(BaseStrategy):
         }
 
     def fit(self, df: pd.DataFrame, horizon: int = 1) -> None:
-        pass
+        # Learn adaptive baselines from training window
+        if "macd_hist" not in df.columns:
+            df = add_technical_features(df)
+        df = df.fillna(0)
+
+        macd = df["macd_hist"].values if "macd_hist" in df.columns else np.zeros(len(df))
+        vol_r = df["volume_ratio"].values if "volume_ratio" in df.columns else np.ones(len(df))
+        mom = df["momentum_3"].values if "momentum_3" in df.columns else np.zeros(len(df))
+
+        if len(df) > 100:
+            self._macd_mean = float(np.mean(macd))
+            self._macd_std = float(np.std(macd)) or 1.0
+            self._vol_median = float(np.median(vol_r))
+            self._mom_mean = float(np.mean(mom))
+        else:
+            self._macd_mean = 0.0
+            self._macd_std = 1.0
+            self._vol_median = 1.0
+            self._mom_mean = 0.0
 
     def predict_proba(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
         # Use pre-computed features if available, else compute
@@ -63,25 +81,36 @@ class MomentumStrategy(BaseStrategy):
         w_vol = self.params["volume_weight"]
         w_mom = self.params["momentum_weight"]
 
+        # Adaptive baselines from fit()
+        macd_baseline = getattr(self, '_macd_mean', 0.0)
+        macd_scale = getattr(self, '_macd_std', 1.0)
+        vol_baseline = getattr(self, '_vol_median', 1.0)
+        mom_baseline = getattr(self, '_mom_mean', 0.0)
+
+        # Normalize MACD relative to training baseline
+        macd_norm = (macd_hist - macd_baseline) / macd_scale
+
         # Vectorized scoring
         score = np.zeros(n)
 
-        # MACD histogram direction (compare with previous)
-        macd_prev = np.roll(macd_hist, 1)
+        # MACD: use normalized values relative to training window
+        macd_prev = np.roll(macd_norm, 1)
         macd_prev[0] = 0
-        score += np.where((macd_hist > 0) & (macd_hist > macd_prev), w_macd,
-                 np.where((macd_hist < 0) & (macd_hist < macd_prev), -w_macd, 0.0))
+        score += np.where((macd_norm > 0) & (macd_norm > macd_prev), w_macd,
+                 np.where((macd_norm < 0) & (macd_norm < macd_prev), -w_macd, 0.0))
 
         # EMA crossover
         score += np.where(ema_fast > ema_slow, w_ema, -w_ema)
 
-        # Volume surge confirms direction
-        surge = vol_ratio > self.params["volume_surge_threshold"]
-        score += np.where(surge & (mom > 0), w_vol,
-                 np.where(surge & (mom < 0), -w_vol, 0.0))
+        # Volume surge: relative to training median instead of fixed threshold
+        adaptive_surge_thresh = self.params["volume_surge_threshold"] * vol_baseline
+        surge = vol_ratio > adaptive_surge_thresh
+        mom_adj = mom - mom_baseline  # momentum relative to training bias
+        score += np.where(surge & (mom_adj > 0), w_vol,
+                 np.where(surge & (mom_adj < 0), -w_vol, 0.0))
 
-        # Raw momentum
-        score += np.where(mom > 0, w_mom, np.where(mom < 0, -w_mom, 0.0))
+        # Momentum relative to training bias
+        score += np.where(mom_adj > 0, w_mom, np.where(mom_adj < 0, -w_mom, 0.0))
 
         # First element stays at 0.5
         score[0] = 0.0

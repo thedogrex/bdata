@@ -123,6 +123,7 @@ async def process_file_like(f):
     # skip metadata until we find a row whose first column is a 13-digit timestamp
     start_row = None
     rows = []
+    a=0
     for row in reader:
         # Binance Kline format:
         # [Open time, Open, High, Low, Close, Volume, Close time, ...]
@@ -148,7 +149,7 @@ async def process_file_like(f):
             if(len(optime)==13):
                 optime = optime + '000'
 
-            await db.insert_one("c_15m", fields={
+            await db.insert_one("c_5m", fields={
                 'open_time' : int(optime),
                 'open' : open,
                 'high' : high,
@@ -160,9 +161,11 @@ async def process_file_like(f):
                 'trades' : trades,
                 'taker_base_volume' : taker_base_volume,
                 'taker_quota_volume' : taker_quota_volume
-            })
+            },
+             print_query=False)
+            a+=1
 
-    print(f'candles {candles}')
+    print(f'candles added: {a}')
 
 if __name__ == "__main__":
 
@@ -181,5 +184,5 @@ if __name__ == "__main__":
 
     start_date = '2021-01-01'
 
-    asyncio.run(download_daily_klines('spot', symbols, num_symbols, ["15m"], dates, start_date, None, folder))
+    asyncio.run(download_daily_klines('spot', symbols, num_symbols, ["5m"], dates, start_date, None, folder))
 

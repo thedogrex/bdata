@@ -24,7 +24,7 @@ PREDEFINED_PATTERNS_BY_LENGTH = {
     #12: ["DDDDDDDDDDDD"]# 2 patterns for length 12
 }
 
-"""PREDEFINED_PATTERNS_BY_LENGTH = {
+PREDEFINED_PATTERNS_BY_LENGTH = {
     4: ["UUUU"],        # 3 patterns for length 4
     5: ["UUUUU"],              # 2 patterns for length 5
     6: ["UUUUUU"],           # 3 patterns for length 6
@@ -34,7 +34,7 @@ PREDEFINED_PATTERNS_BY_LENGTH = {
     #10: ["DDDDDDDDDD"],   # 2 patterns for length 10
     #11: ["DDDDDDDDDDD"], # 2 patterns for length 11
     #12: ["DDDDDDDDDDDD"]# 2 patterns for length 12
-}"""
+}
 
 # === Utils ===
 def to_microseconds_timestamp(date_string: str) -> int:
@@ -179,7 +179,7 @@ async def simulate_length_multi_year(df, years_months, pattern_length):
 
 # === Data Loader ===
 async def load_data():
-    res = await db.select("c_15m", ["open_time", "open", "close"], None, 0, "ASC")
+    res = await db.select("c_5m", ["open_time", "open", "close"], None, 0, "ASC")
     df = pd.DataFrame(res, columns=["open_time", "open", "close"]).reset_index(drop=True)
     return df
 
@@ -190,7 +190,8 @@ async def run_all_lengths():
         2022: list(range(1, 13)),  # full year
         2023: list(range(1, 13)),  # full year
         2024: list(range(1, 13)),  # full year
-        2025: list(range(1, 12))   # Jan → Nov
+        2025: list(range(1, 13)),   # Jan → Nov
+        2026: list(range(1, 2))  # Jan → Jan
     }
     for length in range(4, 9):  # pattern lengths
         await simulate_length_multi_year(df, years_months, length)

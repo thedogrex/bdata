@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from predictor.task_manager import TaskProgress
 
 
-RULE_BASED_STRATEGIES = {"rsi_mean_reversion", "momentum"}
+RULE_BASED_STRATEGIES = {"rsi_mean_reversion", "momentum", "stochastic_adx", "candlestick_pattern"}
 
 
 async def run_backtest(
@@ -105,7 +105,7 @@ async def run_backtest(
         total_train_time = 0.0
 
         for step, i in enumerate(test_indices):
-            # Pause/cancel check every 50 candles to avoid overhead
+            # Pause/cancel check every 50 candles
             if progress and step % 50 == 0:
                 await progress.check_pause_cancel()
                 correct_so_far = sum(1 for p in all_preds if p[1] == p[3] and p[1] != -1)
@@ -148,17 +148,18 @@ async def run_backtest(
                 # Yield after training (can be slow for XGBoost)
                 await asyncio.sleep(0)
 
-            # Predict using a context window ending at candle i (inclusive)
-            # Use iloc view (no copy needed since features are pre-computed)
-            ctx_lo = max(0, i - actual_window)
-            ctx_hi = i + 1
-            df_ctx = df_feat.iloc[ctx_lo:ctx_hi].reset_index(drop=True)
-
-            pred_arr = strategy.predict(df_ctx, horizon)
-            prob_arr = strategy.predict_proba(df_ctx, horizon)
-
-            pred = int(pred_arr[-1])
-            prob = float(prob_arr[-1])
+            # Predict single candle (optimized)
+            if strategy_name == "random_forest" and hasattr(strategy, "feature_cols") and hasattr(strategy, "predict_row"):
+                cols = strategy.feature_cols
+                x_row = df_feat.loc[i, cols].to_numpy()
+                pred = int(strategy.predict_row(x_row))
+                prob = float(strategy.predict_proba_row(x_row))
+            else:
+                df_single = df_feat.iloc[[i]]
+                pred_arr = strategy.predict(df_single, horizon)
+                prob_arr = strategy.predict_proba(df_single, horizon)
+                pred = int(pred_arr[0])
+                prob = float(prob_arr[0])
 
             all_preds.append((i, pred, prob, int(actual_val)))
 

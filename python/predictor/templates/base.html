@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Candle Predictor v3 — Admin Panel</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body{background:#0f172a;color:#e2e8f0;font-family:'Inter',system-ui,sans-serif}
+  .card{background:#1e293b;border:1px solid #334155;border-radius:12px}
+  .btn{padding:6px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;color:#fff;transition:background .15s}
+  .btn-primary{background:#3b82f6}.btn-primary:hover{background:#2563eb}
+  .btn-green{background:#10b981}.btn-green:hover{background:#059669}
+  .btn-red{background:#ef4444}.btn-red:hover{background:#dc2626}
+  .btn-purple{background:#8b5cf6}.btn-purple:hover{background:#7c3aed}
+  .btn-amber{background:#f59e0b}.btn-amber:hover{background:#d97706}
+  .btn-slate{background:#475569}.btn-slate:hover{background:#64748b}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  select,input,textarea{background:#0f172a;border:1px solid #475569;color:#e2e8f0;border-radius:8px;padding:8px 12px}
+  select:focus,input:focus,textarea:focus{outline:none;border-color:#3b82f6}
+  .accuracy-good{color:#10b981}.accuracy-ok{color:#f59e0b}.accuracy-bad{color:#ef4444}
+  .tab-active{border-bottom:2px solid #3b82f6;color:#3b82f6}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;padding:8px 10px;border-bottom:1px solid #334155;color:#94a3b8;font-weight:600;font-size:12px}
+  td{padding:8px 10px;border-bottom:1px solid #1e293b;font-size:13px}
+  tr:hover td{background:rgba(30,41,59,.5)}
+  .badge{padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600}
+  .badge-up{background:#064e3b;color:#6ee7b7}.badge-down{background:#7f1d1d;color:#fca5a5}
+  .badge-bf{background:#4c1d95;color:#c4b5fd}.badge-run{background:#1e3a5f;color:#93c5fd}
+  .badge-pause{background:#78350f;color:#fcd34d}.badge-err{background:#7f1d1d;color:#fca5a5}
+  .badge-queue{background:#334155;color:#94a3b8}.badge-done{background:#064e3b;color:#6ee7b7}
+  .badge-cancel{background:#374151;color:#9ca3af}
+  .progress-bar{background:#334155;border-radius:6px;height:20px;overflow:hidden;position:relative}
+  .progress-fill{height:100%;border-radius:6px;transition:width .3s;background:linear-gradient(90deg,#3b82f6,#10b981)}
+  .progress-text{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#fff}
+  .tooltip{position:relative;display:inline-block}
+  .tooltip .tt{visibility:hidden;width:300px;background:#0f172a;color:#e2e8f0;text-align:left;border-radius:6px;padding:8px 10px;position:absolute;z-index:1000;bottom:125%;left:50%;margin-left:-150px;opacity:0;transition:opacity .2s;font-size:11px;line-height:1.4;box-shadow:0 4px 12px rgba(0,0,0,.6);border:1px solid #334155}
+  .tooltip:hover .tt{visibility:visible;opacity:1}
+  .ob-snapshot-row{cursor:pointer;transition:background .15s}
+  .ob-snapshot-row:hover{background:rgba(59,130,246,.15)!important}
+  .ob-snapshot-row.active{background:rgba(59,130,246,.25)!important;border-left:3px solid #3b82f6}
+</style>
+</head>
+<body class="min-h-screen">
+<div class="max-w-7xl mx-auto px-4 py-6">
+
+  <!-- ===== LIVE TASK BAR ===== -->
+  <div id="taskbar" class="hidden card p-4 mb-4">
+    <div class="flex items-center justify-between mb-2">
+      <div class="flex items-center gap-3">
+        <span id="tb-status" class="badge badge-run">running</span>
+        <span id="tb-label" class="text-sm font-medium"></span>
+      </div>
+      <div class="flex gap-2" id="tb-actions"></div>
+    </div>
+    <div class="progress-bar mb-1">
+      <div id="tb-fill" class="progress-fill" style="width:0%"></div>
+      <div id="tb-pct" class="progress-text">0%</div>
+    </div>
+    <div class="flex justify-between text-xs text-slate-400 mt-1">
+      <span id="tb-phase"></span>
+      <span id="tb-time"></span>
+    </div>
+  </div>
+
+  <!-- ===== QUEUE BAR ===== -->
+  <div id="queuebar" class="hidden card p-4 mb-4">
+    <div class="flex items-center justify-between mb-2">
+      <span class="text-sm font-semibold">Queue (<span id="q-count">0</span>)</span>
+      <button onclick="clearQueue()" class="btn btn-red text-xs">Clear Queue</button>
+    </div>
+    <div id="q-list"></div>
+  </div>
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-white">Candle Predictor <span class="text-xs text-slate-400">v3</span></h1>
+      <p class="text-slate-400 text-sm mt-1">Moving-window backtest &bull; brute-force &bull; task queue</p>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="flex gap-5 mb-6 border-b border-slate-700 pb-0">
+    <button onclick="switchTab('backtest')" id="tab-backtest" class="pb-3 px-1 text-sm font-medium tab-active cursor-pointer">Backtest</button>
+    <button onclick="switchTab('compare')" id="tab-compare" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Compare</button>
+    <button onclick="switchTab('bruteforce')" id="tab-bruteforce" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Brute Force</button>
+    <button onclick="switchTab('history')" id="tab-history" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">History</button>
+    <button onclick="switchTab('best')" id="tab-best" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Best Runs</button>
+    <button onclick="switchTab('poly')" id="tab-poly" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Polymarket</button>
+    <button onclick="switchTab('orderbooks')" id="tab-orderbooks" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Order Books</button>
+  </div>
+
+  {{TAB_BACKTEST}}
+  {{TAB_COMPARE}}
+  {{TAB_BRUTEFORCE}}
+  {{TAB_HISTORY}}
+  {{TAB_BEST}}
+  {{TAB_POLY}}
+  {{TAB_ORDERBOOKS}}
+
+</div>
+
+<script>
+const API='';
+let strategiesData=[];
+let pollTimer=null;
+let activeTaskId=null;
+let polyActiveTs=null;
+
+{{JS_COMMON}}
+{{JS_POLY}}
+{{JS_ORDERBOOKS}}
+{{JS_BACKTEST}}
+
+// ===== BOOT =====
+init();
+</script>
+</body>
+</html>

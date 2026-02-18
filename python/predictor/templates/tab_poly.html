@@ -1,0 +1,73 @@
+  <!-- ============ TAB: POLYMARKET ============ -->
+  <div id="panel-poly" class="hidden">
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div class="card p-6 lg:col-span-1">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold">Markets (5m)</h2>
+          <button onclick="loadPolyMarkets()" class="btn btn-primary text-xs">Refresh</button>
+        </div>
+        <div id="poly-markets" class="text-sm text-slate-400">Loading...</div>
+      </div>
+
+      <div class="card p-6 lg:col-span-2">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <h2 class="text-lg font-semibold">Market Detail</h2>
+            <div id="poly-market-title" class="text-xs text-slate-400"></div>
+          </div>
+          <button onclick="clearPolySelection()" class="btn btn-slate text-xs">Clear</button>
+        </div>
+
+        <div id="poly-market-detail" class="text-sm text-slate-400">Select a market.</div>
+
+        <!-- Real-Time Order Books: only 5 lowest asks per side -->
+        <div class="mt-4">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-semibold">Asks (Instant Buy Prices)</h3>
+            <div id="poly-ob-status" class="text-xs text-slate-400">Auto-updating</div>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <h4 class="text-sm font-semibold text-green-400 mb-2">UP</h4>
+              <div id="poly-orderbook-up" class="text-xs text-slate-400">Select a market.</div>
+            </div>
+            <div>
+              <h4 class="text-sm font-semibold text-red-400 mb-2">DOWN</h4>
+              <div id="poly-orderbook-down" class="text-xs text-slate-400">Select a market.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sim Trade & Positions -->
+        <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="card p-4" style="background:#0f172a;border:1px solid #334155">
+            <h3 class="font-semibold mb-2">Sim Trade (Test Mode)</h3>
+            <div class="grid grid-cols-1 gap-2">
+              <div>
+                <label class="block text-xs text-slate-400 mb-1">Qty</label>
+                <input id="poly-sim-qty" type="number" value="1" step="0.1" class="w-full">
+              </div>
+            </div>
+            <button onclick="submitSimTrade()" class="btn btn-green text-xs mt-3">Submit</button>
+            <div id="poly-sim-msg" class="text-xs text-slate-400 mt-2"></div>
+          </div>
+
+          <div class="card p-4" style="background:#0f172a;border:1px solid #334155">
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="font-semibold">Positions</h3>
+              <button onclick="loadSimPositions()" class="btn btn-primary text-xs">Refresh</button>
+            </div>
+            <div id="poly-positions" class="text-xs text-slate-400">Loading...</div>
+          </div>
+        </div>
+
+        <div class="mt-4">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-semibold">Sim Trades</h3>
+            <button onclick="loadSimTrades()" class="btn btn-primary text-xs">Refresh</button>
+          </div>
+          <div id="poly-trades" class="text-xs text-slate-400">Loading...</div>
+        </div>
+      </div>
+    </div>
+  </div>

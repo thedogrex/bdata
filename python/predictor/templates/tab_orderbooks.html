@@ -1,0 +1,76 @@
+  <!-- ============ TAB: ORDER BOOKS ============ -->
+  <div id="panel-orderbooks" class="hidden">
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+      <!-- Left: Market selector -->
+      <div class="card p-6 lg:col-span-1">
+        <h2 class="text-lg font-semibold mb-3">Select Market</h2>
+        <div id="ob-market-list" class="text-sm text-slate-400">Loading...</div>
+      </div>
+
+      <!-- Right: Snapshot viewer -->
+      <div class="card p-6 lg:col-span-2">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold">Order Book Snapshots</h2>
+          <div class="flex gap-2">
+            <button onclick="obSetMode('live')" id="ob-mode-live" class="btn btn-green text-xs">Live</button>
+            <button onclick="obSetMode('history')" id="ob-mode-history" class="btn btn-slate text-xs">History</button>
+          </div>
+        </div>
+
+        <div id="ob-market-info" class="text-xs text-slate-400 mb-3">Select a market to view snapshots.</div>
+
+        <!-- Live mode: auto-updating latest snapshot -->
+        <div id="ob-live-panel">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-xs text-slate-400">Auto-updating latest snapshot (asks only — instant buy prices)</div>
+            <div id="ob-live-status" class="text-xs text-green-400"></div>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <h4 class="text-sm font-semibold text-green-400 mb-2">UP — 5 Lowest Asks</h4>
+              <div id="ob-live-up" class="text-xs text-slate-400">Select a market.</div>
+            </div>
+            <div>
+              <h4 class="text-sm font-semibold text-red-400 mb-2">DOWN — 5 Lowest Asks</h4>
+              <div id="ob-live-down" class="text-xs text-slate-400">Select a market.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- History mode: snapshot browser -->
+        <div id="ob-history-panel" class="hidden">
+          <div class="flex gap-2 items-end mb-3">
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">Outcome</label>
+              <select id="ob-hist-outcome" class="w-48" onchange="obLoadHistory()">
+                <option value="">Select outcome</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">From</label>
+              <input type="datetime-local" id="ob-hist-from" class="w-48">
+            </div>
+            <div>
+              <label class="block text-xs text-slate-400 mb-1">To</label>
+              <input type="datetime-local" id="ob-hist-to" class="w-48">
+            </div>
+            <button onclick="obLoadHistory()" class="btn btn-primary text-xs">Load</button>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <!-- Snapshot list -->
+            <div>
+              <h4 class="text-sm font-semibold mb-2">Snapshots</h4>
+              <div id="ob-hist-list" class="max-h-96 overflow-y-auto text-xs text-slate-400">No data.</div>
+            </div>
+            <!-- Snapshot detail -->
+            <div>
+              <h4 class="text-sm font-semibold mb-2">Snapshot Detail</h4>
+              <div id="ob-hist-detail" class="text-xs text-slate-400">Click a snapshot to view.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>

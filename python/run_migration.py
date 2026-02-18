@@ -79,6 +79,69 @@ STATEMENTS = [
         INDEX idx_best (best_accuracy DESC)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+
+    """
+    CREATE TABLE IF NOT EXISTS poly_markets (
+        slug        VARCHAR(255) PRIMARY KEY,
+        ts          INT NOT NULL,
+        end_date    VARCHAR(64),
+        question    TEXT,
+        description TEXT,
+        closed      TINYINT(1) NOT NULL DEFAULT 0,
+        created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_ts (ts),
+        INDEX idx_closed (closed)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+
+    """
+    CREATE TABLE IF NOT EXISTS poly_outcomes (
+        id         INT AUTO_INCREMENT PRIMARY KEY,
+        slug       VARCHAR(255) NOT NULL,
+        asset_id   VARCHAR(128) NOT NULL,
+        name       VARCHAR(255) NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_outcome (slug, asset_id),
+        INDEX idx_asset (asset_id),
+        FOREIGN KEY (slug) REFERENCES poly_markets(slug) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+
+    """
+    CREATE TABLE IF NOT EXISTS poly_orderbook_snapshots (
+        id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+        slug            VARCHAR(255) NOT NULL,
+        asset_id        VARCHAR(128) NOT NULL,
+        ts              INT NOT NULL,
+        best_bid_cents  DOUBLE NULL,
+        best_ask_cents  DOUBLE NULL,
+        mid_cents       DOUBLE NULL,
+        bids_json       JSON,
+        asks_json       JSON,
+        created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_asset_ts (asset_id, ts),
+        INDEX idx_slug_ts (slug, ts),
+        FOREIGN KEY (slug) REFERENCES poly_markets(slug) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+
+    """
+    CREATE TABLE IF NOT EXISTS poly_sim_trades (
+        id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+        ts               INT NOT NULL,
+        slug             VARCHAR(255) NOT NULL,
+        asset_id         VARCHAR(128) NOT NULL,
+        side             VARCHAR(8) NOT NULL,
+        qty              DOUBLE NOT NULL,
+        fill_price_cents DOUBLE NOT NULL,
+        snapshot_ts      INT NULL,
+        created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_ts (ts),
+        INDEX idx_asset (asset_id),
+        INDEX idx_slug (slug)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 ]
 
 

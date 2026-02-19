@@ -2,8 +2,10 @@
 let obSelectedMarket=null;
 let obSelectedSlug=null;
 let obMode='live'; // 'live' or 'history'
+let obHistView='chart'; // 'chart' or 'table'
 let obLiveInterval=null;
 let obHistoryData=[];
+let obChartData={}; // {outcomeName: [{ts, best_ask, asks}]}
 
 function obSetMode(mode){
   obMode=mode;
@@ -16,6 +18,14 @@ function obSetMode(mode){
   } else if(mode==='history'){
     obStopLive();
   }
+}
+
+function obSetHistView(view){
+  obHistView=view;
+  document.getElementById('ob-histview-chart').className = view==='chart' ? 'btn btn-green text-xs' : 'btn btn-slate text-xs';
+  document.getElementById('ob-histview-table').className = view==='table' ? 'btn btn-green text-xs' : 'btn btn-slate text-xs';
+  document.getElementById('ob-hist-chart-panel').classList.toggle('hidden', view!=='chart');
+  document.getElementById('ob-hist-table-panel').classList.toggle('hidden', view!=='table');
 }
 
 function obStopLive(){
@@ -54,11 +64,17 @@ async function obLoadMarkets(){
       const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}) + ' ' + d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
       const status = m.status || (m.closed ? '[DONE]' : 'open');
       const statusClass = status==='[DONE]' ? 'badge badge-queue' : 'badge badge-done';
+      const resolved = (m.resolved_outcome||'');
+      const resolvedBadge = resolved === 'UP'
+        ? '<span style="margin-left:8px;color:#22c55e;font-weight:700">▲</span>'
+        : (resolved === 'DOWN'
+          ? '<span style="margin-left:8px;color:#ef4444;font-weight:700">▼</span>'
+          : '');
       const isActive = (polyActiveTs!==null && (m.ts||0)===polyActiveTs && !m.closed);
       const dot = isActive ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ef4444;margin-right:4px"></span>' : '';
       const posDot = marketsWithPos.has(m.slug) ? '<span title="has position" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-right:4px"></span>' : '';
       const sel = obSelectedSlug===m.slug ? 'bg-blue-900' : '';
-      html+=`<tr class="cursor-pointer ${sel}" onclick="obSelectMarket('${m.slug}')"><td class="text-xs text-slate-400">${dot}${posDot}${dateStr}</td><td><span class="${statusClass}">${status}</span></td></tr>`;
+      html+=`<tr class="cursor-pointer ${sel}" onclick="obSelectMarket('${m.slug}')"><td class="text-xs text-slate-400">${dot}${posDot}${dateStr}</td><td><span class="${statusClass}">${status}</span>${resolvedBadge}</td></tr>`;
     });
     html+='</tbody></table>';
     el.innerHTML=html;
@@ -67,13 +83,11 @@ async function obLoadMarkets(){
 
 async function obSelectMarket(slug){
   obSelectedSlug=slug;
-  // Highlight
   document.querySelectorAll('#ob-market-list tr').forEach(tr=>tr.classList.remove('bg-blue-900'));
   document.querySelectorAll('#ob-market-list tr').forEach(tr=>{
     if(tr.getAttribute('onclick') && tr.getAttribute('onclick').includes(`'${slug}'`)) tr.classList.add('bg-blue-900');
   });
 
-  // Load market detail
   try{
     const res=await fetch(API+'/api/poly/market/'+encodeURIComponent(slug));
     const m=await res.json();
@@ -86,20 +100,16 @@ async function obSelectMarket(slug){
     const dateStr = d.toLocaleDateString('ru-RU') + ' ' + d.toLocaleTimeString('ru-RU');
     document.getElementById('ob-market-info').innerHTML = `<span class="font-mono">${m.slug}</span> · ${dateStr} · ${statusStr}`;
 
-    // Populate outcome selector for history
-    const sel = document.getElementById('ob-hist-outcome');
-    sel.innerHTML='<option value="">All outcomes</option>';
-    (m.outcomes||[]).forEach(o=>{
-      sel.innerHTML+=`<option value="${o.asset_id}">${o.name}</option>`;
-    });
+    const liveBtn = document.getElementById('ob-mode-live');
+    if(liveBtn) liveBtn.disabled = !!isDone;
+    if(isDone){
+      obSetMode('history');
+    }
 
-    // Set default date range for history (last 30 min)
-    const now = new Date();
-    const from = new Date(now.getTime() - 30*60*1000);
-    document.getElementById('ob-hist-to').value = toLocalISOString(now);
-    document.getElementById('ob-hist-from').value = toLocalISOString(from);
+    const sideSel = document.getElementById('ob-hist-side');
+    if(sideSel && !sideSel.value) sideSel.value = 'BOTH';
 
-    if(obMode==='live') obStartLive();
+    if(obMode==='live' && !isDone) obStartLive();
     else obLoadHistory();
   }catch(e){ document.getElementById('ob-market-info').textContent='Error loading market.'; }
 }
@@ -132,58 +142,53 @@ async function obUpdateLive(){
   }
 }
 
+// ===== History: load data for both chart and table =====
+
 async function obLoadHistory(){
   if(!obSelectedMarket) return;
-  const el=document.getElementById('ob-hist-list');
-  el.textContent='Loading...';
+  const listEl=document.getElementById('ob-hist-list');
+  listEl.textContent='Loading...';
   document.getElementById('ob-hist-detail').innerHTML='<span class="text-slate-400">Click a snapshot to view.</span>';
 
-  const assetId = document.getElementById('ob-hist-outcome').value;
-  const fromStr = document.getElementById('ob-hist-from').value;
-  const toStr = document.getElementById('ob-hist-to').value;
-
-  // Determine which outcomes to load
+  const side = (document.getElementById('ob-hist-side')?.value || 'BOTH').toUpperCase();
+  const pair = findUpDownOutcomes(obSelectedMarket);
   let outcomes = [];
-  if(assetId){
-    const o = (obSelectedMarket.outcomes||[]).find(x=>x.asset_id===assetId);
-    if(o) outcomes=[o];
+  if(pair && (side === 'UP' || side === 'DOWN' || side === 'BOTH')){
+    if(side === 'UP') outcomes = [pair.up];
+    else if(side === 'DOWN') outcomes = [pair.down];
+    else outcomes = [pair.up, pair.down];
   } else {
-    outcomes = obSelectedMarket.outcomes||[];
+    outcomes = obSelectedMarket.outcomes || [];
   }
 
-  if(!outcomes.length){ el.innerHTML='<span class="text-slate-400">No outcomes.</span>'; return; }
-
-  // Calculate minutes from date range
-  const fromTs = fromStr ? Math.floor(new Date(fromStr).getTime()/1000) : Math.floor(Date.now()/1000) - 1800;
-  const toTs = toStr ? Math.floor(new Date(toStr).getTime()/1000) : Math.floor(Date.now()/1000);
-  const minutes = Math.max(1, Math.ceil((toTs - fromTs) / 60));
+  if(!outcomes.length){ listEl.innerHTML='<span class="text-slate-400">No outcomes.</span>'; return; }
 
   try{
-    // Fetch snapshots for all selected outcomes
     let allSnapshots = [];
+    obChartData = {};
     for(const o of outcomes){
-      const res = await fetch(API+`/api/poly/orderbook/${encodeURIComponent(obSelectedMarket.slug)}/${encodeURIComponent(o.asset_id)}/analysis?minutes=${minutes}`);
+      const res = await fetch(API+`/api/poly/orderbook/${encodeURIComponent(obSelectedMarket.slug)}/${encodeURIComponent(o.asset_id)}/analysis`);
       const data = await res.json();
       if(Array.isArray(data)){
+        const seriesPoints = [];
         data.forEach(snap=>{
-          // Filter by date range
-          if(snap.ts >= fromTs && snap.ts <= toTs){
-            allSnapshots.push({...snap, outcome_name: o.name, asset_id: o.asset_id});
-          }
+          allSnapshots.push({...snap, outcome_name: o.name, asset_id: o.asset_id});
+          seriesPoints.push({ts: snap.ts, best_ask: snap.best_ask_cents, asks: snap.asks||[]});
         });
+        if(seriesPoints.length) obChartData[o.name] = seriesPoints;
       }
     }
 
-    // Sort by timestamp descending (newest first)
     allSnapshots.sort((a,b)=>b.ts - a.ts);
     obHistoryData = allSnapshots;
 
     if(!allSnapshots.length){
-      el.innerHTML='<span class="text-slate-400">No snapshots in this range.</span>';
+      listEl.innerHTML='<span class="text-slate-400">No snapshots in this range.</span>';
+      obDrawChart();
       return;
     }
 
-    // Render snapshot list
+    // Render table
     let html=`<div class="text-xs text-slate-500 mb-2">${allSnapshots.length} snapshots</div>`;
     html+='<table><thead><tr><th>Date/Time</th><th>Outcome</th><th>Best Ask</th></tr></thead><tbody>';
     allSnapshots.forEach((snap, idx)=>{
@@ -194,17 +199,260 @@ async function obLoadHistory(){
       html+=`<tr class="ob-snapshot-row cursor-pointer" onclick="obShowSnapshot(${idx})"><td class="text-xs">${dateStr}</td><td class="${nameClass} text-xs">${snap.outcome_name}</td><td class="font-mono text-xs">${snap.best_ask_cents!==null?snap.best_ask_cents+'¢':'-'}</td></tr>`;
     });
     html+='</tbody></table>';
-    el.innerHTML=html;
+    listEl.innerHTML=html;
+
+    // Draw chart
+    obDrawChart();
   }catch(e){
-    el.innerHTML='<span class="text-red-400">Error loading history.</span>';
+    listEl.innerHTML='<span class="text-red-400">Error loading history.</span>';
   }
 }
+
+// ===== Chart rendering (canvas) =====
+
+function obDrawChart(){
+  const canvas = document.getElementById('ob-chart-canvas');
+  const container = document.getElementById('ob-chart-container');
+  if(!canvas || !container) return;
+
+  const seriesNames = Object.keys(obChartData);
+  if(!seriesNames.length){
+    canvas.width=container.clientWidth;
+    canvas.height=320;
+    const ctx=canvas.getContext('2d');
+    ctx.fillStyle='#1e293b';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle='#64748b';
+    ctx.font='13px monospace';
+    ctx.textAlign='center';
+    ctx.fillText('No data to display',canvas.width/2,160);
+    return;
+  }
+
+  // Collect all timestamps and price range
+  let allTs=[], minPrice=Infinity, maxPrice=-Infinity;
+  seriesNames.forEach(name=>{
+    obChartData[name].forEach(p=>{
+      allTs.push(p.ts);
+      if(p.best_ask!==null && p.best_ask!==undefined){
+        minPrice=Math.min(minPrice,p.best_ask);
+        maxPrice=Math.max(maxPrice,p.best_ask);
+      }
+    });
+  });
+  allTs = [...new Set(allTs)].sort((a,b)=>a-b);
+  if(!allTs.length) return;
+
+  // Add padding to price range
+  const priceRange = maxPrice - minPrice;
+  const pricePad = Math.max(priceRange * 0.15, 1);
+  minPrice -= pricePad;
+  maxPrice += pricePad;
+
+  // Chart dimensions
+  const dpr = window.devicePixelRatio || 1;
+  const paddingLeft=60, paddingRight=30, paddingTop=30, paddingBottom=40;
+  const pointSpacing = 6; // px per data point for horizontal scroll
+  const chartW = Math.max(container.clientWidth - paddingLeft - paddingRight, allTs.length * pointSpacing);
+  const totalW = chartW + paddingLeft + paddingRight;
+  const totalH = 320;
+  const chartH = totalH - paddingTop - paddingBottom;
+
+  canvas.width = totalW * dpr;
+  canvas.height = totalH * dpr;
+  canvas.style.width = totalW + 'px';
+  canvas.style.height = totalH + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  // Background
+  ctx.fillStyle='#0f172a';
+  ctx.fillRect(0,0,totalW,totalH);
+
+  // Helper: ts -> x
+  const tsMin=allTs[0], tsMax=allTs[allTs.length-1];
+  const tsRange = Math.max(tsMax-tsMin, 1);
+  function tsToX(ts){ return paddingLeft + ((ts-tsMin)/tsRange)*chartW; }
+  function priceToY(p){ return paddingTop + chartH - ((p-minPrice)/(maxPrice-minPrice))*chartH; }
+
+  // Grid lines (horizontal)
+  ctx.strokeStyle='#1e293b';
+  ctx.lineWidth=1;
+  const priceSteps = 6;
+  const priceStep = (maxPrice-minPrice)/priceSteps;
+  ctx.font='10px monospace';
+  ctx.fillStyle='#64748b';
+  ctx.textAlign='right';
+  for(let i=0;i<=priceSteps;i++){
+    const p=minPrice+i*priceStep;
+    const y=priceToY(p);
+    ctx.beginPath();ctx.moveTo(paddingLeft,y);ctx.lineTo(totalW-paddingRight,y);ctx.stroke();
+    ctx.fillText(p.toFixed(1)+'¢',paddingLeft-6,y+3);
+  }
+
+  // Time labels on X axis
+  ctx.textAlign='center';
+  ctx.fillStyle='#64748b';
+  const maxLabels=Math.min(allTs.length,20);
+  const labelStep=Math.max(1,Math.floor(allTs.length/maxLabels));
+  for(let i=0;i<allTs.length;i+=labelStep){
+    const x=tsToX(allTs[i]);
+    const d=new Date(allTs[i]*1000);
+    const lbl=d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    ctx.fillText(lbl,x,totalH-paddingBottom+16);
+    ctx.beginPath();ctx.moveTo(x,paddingTop);ctx.lineTo(x,totalH-paddingBottom);ctx.strokeStyle='#1e293b';ctx.stroke();
+  }
+
+  // Market start line
+  if(obSelectedMarket && obSelectedMarket.ts){
+    const marketStartTs = obSelectedMarket.ts;
+    if(marketStartTs >= tsMin && marketStartTs <= tsMax){
+      const sx = tsToX(marketStartTs);
+      ctx.save();
+      ctx.strokeStyle='#f59e0b';
+      ctx.lineWidth=2;
+      ctx.setLineDash([6,4]);
+      ctx.beginPath();ctx.moveTo(sx,paddingTop);ctx.lineTo(sx,totalH-paddingBottom);ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle='#f59e0b';
+      ctx.font='bold 10px monospace';
+      ctx.textAlign='center';
+      ctx.fillText('▼ MARKET START',sx,paddingTop-6);
+      ctx.restore();
+    }
+  }
+
+  // Series colors
+  const colors = {};
+  seriesNames.forEach(name=>{
+    colors[name] = (name||'').toUpperCase().includes('UP') ? '#22c55e' : '#ef4444';
+  });
+
+  // Draw lines
+  seriesNames.forEach(name=>{
+    const pts = obChartData[name].filter(p=>p.best_ask!==null && p.best_ask!==undefined);
+    if(pts.length<2) return;
+    ctx.strokeStyle=colors[name];
+    ctx.lineWidth=2;
+    ctx.beginPath();
+    pts.forEach((p,i)=>{
+      const x=tsToX(p.ts), y=priceToY(p.best_ask);
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+
+    // Draw dots
+    ctx.fillStyle=colors[name];
+    pts.forEach(p=>{
+      const x=tsToX(p.ts), y=priceToY(p.best_ask);
+      ctx.beginPath();ctx.arc(x,y,2.5,0,Math.PI*2);ctx.fill();
+    });
+  });
+
+  // Legend
+  ctx.font='11px sans-serif';
+  let legendX=paddingLeft+10;
+  seriesNames.forEach(name=>{
+    ctx.fillStyle=colors[name];
+    ctx.fillRect(legendX,8,12,12);
+    ctx.fillStyle='#e2e8f0';
+    ctx.textAlign='left';
+    ctx.fillText(name,legendX+16,18);
+    legendX+=ctx.measureText(name).width+36;
+  });
+
+  // Store chart metadata for hover
+  canvas._obChartMeta = {tsMin,tsMax,tsRange,chartW,chartH,paddingLeft,paddingTop,paddingBottom,paddingRight,totalW,totalH,minPrice,maxPrice,seriesNames,colors,tsToX,priceToY};
+
+  // Attach hover handler (once)
+  if(!canvas._obHoverBound){
+    canvas._obHoverBound=true;
+    canvas.addEventListener('mousemove', obChartHover);
+    canvas.addEventListener('mouseleave', ()=>{
+      document.getElementById('ob-chart-tooltip').style.display='none';
+    });
+  }
+}
+
+function obChartHover(e){
+  const canvas = e.target;
+  const meta = canvas._obChartMeta;
+  if(!meta) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const mx = (e.clientX - rect.left);
+  const my = (e.clientY - rect.top);
+
+  // Check if inside chart area
+  if(mx < meta.paddingLeft || mx > meta.totalW - meta.paddingRight || my < meta.paddingTop || my > meta.totalH - meta.paddingBottom){
+    document.getElementById('ob-chart-tooltip').style.display='none';
+    return;
+  }
+
+  // Find closest timestamp
+  const tsAtMouse = meta.tsMin + ((mx - meta.paddingLeft) / meta.chartW) * meta.tsRange;
+
+  // Find closest data point across all series
+  let bestDist=Infinity, bestSnap=null, bestName=null;
+  meta.seriesNames.forEach(name=>{
+    (obChartData[name]||[]).forEach(p=>{
+      if(p.best_ask===null || p.best_ask===undefined) return;
+      const dist = Math.abs(p.ts - tsAtMouse);
+      if(dist < bestDist){ bestDist=dist; bestSnap=p; bestName=name; }
+    });
+  });
+
+  const tooltip = document.getElementById('ob-chart-tooltip');
+  if(!bestSnap || bestDist > meta.tsRange * 0.03){
+    tooltip.style.display='none';
+    return;
+  }
+
+  const d = new Date(bestSnap.ts*1000);
+  const timeStr = d.toLocaleTimeString('ru-RU');
+  const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'});
+
+  // Build volume breakdown from asks
+  let volHtml='';
+  if(bestSnap.asks && bestSnap.asks.length){
+    const sorted=[...bestSnap.asks].sort((a,b)=>parseFloat(a.price)-parseFloat(b.price)).slice(0,8);
+    volHtml='<div style="margin-top:4px;border-top:1px solid #334155;padding-top:4px">';
+    volHtml+='<div style="color:#94a3b8;margin-bottom:2px">Asks:</div>';
+    sorted.forEach(a=>{
+      const p = Math.round(parseFloat(a.price));
+      const s = Math.round(parseFloat(a.size));
+      const pStr = Number.isFinite(p) ? String(p) : String(a.price);
+      const sStr = Number.isFinite(s) ? String(s) : String(a.size);
+      volHtml+=`<div><span style="color:#f87171">${pStr}¢</span> × <span style="color:#e2e8f0">${sStr}</span></div>`;
+    });
+    if(bestSnap.asks.length>8) volHtml+=`<div style="color:#64748b">...and ${bestSnap.asks.length-8} more</div>`;
+    volHtml+='</div>';
+  }
+
+  const nameColor = (bestName||'').toUpperCase().includes('UP') ? '#22c55e' : '#ef4444';
+  tooltip.innerHTML=`<div><span style="color:${nameColor};font-weight:600">${bestName}</span></div>`
+    +`<div>${dateStr} ${timeStr}</div>`
+    +`<div style="font-size:14px;font-weight:700;color:#f8fafc;margin:2px 0">Best Ask: ${bestSnap.best_ask}¢</div>`
+    +volHtml;
+
+  tooltip.style.display='block';
+  tooltip.style.left=(e.clientX+14)+'px';
+  tooltip.style.top=(e.clientY-10)+'px';
+
+  // Keep tooltip on screen
+  const tr=tooltip.getBoundingClientRect();
+  if(tr.right>window.innerWidth) tooltip.style.left=(e.clientX-tr.width-10)+'px';
+  if(tr.bottom>window.innerHeight) tooltip.style.top=(e.clientY-tr.height-10)+'px';
+}
+
+// ===== Table view: snapshot detail =====
 
 function obShowSnapshot(idx){
   const snap = obHistoryData[idx];
   if(!snap) return;
 
-  // Highlight selected row
   document.querySelectorAll('.ob-snapshot-row').forEach((r,i)=>{
     r.classList.toggle('active', i===idx);
   });
@@ -217,7 +465,6 @@ function obShowSnapshot(idx){
 
   let html=`<div class="mb-2"><span class="${nameClass} font-semibold">${snap.outcome_name}</span> · <span class="text-slate-400">${fullDate}</span></div>`;
 
-  // Summary
   html+=`<div class="grid grid-cols-1 gap-2 mb-3">`;
   html+=`<div class="p-2 rounded text-center" style="background:#0f172a"><div class="text-xs text-slate-400">Best Ask</div><div class="font-mono font-bold text-red-400">${snap.best_ask_cents!==null?snap.best_ask_cents+'¢':'-'}</div></div>`;
   html+=`</div>`;
@@ -227,14 +474,15 @@ function obShowSnapshot(idx){
     html+=`<div class="text-xs text-slate-400 mb-2">Ask depth: ${ad}</div>`;
   }
 
-  // Asks table (all asks in this snapshot)
   const asks = snap.asks||[];
   if(asks.length){
     const sorted = [...asks].sort((a,b)=>parseFloat(a.price)-parseFloat(b.price));
     html+=`<div class="mb-2"><span class="text-xs text-red-400 font-semibold">Asks (${sorted.length})</span>`;
     html+='<table class="text-xs"><thead><tr><th>Price (¢)</th><th>Size</th></tr></thead><tbody>';
     sorted.forEach(a=>{
-      html+=`<tr class="text-red-300"><td class="font-mono">${a.price}</td><td>${a.size}</td></tr>`;
+      const p = Math.round(parseFloat(a.price));
+      const s = Math.round(parseFloat(a.size));
+      html+=`<tr class="text-red-300"><td class="font-mono">${Number.isFinite(p)?p:a.price}</td><td>${Number.isFinite(s)?s:a.size}</td></tr>`;
     });
     html+='</tbody></table></div>';
   }

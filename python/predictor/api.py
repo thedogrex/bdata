@@ -78,6 +78,14 @@ class SimTradeRequest(BaseModel):
     qty: float
 
 
+class PredictRequest(BaseModel):
+    slug: str
+    strategy: str = "rsi_mean_reversion"
+    params: dict | None = None
+    window_size: int = 1000
+    table: str = "c_5m"
+
+
 # ==================== API ROUTES ====================
 
 @app.get("/api/strategies")
@@ -119,6 +127,14 @@ async def api_poly_market(slug: str):
     return m
 
 
+@app.get("/api/poly/market/{slug}/live")
+async def api_poly_market_live(slug: str):
+    m = await poly_service.get_market_live(slug)
+    if m is None:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    return m
+
+
 @app.get("/api/poly/outcome/{asset_id}/series")
 async def api_poly_series(asset_id: str, minutes: int = Query(60), limit: int = Query(2000)):
     return await poly_service.get_price_series(asset_id=asset_id, minutes=minutes, limit=limit)
@@ -132,6 +148,17 @@ async def api_poly_orderbook_analysis(slug: str, asset_id: str, minutes: int = Q
 @app.get("/api/poly/orderbook/{slug}/{asset_id}/latest")
 async def api_poly_orderbook_latest(slug: str, asset_id: str):
     return await poly_service.get_latest_orderbook(slug=slug, asset_id=asset_id)
+
+
+@app.post("/api/poly/predict")
+async def api_poly_predict(req: PredictRequest):
+    return await poly_service.predict_for_market(
+        slug=req.slug,
+        strategy_name=req.strategy,
+        strategy_params=req.params,
+        window_size=req.window_size,
+        table=req.table,
+    )
 
 
 @app.post("/api/poly/sim/trade")

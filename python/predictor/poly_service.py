@@ -46,6 +46,90 @@ def _get_current_ts() -> int:
     return current_active_ts()
 
 
+def _infer_resolved_outcome(m: MarketData) -> Optional[str]:
+    """Infer resolved outcome from Gamma outcomePrices.
+
+    Returns 'UP' or 'DOWN' when there is a clear winner, otherwise None.
+    """
+    if not m or not getattr(m, "outcomes", None):
+        return None
+
+    # Prefer explicit market resolution inputs when available.
+    try:
+        final_price = getattr(m, "final_price", None)
+        target_price = getattr(m, "target_price", None)
+        if final_price is not None and target_price is not None:
+            return "DOWN" if float(final_price) < float(target_price) else "UP"
+    except Exception:
+        pass
+
+    try:
+        best = max(m.outcomes, key=lambda o: float(getattr(o, "price", 0.0)))
+        best_price = float(getattr(best, "price", 0.0))
+        name = (getattr(best, "name", "") or "").upper()
+        # Conservative threshold to avoid marking unresolved markets.
+        if best_price < 0.95:
+            return None
+        if "UP" in name:
+            return "UP"
+        if "DOWN" in name:
+            return "DOWN"
+        return None
+    except Exception:
+        return None
+
+
+async def _check_and_store_market_resolution(slug: str, now_ts: int) -> Optional[str]:
+    """Check market resolution via Gamma and store it in poly_markets.
+
+    Always updates last_resolution_check_ts. Sets resolved_outcome only if inferred.
+    """
+    client = PolymarketClient()
+    resolved: Optional[str] = None
+    try:
+        m = await asyncio.to_thread(client.fetch_market, slug)
+        resolved = _infer_resolved_outcome(m)
+    except Exception:
+        resolved = None
+
+    if resolved:
+        await db.execute(
+            """
+            UPDATE poly_markets
+            SET resolved_outcome=%s,
+                last_resolution_check_ts=%s
+            WHERE slug=%s
+            """,
+            (resolved, int(now_ts), slug),
+        )
+    else:
+        await db.execute(
+            """
+            UPDATE poly_markets
+            SET last_resolution_check_ts=%s
+            WHERE slug=%s
+            """,
+            (int(now_ts), slug),
+        )
+
+    return resolved
+
+
+async def _take_orderbook_snapshot_for_slug(slug: str) -> None:
+    out_rows = await db.fetchall(
+        "SELECT asset_id FROM poly_outcomes WHERE slug=%s",
+        (slug,),
+    )
+    asset_ids = [r[0] for r in out_rows]
+    if not asset_ids:
+        return
+    obs = await asyncio.to_thread(fetch_orderbooks, asset_ids)
+    for ob in obs:
+        asset_id = str(ob.get("asset_id") or "")
+        if asset_id:
+            await save_orderbook_snapshot(slug, asset_id, ob)
+
+
 def _price_to_cents(price: Any) -> Optional[float]:
     try:
         p = float(price)
@@ -86,7 +170,7 @@ async def upsert_market(m: MarketData) -> None:
 async def refresh_tracked_markets() -> List[Dict[str, Any]]:
     client = PolymarketClient()
     rows: List[Dict[str, Any]] = []
-    for ts in _compute_timestamps(count=5):
+    for ts in _compute_timestamps(count=3):
         slug = _slug_for_ts(ts)
         try:
             m = await asyncio.to_thread(client.fetch_market, slug)
@@ -118,8 +202,8 @@ async def save_orderbook_snapshot(slug: str, asset_id: str, data: Dict[str, Any]
     # Convert prices to cents
     asks_cents = [{"price": _price_to_cents(a["price"]), "size": a["size"]} for a in asks]
 
-    # Get best ask
-    best_ask = asks_cents[0]["price"] if asks_cents else None
+    # Get best ask (lowest price)
+    best_ask = min((a["price"] for a in asks_cents), default=None) if asks_cents else None
 
     ts = int(time.time())
 
@@ -150,14 +234,34 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
     # Track last update times for different market types
     last_active_update = 0
     last_future_update = 0
+    last_market_refresh = 0
+    last_resolution_scan = 0
+    last_seen_active_ts: Optional[int] = None
     
     while not stop_event.is_set():
         try:
-            await refresh_tracked_markets()
+            current_time = int(time.time())
+
+            # Refresh tracked markets less frequently to avoid blocking snapshot polling.
+            # (Gamma API calls can be slow and were causing ~30s gaps between snapshots.)
+            if current_time - last_market_refresh >= 60:
+                await refresh_tracked_markets()
+                last_market_refresh = current_time
             
             # Get current active timestamp
             current_ts = _get_current_ts()
             current_time = int(time.time())
+
+            # If the active market advanced, take one final snapshot for the market that just ended.
+            if last_seen_active_ts is None:
+                last_seen_active_ts = current_ts
+            elif current_ts != last_seen_active_ts:
+                ended_slug = _slug_for_ts(int(last_seen_active_ts))
+                try:
+                    await _take_orderbook_snapshot_for_slug(ended_slug)
+                except Exception:
+                    pass
+                last_seen_active_ts = current_ts
             
             # Get all markets (open only, skip closed/past)
             m_rows = await db.fetchall(
@@ -176,39 +280,44 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                 if ts == current_ts:
                     active_markets.append((slug, ts))
                 else:
-                    future_markets.append((slug, ts))
+                    # Only download snapshots shortly before market start
+                    # (skip markets starting in 11+ minutes)
+                    seconds_to_start = int(ts) - int(current_time)
+                    if 0 < seconds_to_start <= 10 * 60:
+                        future_markets.append((slug, ts))
             
             # Update active market every 3 seconds
             if current_time - last_active_update >= orderbook_interval_sec and active_markets:
                 for slug, ts in active_markets[:1]:  # Only current active market
-                    out_rows = await db.fetchall(
-                        "SELECT asset_id FROM poly_outcomes WHERE slug=%s",
-                        (slug,),
-                    )
-                    asset_ids = [r[0] for r in out_rows]
-                    if asset_ids:
-                        obs = await asyncio.to_thread(fetch_orderbooks, asset_ids)
-                        for ob in obs:
-                            asset_id = str(ob.get("asset_id") or "")
-                            if asset_id:
-                                await save_orderbook_snapshot(slug, asset_id, ob)
+                    await _take_orderbook_snapshot_for_slug(slug)
                 last_active_update = current_time
             
-            # Update future markets every 30 seconds (next 2 markets)
-            if current_time - last_future_update >= 30 and future_markets:
+            # Update future markets every 10 seconds (next 2 markets)
+            if current_time - last_future_update >= 10 and future_markets:
                 for slug, ts in future_markets[:2]:  # Next 2 future markets
-                    out_rows = await db.fetchall(
-                        "SELECT asset_id FROM poly_outcomes WHERE slug=%s",
-                        (slug,),
-                    )
-                    asset_ids = [r[0] for r in out_rows]
-                    if asset_ids:
-                        obs = await asyncio.to_thread(fetch_orderbooks, asset_ids)
-                        for ob in obs:
-                            asset_id = str(ob.get("asset_id") or "")
-                            if asset_id:
-                                await save_orderbook_snapshot(slug, asset_id, ob)
+                    await _take_orderbook_snapshot_for_slug(slug)
                 last_future_update = current_time
+
+            # Resolution polling: once per minute scan DONE markets without resolution.
+            if current_time - last_resolution_scan >= 60:
+                last_resolution_scan = current_time
+                done_rows = await db.fetchall(
+                    """
+                    SELECT slug
+                    FROM poly_markets
+                    WHERE (closed=1 OR ts < %s)
+                      AND (resolved_outcome IS NULL OR resolved_outcome='')
+                      AND (last_resolution_check_ts IS NULL OR last_resolution_check_ts < %s)
+                    ORDER BY ts DESC
+                    LIMIT 20
+                    """,
+                    (int(current_ts), int(current_time) - 60),
+                )
+                for (slug,) in done_rows:
+                    try:
+                        await _check_and_store_market_resolution(str(slug), current_time)
+                    except Exception:
+                        pass
 
         except Exception as e:
             print(f"Error in poll loop: {e}")
@@ -223,12 +332,12 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
 async def list_markets(limit: int = 50) -> List[Dict[str, Any]]:
     current_ts = _get_current_ts()
     rows = await db.fetchall(
-        "SELECT slug, ts, end_date, question, closed FROM poly_markets ORDER BY ts DESC LIMIT %s",
+        "SELECT slug, ts, end_date, question, closed, resolved_outcome, prediction_outcome, prediction_ts FROM poly_markets ORDER BY ts DESC LIMIT %s",
         (int(limit),),
     )
     out: List[Dict[str, Any]] = []
     for r in rows:
-        slug, ts, end_date, question, closed = r
+        slug, ts, end_date, question, closed, resolved_outcome, prediction_outcome, prediction_ts = r
         status = "open"
         
         # Mark past markets as [DONE]
@@ -244,6 +353,9 @@ async def list_markets(limit: int = 50) -> List[Dict[str, Any]]:
             "end_date": end_date, 
             "question": question, 
             "closed": int(closed),
+            "resolved_outcome": resolved_outcome,
+            "prediction_outcome": prediction_outcome,
+            "prediction_ts": int(prediction_ts) if prediction_ts is not None else None,
             "status": status
         })
     return out
@@ -251,7 +363,7 @@ async def list_markets(limit: int = 50) -> List[Dict[str, Any]]:
 
 async def get_market(slug: str) -> Optional[Dict[str, Any]]:
     m = await db.fetchone(
-        "SELECT slug, ts, end_date, question, description, closed FROM poly_markets WHERE slug=%s",
+        "SELECT slug, ts, end_date, question, description, closed, resolved_outcome, prediction_outcome, prediction_ts FROM poly_markets WHERE slug=%s",
         (slug,),
     )
     if not m:
@@ -269,7 +381,32 @@ async def get_market(slug: str) -> Optional[Dict[str, Any]]:
         "question": m[3],
         "description": m[4],
         "closed": int(m[5]),
+        "resolved_outcome": m[6],
+        "prediction_outcome": m[7],
+        "prediction_ts": int(m[8]) if m[8] is not None else None,
         "outcomes": [{"asset_id": r[0], "name": r[1]} for r in o_rows],
+    }
+
+
+async def get_market_live(slug: str) -> Optional[Dict[str, Any]]:
+    """Fetch live market data from Polymarket (includes outcome prices)."""
+    client = PolymarketClient()
+    try:
+        m = await asyncio.to_thread(client.fetch_market, slug)
+    except Exception:
+        return None
+
+    resolved = _infer_resolved_outcome(m)
+
+    return {
+        "slug": m.slug,
+        "ts": int(m.timestamp),
+        "end_date": m.end_date,
+        "question": m.question,
+        "description": m.description,
+        "closed": int(m.closed),
+        "resolved_outcome": resolved,
+        "outcomes": [{"asset_id": o.asset_id, "name": o.name, "price": float(o.price)} for o in m.outcomes],
     }
 
 
@@ -468,10 +605,149 @@ async def get_sim_markets_with_positions() -> List[str]:
     return [str(r[0]) for r in rows if r and r[0]]
 
 
+async def predict_for_market(
+    slug: str,
+    strategy_name: str = "rsi_mean_reversion",
+    strategy_params: Optional[Dict[str, Any]] = None,
+    window_size: int = 1000,
+    table: str = "c_5m",
+) -> Dict[str, Any]:
+    """Run a single-candle prediction for the candle at the market's timestamp.
+
+    1. Load *window_size + 1* candles ending at or before the market ts.
+    2. Check continuity (each pair must be exactly 5 min apart).
+    3. Fit strategy on the first *window_size* candles, predict on the last one.
+    """
+    import pandas as pd
+    import numpy as np
+    from predictor.features import add_technical_features
+    from predictor.strategies import get_strategy, STRATEGY_REGISTRY
+    from predictor.data_loader import add_direction
+
+    if strategy_name not in STRATEGY_REGISTRY:
+        return {"error": f"Unknown strategy: {strategy_name}"}
+
+    # Resolve market timestamp
+    m_row = await db.fetchone(
+        "SELECT ts FROM poly_markets WHERE slug=%s", (slug,)
+    )
+    if not m_row:
+        return {"error": f"Market not found: {slug}"}
+    market_ts = int(m_row[0])
+
+    # 5-minute candle interval in microseconds
+    interval_us = 5 * 60 * 1_000_000  # 300 000 000
+
+    # We need window_size candles to fit + 1 candle to predict on.
+    # The predict candle open_time should be <= market_ts * 1_000_000.
+    market_ts_us = market_ts * 1_000_000
+    need = window_size + 1
+
+    rows = await db.fetchall(
+        f"""
+        SELECT open_time, open, high, low, close, volume,
+               close_time, quota_volume, trades, taker_base_volume, taker_quota_volume
+        FROM {table}
+        WHERE open_time <= %s
+        ORDER BY open_time DESC
+        LIMIT %s
+        """,
+        (market_ts_us, need),
+    )
+
+    if not rows or len(rows) < need:
+        have = len(rows) if rows else 0
+        return {
+            "error": f"Not enough candles. Need {need}, have {have}.",
+            "need": need,
+            "have": have,
+        }
+
+    # Reverse to ascending order
+    rows = list(reversed(rows))
+
+    # Build DataFrame
+    df = pd.DataFrame(rows, columns=[
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quota_volume", "trades", "taker_base_volume", "taker_quota_volume"
+    ])
+    for c in ["open", "high", "low", "close", "volume", "quota_volume",
+              "taker_base_volume", "taker_quota_volume"]:
+        df[c] = df[c].astype(float)
+    df["trades"] = df["trades"].astype(int)
+
+    # --- Continuity check ---
+    open_times = df["open_time"].values.astype(np.int64)
+    diffs = np.diff(open_times)
+    bad_idx = np.where(diffs != interval_us)[0]
+    if len(bad_idx) > 0:
+        first_bad = int(bad_idx[0])
+        gap_from_us = int(open_times[first_bad])
+        gap_to_us = int(open_times[first_bad + 1])
+        gap_from_dt = pd.Timestamp(gap_from_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
+        gap_to_dt = pd.Timestamp(gap_to_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
+        actual_gap_min = round((gap_to_us - gap_from_us) / 1_000_000 / 60, 1)
+        return {
+            "error": f"Candle gap detected at position {first_bad}: {gap_from_dt} -> {gap_to_dt} ({actual_gap_min} min instead of 5 min). {len(bad_idx)} gap(s) total.",
+            "gap_from_ts": gap_from_us,
+            "gap_to_ts": gap_to_us,
+            "gaps_total": int(len(bad_idx)),
+        }
+
+    # --- Run strategy ---
+    df = add_direction(df)
+    df = df.reset_index(drop=True)
+    df_feat = add_technical_features(df)
+
+    df_train = df_feat.iloc[:-1].reset_index(drop=True)
+    df_predict = df_feat.iloc[[-1]].reset_index(drop=True)
+
+    strategy = get_strategy(strategy_name, strategy_params)
+    strategy.fit(df_train, horizon=1)
+    pred_arr = strategy.predict(df_predict, horizon=1)
+    prob_arr = strategy.predict_proba(df_predict, horizon=1)
+
+    pred = int(pred_arr[0])
+    prob = float(prob_arr[0])
+
+    label = "UP" if pred == 1 else ("DOWN" if pred == 0 else "UNDEFINED")
+
+    last_candle_ts_us = int(open_times[-1])
+    last_candle_dt = pd.Timestamp(last_candle_ts_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
+
+    # Persist prediction result to market row so UI can show it later.
+    prediction_ts = int(time.time())
+    try:
+        await db.execute(
+            """
+            UPDATE poly_markets
+            SET prediction_outcome=%s,
+                prediction_ts=%s
+            WHERE slug=%s
+            """,
+            (label, int(prediction_ts), slug),
+        )
+    except Exception:
+        # Non-fatal: prediction result still returned to caller.
+        pass
+
+    return {
+        "prediction": label,
+        "probability": round(prob, 4),
+        "strategy": strategy_name,
+        "params": strategy.params,
+        "window_size": window_size,
+        "candles_used": need,
+        "last_candle_ts": last_candle_ts_us,
+        "last_candle_dt": last_candle_dt,
+        "market_slug": slug,
+        "market_ts": market_ts,
+        "prediction_ts": int(prediction_ts),
+    }
+
+
 async def get_orderbook_analysis(slug: str, asset_id: str, minutes: int = 60) -> List[Dict[str, Any]]:
     """Get order book data aggregated by minute for analysis"""
-    since_ts = int(time.time()) - (minutes * 60)
-    
     rows = await db.fetchall(
         """
         SELECT 
@@ -482,10 +758,10 @@ async def get_orderbook_analysis(slug: str, asset_id: str, minutes: int = 60) ->
             bids_json,
             asks_json
         FROM poly_orderbook_snapshots
-        WHERE slug=%s AND asset_id=%s AND ts>=%s
+        WHERE slug=%s AND asset_id=%s
         ORDER BY ts ASC
         """,
-        (slug, asset_id, since_ts),
+        (slug, asset_id),
     )
     
     out = []
@@ -498,6 +774,15 @@ async def get_orderbook_analysis(slug: str, asset_id: str, minutes: int = 60) ->
         except:
             asks = []
         
+        # Calculate best ask as min price from asks list
+        computed_best_ask = None
+        try:
+            ask_prices = [float(a["price"]) for a in asks if a.get("price") is not None]
+            if ask_prices:
+                computed_best_ask = min(ask_prices)
+        except (ValueError, TypeError):
+            computed_best_ask = best_ask  # fallback to stored value
+
         # Calculate ask depth
         ask_depth = 0
         try:
@@ -508,7 +793,7 @@ async def get_orderbook_analysis(slug: str, asset_id: str, minutes: int = 60) ->
         out.append({
             "ts": int(ts),
             "best_bid_cents": None,  # Always NULL
-            "best_ask_cents": best_ask,
+            "best_ask_cents": computed_best_ask,
             "mid_cents": None,      # Always NULL
             "spread_cents": None,   # Cannot calculate without bids
             "bid_depth": 0,         # Always 0
@@ -550,10 +835,19 @@ async def get_latest_orderbook(slug: str, asset_id: str) -> Optional[Dict[str, A
     except:
         asks = []
     
+    # Recalculate best ask as min price
+    computed_best_ask = None
+    try:
+        ask_prices = [float(a["price"]) for a in asks if a.get("price") is not None]
+        if ask_prices:
+            computed_best_ask = min(ask_prices)
+    except (ValueError, TypeError):
+        computed_best_ask = best_ask
+
     return {
         "ts": int(ts),
         "best_bid_cents": None,  # Always NULL
-        "best_ask_cents": best_ask,
+        "best_ask_cents": computed_best_ask,
         "mid_cents": None,      # Always NULL
         "bids": [],             # Always empty
         "asks": asks,

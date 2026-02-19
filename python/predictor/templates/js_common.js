@@ -229,6 +229,10 @@ function renderResult(data,targetId){
     <h2 class="text-lg font-semibold">${data.strategy} ${data.id?'<span class="text-xs text-slate-400">#'+data.id+'</span>':''}</h2>
     <p class="text-xs text-slate-400">Train: ${data.train_period||''} | Test: ${data.test_period||''}</p>
     <p class="text-xs text-slate-400">Window: ${ws} | Retrain: ${re} | Total: ${data.total_time_sec}s${lt}${ft}</p></div>`;
+  if(data.params){
+    const pJson=JSON.stringify(data.params,null,2);
+    html+=`<details class="mb-4"><summary class="text-xs text-blue-400 cursor-pointer font-semibold">Strategy Settings (JSON) — click to copy</summary><div class="relative mt-1"><pre id="result-params-json" class="p-3 rounded text-xs font-mono overflow-x-auto" style="background:#0f172a;border:1px solid #334155;cursor:pointer" onclick="navigator.clipboard.writeText(this.textContent).then(()=>{this.style.borderColor='#22c55e';setTimeout(()=>this.style.borderColor='#334155',1000)})">${pJson}</pre></div></details>`;
+  }
   for(const[horizon,r]of Object.entries(data.horizons||{})){
     if(r.error){html+=`<div class="text-red-400 mb-4">H${horizon}: ${r.error}</div>`;continue}
     html+=`<div class="mb-6 p-4 rounded-lg" style="background:#0f172a">

@@ -2,7 +2,7 @@ import time
 import requests
 import json
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 import app.config as config
 
 
@@ -22,6 +22,8 @@ class MarketData:
     description: str
     outcomes: List[MarketOutcome]
     closed: int
+    final_price: Optional[float] = None
+    target_price: Optional[float] = None
 
 
 class PolymarketClient:
@@ -61,6 +63,23 @@ class PolymarketClient:
 
         raw = data[0]
 
+        def _parse_float(v):
+            try:
+                if v is None:
+                    return None
+                return float(v)
+            except Exception:
+                return None
+
+        # Try to read market resolution inputs (if provided by Gamma)
+        final_price = _parse_float(raw.get("finalPrice") if isinstance(raw, dict) else None)
+        if final_price is None:
+            final_price = _parse_float(raw.get("final_price") if isinstance(raw, dict) else None)
+
+        target_price = _parse_float(raw.get("targetPrice") if isinstance(raw, dict) else None)
+        if target_price is None:
+            target_price = _parse_float(raw.get("target_price") if isinstance(raw, dict) else None)
+
         # parse outcomes
         outcome_names = json.loads(raw["outcomes"])
         outcome_prices = json.loads(raw["outcomePrices"])
@@ -84,7 +103,9 @@ class PolymarketClient:
             question=raw["question"],
             description=raw["description"],
             outcomes=outcomes,
-            closed= 1 if raw["closed"] == True else 0
+            closed= 1 if raw["closed"] == True else 0,
+            final_price=final_price,
+            target_price=target_price,
         )
 
     # ---------------------------------------------

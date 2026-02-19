@@ -6,6 +6,50 @@ let polySelectedOutcomeAssetId=null;
 let polyOrderBookInterval=null;
 let polyCountdownInterval=null;
 
+const POLY_PRED_SETTINGS_KEY = 'poly_pred_settings_v1';
+
+function loadPolyPredictionSettings(){
+  try{
+    const raw = localStorage.getItem(POLY_PRED_SETTINGS_KEY);
+    if(!raw) return;
+    const d = JSON.parse(raw);
+    const wEl = document.getElementById('poly-pred-window');
+    const pEl = document.getElementById('poly-pred-params');
+    if(wEl && d && typeof d.window_size === 'number') wEl.value = String(d.window_size);
+    if(pEl && d && typeof d.params_json === 'string') pEl.value = d.params_json;
+  }catch(e){}
+}
+
+function savePolyPredictionSettings(){
+  const msgEl = document.getElementById('poly-pred-save-msg');
+  if(msgEl) msgEl.textContent='';
+
+  const wEl = document.getElementById('poly-pred-window');
+  const pEl = document.getElementById('poly-pred-params');
+
+  const windowSize = parseInt(wEl?.value||'') || 1000;
+  const paramsText = (pEl?.value||'').trim();
+
+  if(paramsText){
+    try{ JSON.parse(paramsText); }
+    catch(e){ if(msgEl) msgEl.textContent='Invalid JSON'; return; }
+  }
+
+  try{
+    localStorage.setItem(POLY_PRED_SETTINGS_KEY, JSON.stringify({
+      window_size: windowSize,
+      params_json: paramsText,
+      saved_ts: Math.floor(Date.now()/1000)
+    }));
+    if(msgEl){
+      msgEl.textContent='Saved';
+      setTimeout(()=>{ if(msgEl.textContent==='Saved') msgEl.textContent=''; }, 1200);
+    }
+  }catch(e){
+    if(msgEl) msgEl.textContent='Save failed';
+  }
+}
+
 function clearPolySelection(){
   polySelectedMarket=null;
   polySelectedOutcome=null;
@@ -66,14 +110,44 @@ function updatePolyCountdown(marketTs, intervalSeconds){
   const countdownEl = document.getElementById('poly-countdown');
   if(!countdownEl) return;
   if(remaining <= 0){
-    countdownEl.innerHTML = '<span class="text-red-400 font-semibold">EXPIRED</span>';
+    countdownEl.innerHTML = '<span class="text-red-400 font-semibold">00:00</span>';
     stopPolyCountdown();
+    // Refresh markets and show resolved outcome if available
     loadPolyMarkets();
+    if(polySelectedMarket && polySelectedMarket.slug){
+      showPolyMarketResolvedOutcome(polySelectedMarket.slug);
+    }
   } else {
     const minutes = Math.floor(remaining / 60);
     const seconds = remaining % 60;
     countdownEl.innerHTML = `<span class="text-green-400 font-semibold">${minutes.toString().padStart(2,'0')}:${seconds.toString().padStart(2,'0')}</span>`;
   }
+}
+
+async function showPolyMarketResolvedOutcome(slug){
+  try{
+    const res = await fetch(API+`/api/poly/market/${encodeURIComponent(slug)}/live`);
+    if(!res.ok) return;
+    const m = await res.json();
+    if(!m || !Array.isArray(m.outcomes) || !m.outcomes.length) return;
+
+    // Determine winner as the outcome with max price
+    const sorted = [...m.outcomes].filter(o=>typeof o.price==='number').sort((a,b)=>b.price-a.price);
+    const win = sorted[0];
+    if(!win) return;
+
+    const pct = Math.round(win.price * 1000) / 10; // 1 decimal
+    const upDown = ((win.name||'').toUpperCase().includes('UP') ? 'UP' : ((win.name||'').toUpperCase().includes('DOWN') ? 'DOWN' : win.name));
+    const badge = `<span class="badge badge-done" style="margin-left:8px">RESULT: ${upDown} (${pct}%)</span>`;
+
+    // Insert badge near the market detail header line
+    const detail = document.getElementById('poly-market-detail');
+    if(detail && typeof detail.innerHTML === 'string'){
+      // If badge already present, avoid duplicating
+      if(detail.innerHTML.includes('RESULT:')) return;
+      detail.innerHTML = detail.innerHTML.replace('</div>', `${badge}</div>`);
+    }
+  }catch(e){/* ignore */}
 }
 
 async function loadPolyMarkets(){
@@ -94,21 +168,43 @@ async function loadPolyMarkets(){
     const marketsWithPosRaw = await posRes.json();
     const marketsWithPos = new Set(Array.isArray(marketsWithPosRaw) ? marketsWithPosRaw : []);
     if(!Array.isArray(data)||!data.length){el.innerHTML='<div class="text-slate-400">No markets yet.</div>';return}
-    let html='<table><thead><tr><th>TS</th><th>Slug</th><th>Status</th></tr></thead><tbody>';
+    let html='<table><thead><tr><th>Time</th><th>Status</th></tr></thead><tbody>';
     data.forEach(m=>{
-      const d=new Date((m.ts||0)*1000).toISOString().replace('T',' ').substring(0,19);
+      const d=new Date((m.ts||0)*1000);
+      const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}) + ' ' + d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+      const slugSuffix = (m.slug||'').split('-').pop();
       const status = m.status || (m.closed ? '[DONE]' : 'open');
       const statusClass = status === '[DONE]' ? 'badge badge-queue' : 'badge badge-done';
-      const st = `<span class="${statusClass}">${status}</span>`;
+      const resolved = (m.resolved_outcome||'');
+      const resolvedTri = resolved === 'UP'
+        ? '<span style="margin-left:8px;color:#22c55e;font-weight:700">▲</span>'
+        : (resolved === 'DOWN'
+          ? '<span style="margin-left:8px;color:#ef4444;font-weight:700">▼</span>'
+          : '');
+      const pred = (m.prediction_outcome||'');
+      const predTri = pred === 'UP'
+        ? '<span style="margin-left:8px;color:#22c55e;font-weight:700">▲</span>'
+        : (pred === 'DOWN'
+          ? '<span style="margin-left:8px;color:#ef4444;font-weight:700">▼</span>'
+          : (pred === 'UNDEFINED'
+            ? '<span style="margin-left:8px;color:#94a3b8;font-weight:700">?</span>'
+            : ''));
+      const predTs = (m.prediction_ts||null);
+      const predTitle = predTs ? ` title="pred @ ${new Date(predTs*1000).toLocaleString('ru-RU')}"` : '';
+      const predWrap = predTri ? `<span${predTitle}>${predTri}</span>` : '';
+      const stHtml = `<span class="${statusClass}">${status}</span>${resolvedTri}${predWrap}`;
       const isActive = (polyActiveTs!==null && (m.ts||0)===polyActiveTs && !m.closed);
       const dot = isActive ? '<span title="active" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:6px"></span>' : '';
       const posDot = marketsWithPos.has(m.slug) ? '<span title="has position" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#22c55e;margin-right:6px"></span>' : '';
       const isSelected = polySelectedMarketSlug === m.slug;
       const selectedClass = isSelected ? 'bg-blue-900' : '';
-      html+=`<tr class="cursor-pointer ${selectedClass}" onclick="selectPolyMarket('${m.slug}')"><td class="text-xs text-slate-400">${dot}${posDot}${d}</td><td class="font-mono text-blue-300">${m.slug}</td><td>${st}</td></tr>`;
+      html+=`<tr class="cursor-pointer ${selectedClass}" onclick="selectPolyMarket('${m.slug}')"><td class="text-xs text-slate-400" style="white-space:nowrap">${dot}${posDot}${dateStr} <span class="font-mono text-blue-300">${slugSuffix}</span></td><td>${stHtml}</td></tr>`;
     });
     html+='</tbody></table>';
     el.innerHTML=html;
+
+    // Apply saved prediction settings whenever the Poly tab is loaded.
+    loadPolyPredictionSettings();
   }catch(e){el.textContent='Error loading markets';}
 }
 
@@ -132,6 +228,8 @@ async function showPolyMarket(slug){
   document.getElementById('poly-orderbook-up').innerHTML='<span class="text-slate-400">Loading...</span>';
   document.getElementById('poly-orderbook-down').innerHTML='<span class="text-slate-400">Loading...</span>';
   document.getElementById('poly-sim-msg').textContent='';
+  const buyBtn = document.getElementById('poly-sim-submit');
+  if(buyBtn){buyBtn.disabled = true;}
 
   const title=document.getElementById('poly-market-title');
   const el=document.getElementById('poly-market-detail');
@@ -146,9 +244,27 @@ async function showPolyMarket(slug){
     const isActive = (polyActiveTs!==null && m.ts===polyActiveTs && !m.closed);
     const activeBadge = isActive ? '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:6px"></span><span class="text-red-400 font-semibold">ACTIVE</span>' : '';
     const isDone = m.closed || (m.ts && (m.ts + 300) < Math.floor(Date.now() / 1000));
+    const obPanel = document.getElementById('poly-ob-panel');
+    const buyPanel = document.getElementById('poly-buy-panel');
+    const predPanel = document.getElementById('poly-predict-panel');
+    if(obPanel) obPanel.classList.toggle('hidden', !!isDone);
+    if(buyPanel) buyPanel.classList.toggle('hidden', !!isDone);
+    if(predPanel) predPanel.classList.toggle('hidden', !!isDone);
+    const predResult = document.getElementById('poly-pred-result');
+    if(predResult) predResult.innerHTML='';
+    loadPolyPredictionSettings();
     const countdownDisplay = isActive ? '<div class="mb-2 text-xs">Time remaining: <span id="poly-countdown" class="font-mono">--:--</span></div>' : '';
 
-    let html=`<div class="mb-2 text-xs text-slate-400"><span class="font-mono">${m.slug}</span> | ts: ${m.ts} | closed: ${m.closed} ${activeBadge}</div>`;
+    const pred = (m.prediction_outcome||'');
+    const predTs = (m.prediction_ts||null);
+    let predHtml = '';
+    if(pred){
+      const c = pred==='UP' ? '#22c55e' : (pred==='DOWN' ? '#ef4444' : '#94a3b8');
+      const a = pred==='UP' ? '▲' : (pred==='DOWN' ? '▼' : '?');
+      const t = predTs ? new Date(predTs*1000).toLocaleString('ru-RU') : '';
+      predHtml = ` | pred: <span style="color:${c};font-weight:700">${a} ${pred}</span>${t?` <span class=\"text-slate-500\">@ ${t}</span>`:''}`;
+    }
+    let html=`<div class="mb-2 text-xs text-slate-400"><span class="font-mono">${m.slug}</span> | ts: ${m.ts} | closed: ${m.closed} ${activeBadge}${predHtml}</div>`;
     html+=countdownDisplay;
     html+=`<div class="mb-3 text-xs"><a href="${extUrl}" target="_blank" class="text-blue-400 hover:underline">Open on Polymarket</a></div>`;
     if(m.description) html+=`<div class="text-xs text-slate-400 mb-3">${m.description}</div>`;
@@ -170,8 +286,8 @@ async function showPolyMarket(slug){
 
     if(isActive) startPolyCountdown(m.ts, 300);
 
-    // Auto-start order book updates
-    if(m.outcomes && m.outcomes.length >= 2){
+    // Auto-start order book updates (skip for DONE markets)
+    if(!isDone && m.outcomes && m.outcomes.length >= 2){
       updatePolyOrderBooks();
       startPolyOrderBookUpdates();
     }
@@ -244,13 +360,71 @@ function renderAsks(data, outcomeName){
   let html=`<div class="text-slate-500 text-xs mb-1">${outcomeName} · ${timeStr}</div>`;
   html+='<table class="text-xs"><thead><tr><th>Price (¢)</th><th>Size</th></tr></thead><tbody>';
   top5.forEach(a=>{
-    html+=`<tr class="text-red-300"><td class="font-mono">${a.price}</td><td>${a.size}</td></tr>`;
+    const p = Math.round(parseFloat(a.price));
+    const s = Math.round(parseFloat(a.size));
+    html+=`<tr class="text-red-300"><td class="font-mono">${Number.isFinite(p)?p:a.price}</td><td>${Number.isFinite(s)?s:a.size}</td></tr>`;
   });
   html+='</tbody></table>';
   if(data.best_ask_cents!==null){
     html+=`<div class="mt-1 text-xs text-slate-500">Best ask: ${data.best_ask_cents}¢</div>`;
   }
   return html;
+}
+
+// ===== Prediction =====
+
+async function runPolyPrediction(){
+  if(!polySelectedMarket || !polySelectedMarket.slug){
+    document.getElementById('poly-pred-result').innerHTML='<span class="text-red-400">Select a market first.</span>';
+    return;
+  }
+  const btn = document.getElementById('poly-pred-btn');
+  const resultEl = document.getElementById('poly-pred-result');
+  btn.disabled = true;
+  btn.textContent = 'Predicting...';
+  resultEl.innerHTML='<span class="text-slate-400">Running prediction...</span>';
+
+  let params = null;
+  const paramsText = document.getElementById('poly-pred-params').value.trim();
+  if(paramsText){
+    try{ params = JSON.parse(paramsText); }catch(e){
+      resultEl.innerHTML='<span class="text-red-400">Invalid JSON in strategy settings.</span>';
+      btn.disabled = false; btn.textContent = 'PREDICT'; return;
+    }
+  }
+  const windowSize = parseInt(document.getElementById('poly-pred-window').value) || 1000;
+
+  try{
+    const res = await fetch(API+'/api/poly/predict', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        slug: polySelectedMarket.slug,
+        strategy: 'rsi_mean_reversion',
+        params: params,
+        window_size: windowSize,
+        table: 'c_5m'
+      })
+    });
+    const data = await res.json();
+    if(data.error){
+      resultEl.innerHTML=`<div class="p-3 rounded-lg" style="background:#7f1d1d;border:1px solid #ef4444"><span class="text-red-300 font-semibold">Error:</span> <span class="text-red-200">${data.error}</span></div>`;
+    } else {
+      const color = data.prediction === 'UP' ? '#22c55e' : (data.prediction === 'DOWN' ? '#ef4444' : '#94a3b8');
+      const arrow = data.prediction === 'UP' ? '\u25b2' : (data.prediction === 'DOWN' ? '\u25bc' : '\u2014');
+      const prob = Math.round(data.probability * 100);
+      resultEl.innerHTML=`<div class="p-4 rounded-lg text-center" style="background:#1e293b;border:2px solid ${color}">`
+        +`<div style="font-size:48px;font-weight:800;color:${color}">${arrow} ${data.prediction}</div>`
+        +`<div class="text-lg text-slate-300 mt-1">Probability: <b>${prob}%</b></div>`
+        +`<div class="text-xs text-slate-400 mt-2">Strategy: ${data.strategy} | Window: ${data.window_size} candles | Last candle: ${data.last_candle_dt}</div>`
+        +`<div class="text-xs text-slate-500 mt-1">Params: <span class="font-mono">${JSON.stringify(data.params)}</span></div>`
+        +`</div>`;
+    }
+  }catch(e){
+    resultEl.innerHTML=`<span class="text-red-400">Request failed: ${e.message}</span>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'PREDICT';
 }
 
 // ===== Sim trades =====

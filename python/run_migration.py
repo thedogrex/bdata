@@ -88,11 +88,35 @@ STATEMENTS = [
         question    TEXT,
         description TEXT,
         closed      TINYINT(1) NOT NULL DEFAULT 0,
+        resolved_outcome VARCHAR(16) NULL,
+        last_resolution_check_ts INT NULL,
+        prediction_outcome VARCHAR(16) NULL,
+        prediction_ts INT NULL,
         created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_ts (ts),
         INDEX idx_closed (closed)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+
+    """
+    ALTER TABLE poly_markets
+        ADD COLUMN resolved_outcome VARCHAR(16) NULL;
+    """,
+
+    """
+    ALTER TABLE poly_markets
+        ADD COLUMN last_resolution_check_ts INT NULL;
+    """,
+
+    """
+    ALTER TABLE poly_markets
+        ADD COLUMN prediction_outcome VARCHAR(16) NULL;
+    """,
+
+    """
+    ALTER TABLE poly_markets
+        ADD COLUMN prediction_ts INT NULL;
     """,
 
     """
@@ -148,8 +172,17 @@ STATEMENTS = [
 async def main():
     for i, stmt in enumerate(STATEMENTS):
         print(f"Running statement {i+1}/{len(STATEMENTS)}...")
-        await db.execute(stmt)
-        print(f"  OK")
+        try:
+            await db.execute(stmt)
+            print(f"  OK")
+        except Exception as e:
+            msg = str(e)
+            # Old MySQL doesn't support IF NOT EXISTS for ADD COLUMN;
+            # make migrations idempotent by ignoring duplicate-column errors.
+            if "Duplicate column name" in msg or "1060" in msg:
+                print(f"  SKIP (already applied)")
+                continue
+            raise
     print("Migration complete!")
 
 

@@ -20,8 +20,35 @@
 
         <div id="poly-market-detail" class="text-sm text-slate-400">Select a market.</div>
 
+        <!-- Prediction Panel -->
+        <div class="mt-4" id="poly-predict-panel">
+          <div class="card p-4" style="background:#0f172a;border:1px solid #334155">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="font-semibold">Prediction</h3>
+              <span class="text-xs text-slate-400">Strategy: <span class="text-blue-300 font-mono" id="poly-pred-strategy-name">rsi_mean_reversion</span></span>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-2">
+              <div>
+                <label class="block text-xs text-slate-400 mb-1">Window Size (candles)</label>
+                <input id="poly-pred-window" type="number" value="1000" min="100" max="10000" class="w-full">
+              </div>
+              <div class="flex items-end justify-end gap-2">
+                <button id="poly-pred-save" onclick="savePolyPredictionSettings()" class="btn btn-slate text-xs">Save Settings</button>
+                <div id="poly-pred-save-msg" class="text-xs text-slate-500"></div>
+              </div>
+            </div>
+            <div class="text-xs text-slate-500 mb-3">Number of historical 5m candles used for prediction. All must exist with no gaps.</div>
+            <div class="mb-3">
+              <label class="block text-xs text-slate-400 mb-1">Strategy Settings (JSON)</label>
+              <textarea id="poly-pred-params" rows="4" class="w-full text-xs font-mono" placeholder='{"rsi_period":14,"rsi_oversold":30,"rsi_overbought":70,"use_bb_confirm":true,"bb_low":0.2,"bb_high":0.8}'></textarea>
+            </div>
+            <button id="poly-pred-btn" onclick="runPolyPrediction()" class="w-full py-3 text-lg font-bold rounded-lg cursor-pointer border-none text-white transition-all" style="background:linear-gradient(135deg,#3b82f6,#8b5cf6);font-size:18px">PREDICT</button>
+            <div id="poly-pred-result" class="mt-3 text-sm"></div>
+          </div>
+        </div>
+
         <!-- Real-Time Order Books: only 5 lowest asks per side -->
-        <div class="mt-4">
+        <div class="mt-4" id="poly-ob-panel">
           <div class="flex items-center justify-between mb-2">
             <h3 class="font-semibold">Asks (Instant Buy Prices)</h3>
             <div id="poly-ob-status" class="text-xs text-slate-400">Auto-updating</div>
@@ -40,7 +67,7 @@
 
         <!-- Sim Trade & Positions -->
         <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div class="card p-4" style="background:#0f172a;border:1px solid #334155">
+          <div class="card p-4" id="poly-buy-panel" style="background:#0f172a;border:1px solid #334155">
             <h3 class="font-semibold mb-2">Sim Trade (Test Mode)</h3>
             <div class="grid grid-cols-1 gap-2">
               <div>
@@ -48,7 +75,7 @@
                 <input id="poly-sim-qty" type="number" value="1" step="0.1" class="w-full">
               </div>
             </div>
-            <button onclick="submitSimTrade()" class="btn btn-green text-xs mt-3">Submit</button>
+            <button id="poly-sim-submit" onclick="submitSimTrade()" class="btn btn-green text-xs mt-3">Submit</button>
             <div id="poly-sim-msg" class="text-xs text-slate-400 mt-2"></div>
           </div>
 

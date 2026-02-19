@@ -4,7 +4,14 @@
 
       <!-- Left: Market selector -->
       <div class="card p-6 lg:col-span-1">
-        <h2 class="text-lg font-semibold mb-3">Select Market</h2>
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-lg font-semibold">Select Market</h2>
+          <div class="flex gap-2">
+            <button id="ob-markets-prev" onclick="obMarketsPrevPage()" class="btn btn-slate text-xs">Prev</button>
+            <button id="ob-markets-next" onclick="obMarketsNextPage()" class="btn btn-slate text-xs">Next</button>
+          </div>
+        </div>
+        <div id="ob-markets-page" class="text-xs text-slate-500 mb-2"></div>
         <div id="ob-market-list" class="text-sm text-slate-400">Loading...</div>
       </div>
 
@@ -72,7 +79,14 @@
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <!-- Snapshot list -->
               <div>
-                <h4 class="text-sm font-semibold mb-2">Snapshots</h4>
+                <div class="flex items-center justify-between mb-2">
+                  <h4 class="text-sm font-semibold">Snapshots</h4>
+                  <div class="flex gap-2">
+                    <button id="ob-hist-prev" onclick="obHistPrevPage()" class="btn btn-slate text-xs">Prev</button>
+                    <button id="ob-hist-next" onclick="obHistNextPage()" class="btn btn-slate text-xs">Next</button>
+                  </div>
+                </div>
+                <div id="ob-hist-page" class="text-xs text-slate-500 mb-2"></div>
                 <div id="ob-hist-list" class="max-h-96 overflow-y-auto text-xs text-slate-400">No data.</div>
               </div>
               <!-- Snapshot detail -->

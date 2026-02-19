@@ -151,6 +151,21 @@ STATEMENTS = [
     """,
 
     """
+    CREATE TABLE IF NOT EXISTS poly_settings (
+        id          VARCHAR(32) PRIMARY KEY DEFAULT 'default',
+        autopredict TINYINT(1) NOT NULL DEFAULT 0,
+        strategy    VARCHAR(64) NOT NULL DEFAULT 'rsi_mean_reversion',
+        params_json TEXT NULL,
+        window_size INT NOT NULL DEFAULT 1000,
+        updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+
+    """
+    INSERT IGNORE INTO poly_settings (id) VALUES ('default')
+    """,
+
+    """
     CREATE TABLE IF NOT EXISTS poly_sim_trades (
         id               BIGINT AUTO_INCREMENT PRIMARY KEY,
         ts               INT NOT NULL,

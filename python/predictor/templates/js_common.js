@@ -104,6 +104,7 @@ async function init(){
   updateDesc();
   loadDefaultGrid();
   startPolling();
+  loadAutopredictState();
 }
 
 function updateDesc(){

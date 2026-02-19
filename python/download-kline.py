@@ -182,7 +182,7 @@ if __name__ == "__main__":
 
     print(dates)
 
-    start_date = '2021-01-01'
+    start_date = '2026-02-10'
 
     asyncio.run(download_daily_klines('spot', symbols, num_symbols, ["5m"], dates, start_date, None, folder))
 

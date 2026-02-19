@@ -7,6 +7,11 @@ let obLiveInterval=null;
 let obHistoryData=[];
 let obChartData={}; // {outcomeName: [{ts, best_ask, asks}]}
 
+let obMarketsPage = 1;
+const OB_MARKETS_PER_PAGE = 20;
+let obHistPage = 1;
+const OB_HIST_PER_PAGE = 20;
+
 function obSetMode(mode){
   obMode=mode;
   document.getElementById('ob-mode-live').className = mode==='live' ? 'btn btn-green text-xs' : 'btn btn-slate text-xs';
@@ -18,6 +23,54 @@ function obSetMode(mode){
   } else if(mode==='history'){
     obStopLive();
   }
+}
+
+function obRenderHistoryPage(){
+  const listEl=document.getElementById('ob-hist-list');
+  if(!listEl) return;
+  const total = obHistoryData.length;
+  if(!total){
+    listEl.innerHTML='<span class="text-slate-400">No snapshots in this range.</span>';
+    const pgEl=document.getElementById('ob-hist-page');
+    if(pgEl) pgEl.textContent='';
+    return;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(total / OB_HIST_PER_PAGE));
+  if(obHistPage > totalPages) obHistPage = totalPages;
+  if(obHistPage < 1) obHistPage = 1;
+  const startIdx = (obHistPage - 1) * OB_HIST_PER_PAGE;
+  const endIdx = Math.min(startIdx + OB_HIST_PER_PAGE, total);
+
+  const prevBtn=document.getElementById('ob-hist-prev');
+  const nextBtn=document.getElementById('ob-hist-next');
+  if(prevBtn) prevBtn.disabled = obHistPage <= 1;
+  if(nextBtn) nextBtn.disabled = obHistPage >= totalPages;
+  const pgEl=document.getElementById('ob-hist-page');
+  if(pgEl) pgEl.textContent = `Page ${obHistPage}/${totalPages} (${total})`;
+
+  let html=`<div class="text-xs text-slate-500 mb-2">${total} snapshots</div>`;
+  html+='<table><thead><tr><th>Date/Time</th><th>Outcome</th><th>Best Ask</th></tr></thead><tbody>';
+  obHistoryData.slice(startIdx, endIdx).forEach((snap, localIdx)=>{
+    const idx = startIdx + localIdx;
+    const d = new Date(snap.ts*1000);
+    const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}) + ' ' + d.toLocaleTimeString('ru-RU');
+    const isUp = (snap.outcome_name||'').toUpperCase().includes('UP');
+    const nameClass = isUp ? 'text-green-400' : 'text-red-400';
+    html+=`<tr class="ob-snapshot-row cursor-pointer" onclick="obShowSnapshot(${idx})"><td class="text-xs">${dateStr}</td><td class="${nameClass} text-xs">${snap.outcome_name}</td><td class="font-mono text-xs">${snap.best_ask_cents!==null?snap.best_ask_cents+'¢':'-'}</td></tr>`;
+  });
+  html+='</tbody></table>';
+  listEl.innerHTML=html;
+}
+
+function obHistPrevPage(){
+  obHistPage = Math.max(1, obHistPage - 1);
+  obRenderHistoryPage();
+}
+
+function obHistNextPage(){
+  obHistPage = obHistPage + 1;
+  obRenderHistoryPage();
 }
 
 function obSetHistView(view){
@@ -56,10 +109,29 @@ async function obLoadMarkets(){
     const data=await res.json();
     const marketsWithPosRaw = await posRes.json();
     const marketsWithPos = new Set(Array.isArray(marketsWithPosRaw) ? marketsWithPosRaw : []);
-    if(!Array.isArray(data)||!data.length){el.innerHTML='<div class="text-slate-400">No markets.</div>';return}
+    if(!Array.isArray(data)||!data.length){
+      el.innerHTML='<div class="text-slate-400">No markets.</div>';
+      const pgEl=document.getElementById('ob-markets-page');
+      if(pgEl) pgEl.textContent='';
+      return;
+    }
+
+    const total = data.length;
+    const totalPages = Math.max(1, Math.ceil(total / OB_MARKETS_PER_PAGE));
+    if(obMarketsPage > totalPages) obMarketsPage = totalPages;
+    if(obMarketsPage < 1) obMarketsPage = 1;
+    const startIdx = (obMarketsPage - 1) * OB_MARKETS_PER_PAGE;
+    const endIdx = Math.min(startIdx + OB_MARKETS_PER_PAGE, total);
+
+    const prevBtn=document.getElementById('ob-markets-prev');
+    const nextBtn=document.getElementById('ob-markets-next');
+    if(prevBtn) prevBtn.disabled = obMarketsPage <= 1;
+    if(nextBtn) nextBtn.disabled = obMarketsPage >= totalPages;
+    const pgEl=document.getElementById('ob-markets-page');
+    if(pgEl) pgEl.textContent = `Page ${obMarketsPage}/${totalPages} (${total})`;
 
     let html='<table><thead><tr><th>Time</th><th>Status</th></tr></thead><tbody>';
-    data.forEach(m=>{
+    data.slice(startIdx, endIdx).forEach(m=>{
       const d=new Date((m.ts||0)*1000);
       const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}) + ' ' + d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
       const status = m.status || (m.closed ? '[DONE]' : 'open');
@@ -79,6 +151,16 @@ async function obLoadMarkets(){
     html+='</tbody></table>';
     el.innerHTML=html;
   }catch(e){el.textContent='Error loading markets.';}
+}
+
+function obMarketsPrevPage(){
+  obMarketsPage = Math.max(1, obMarketsPage - 1);
+  obLoadMarkets();
+}
+
+function obMarketsNextPage(){
+  obMarketsPage = obMarketsPage + 1;
+  obLoadMarkets();
 }
 
 async function obSelectMarket(slug){
@@ -182,24 +264,15 @@ async function obLoadHistory(){
     allSnapshots.sort((a,b)=>b.ts - a.ts);
     obHistoryData = allSnapshots;
 
+    obHistPage = 1;
+
     if(!allSnapshots.length){
       listEl.innerHTML='<span class="text-slate-400">No snapshots in this range.</span>';
       obDrawChart();
       return;
     }
 
-    // Render table
-    let html=`<div class="text-xs text-slate-500 mb-2">${allSnapshots.length} snapshots</div>`;
-    html+='<table><thead><tr><th>Date/Time</th><th>Outcome</th><th>Best Ask</th></tr></thead><tbody>';
-    allSnapshots.forEach((snap, idx)=>{
-      const d = new Date(snap.ts*1000);
-      const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}) + ' ' + d.toLocaleTimeString('ru-RU');
-      const isUp = (snap.outcome_name||'').toUpperCase().includes('UP');
-      const nameClass = isUp ? 'text-green-400' : 'text-red-400';
-      html+=`<tr class="ob-snapshot-row cursor-pointer" onclick="obShowSnapshot(${idx})"><td class="text-xs">${dateStr}</td><td class="${nameClass} text-xs">${snap.outcome_name}</td><td class="font-mono text-xs">${snap.best_ask_cents!==null?snap.best_ask_cents+'¢':'-'}</td></tr>`;
-    });
-    html+='</tbody></table>';
-    listEl.innerHTML=html;
+    obRenderHistoryPage();
 
     // Draw chart
     obDrawChart();

@@ -6,6 +6,13 @@
           <h2 class="text-lg font-semibold">Markets (5m)</h2>
           <button onclick="loadPolyMarkets()" class="btn btn-primary text-xs">Refresh</button>
         </div>
+        <div class="flex items-center justify-between mb-2">
+          <div class="flex gap-2">
+            <button id="poly-markets-prev" onclick="polyMarketsPrevPage()" class="btn btn-slate text-xs">Prev</button>
+            <button id="poly-markets-next" onclick="polyMarketsNextPage()" class="btn btn-slate text-xs">Next</button>
+          </div>
+          <div id="poly-markets-page" class="text-xs text-slate-500"></div>
+        </div>
         <div id="poly-markets" class="text-sm text-slate-400">Loading...</div>
       </div>
 

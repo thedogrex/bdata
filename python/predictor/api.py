@@ -72,6 +72,13 @@ class BruteforceRequest(BaseModel):
     max_combos: int = 100
 
 
+class SettingsRequest(BaseModel):
+    autopredict: bool = False
+    strategy: str = "rsi_mean_reversion"
+    params: dict | None = None
+    window_size: int = 1000
+
+
 class SimTradeRequest(BaseModel):
     slug: str
     asset_id: str
@@ -159,6 +166,34 @@ async def api_poly_predict(req: PredictRequest):
         window_size=req.window_size,
         table=req.table,
     )
+
+
+@app.get("/api/poly/settings")
+async def api_poly_get_settings():
+    return await poly_service.get_settings()
+
+
+@app.post("/api/poly/settings")
+async def api_poly_save_settings(req: SettingsRequest):
+    return await poly_service.save_settings(
+        autopredict=req.autopredict,
+        strategy=req.strategy,
+        params=req.params,
+        window_size=req.window_size,
+    )
+
+
+@app.get("/api/poly/prediction_candles/{slug}")
+async def api_poly_prediction_candles(slug: str, window: int = Query(1000), tail: int = Query(200)):
+    return await poly_service.get_prediction_candles(slug=slug, window_size=window, tail=tail)
+
+
+@app.post("/api/candles/sync")
+async def api_candles_sync(target_ts: int = Query(...), window: int = Query(1100)):
+    from predictor.candle_sync import sync_candles_up_to, check_and_fill_gaps
+    sync = await sync_candles_up_to(target_ts, window_candles=window)
+    fill = await check_and_fill_gaps(target_ts, window_candles=window)
+    return {"sync": sync, "gap_fill": fill}
 
 
 @app.post("/api/poly/sim/trade")

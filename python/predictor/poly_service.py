@@ -226,6 +226,34 @@ async def save_orderbook_snapshot(slug: str, asset_id: str, data: Dict[str, Any]
     )
 
 
+async def _try_autopredict(slug: str) -> None:
+    """Run autopredict for a market if enabled in settings."""
+    try:
+        settings = await get_settings()
+        if not settings.get("autopredict"):
+            return
+        # Skip if already predicted
+        row = await db.fetchone(
+            "SELECT prediction_outcome FROM poly_markets WHERE slug=%s", (slug,)
+        )
+        if row and row[0]:
+            return
+        strategy = settings.get("strategy", "rsi_mean_reversion")
+        params = settings.get("params")
+        window_size = settings.get("window_size", 1000)
+        print(f"[autopredict] Running prediction for {slug} (strategy={strategy}, window={window_size})")
+        result = await predict_for_market(
+            slug=slug,
+            strategy_name=strategy,
+            strategy_params=params,
+            window_size=window_size,
+        )
+        pred = result.get("prediction", "?")
+        print(f"[autopredict] {slug} -> {pred} (prob={result.get('probability', '?')})")
+    except Exception as e:
+        print(f"[autopredict] Error for {slug}: {e}")
+
+
 async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) -> None:
     orderbook_interval_sec = int(orderbook_interval_sec)
     if orderbook_interval_sec <= 0:
@@ -237,6 +265,7 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
     last_market_refresh = 0
     last_resolution_scan = 0
     last_seen_active_ts: Optional[int] = None
+    autopredicted_slugs: set = set()  # slugs we already auto-predicted
     
     while not stop_event.is_set():
         try:
@@ -298,6 +327,17 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     await _take_orderbook_snapshot_for_slug(slug)
                 last_future_update = current_time
 
+            # Autopredict: when a new market just became active (within 10s), predict it
+            for slug, ts in active_markets:
+                if slug not in autopredicted_slugs:
+                    seconds_since_start = current_time - int(ts)
+                    if 0 <= seconds_since_start <= 15:
+                        autopredicted_slugs.add(slug)
+                        await _try_autopredict(slug)
+            # Prune old slugs to avoid memory leak (keep last 50)
+            if len(autopredicted_slugs) > 50:
+                autopredicted_slugs = set(list(autopredicted_slugs)[-30:])
+
             # Resolution polling: once per minute scan DONE markets without resolution.
             if current_time - last_resolution_scan >= 60:
                 last_resolution_scan = current_time
@@ -327,6 +367,46 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
             await asyncio.wait_for(stop_event.wait(), timeout=orderbook_interval_sec)
         except asyncio.TimeoutError:
             continue
+
+
+async def get_settings() -> Dict[str, Any]:
+    """Get autopredict settings from DB."""
+    row = await db.fetchone(
+        "SELECT autopredict, strategy, params_json, window_size FROM poly_settings WHERE id='default'"
+    )
+    if not row:
+        return {"autopredict": False, "strategy": "rsi_mean_reversion", "params": None, "window_size": 1000}
+    autopredict, strategy, params_json, window_size = row
+    params = None
+    if params_json:
+        try:
+            params = json.loads(params_json)
+        except Exception:
+            pass
+    return {
+        "autopredict": bool(autopredict),
+        "strategy": strategy or "rsi_mean_reversion",
+        "params": params,
+        "window_size": int(window_size) if window_size else 1000,
+    }
+
+
+async def save_settings(autopredict: bool, strategy: str, params: Optional[dict], window_size: int) -> Dict[str, Any]:
+    """Save autopredict settings to DB."""
+    params_json = json.dumps(params, ensure_ascii=False) if params else None
+    await db.execute(
+        """
+        INSERT INTO poly_settings (id, autopredict, strategy, params_json, window_size)
+        VALUES ('default', %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            autopredict=VALUES(autopredict),
+            strategy=VALUES(strategy),
+            params_json=VALUES(params_json),
+            window_size=VALUES(window_size)
+        """,
+        (int(autopredict), strategy, params_json, int(window_size)),
+    )
+    return await get_settings()
 
 
 async def list_markets(limit: int = 50) -> List[Dict[str, Any]]:
@@ -614,20 +694,27 @@ async def predict_for_market(
 ) -> Dict[str, Any]:
     """Run a single-candle prediction for the candle at the market's timestamp.
 
-    1. Load *window_size + 1* candles ending at or before the market ts.
-    2. Check continuity (each pair must be exactly 5 min apart).
-    3. Fit strategy on the first *window_size* candles, predict on the last one.
+    The market slug encodes the timestamp (e.g. btc-updown-5m-1739919600).
+    We need exactly *window_size* consecutive 5-min candles ending with the
+    candle whose open_time == market_ts (in microseconds).
+
+    Steps:
+      1. Auto-sync missing candles from Binance REST API.
+      2. Load *window_size* candles ending at market_ts (inclusive).
+      3. Verify continuity (no gaps).
+      4. Fit strategy on first N-1 candles, predict on the last one.
     """
     import pandas as pd
     import numpy as np
     from predictor.features import add_technical_features
     from predictor.strategies import get_strategy, STRATEGY_REGISTRY
     from predictor.data_loader import add_direction
+    from predictor.candle_sync import sync_candles_up_to, check_and_fill_gaps
 
     if strategy_name not in STRATEGY_REGISTRY:
         return {"error": f"Unknown strategy: {strategy_name}"}
 
-    # Resolve market timestamp
+    # Resolve market timestamp (epoch seconds from slug)
     m_row = await db.fetchone(
         "SELECT ts FROM poly_markets WHERE slug=%s", (slug,)
     )
@@ -637,11 +724,22 @@ async def predict_for_market(
 
     # 5-minute candle interval in microseconds
     interval_us = 5 * 60 * 1_000_000  # 300 000 000
-
-    # We need window_size candles to fit + 1 candle to predict on.
-    # The predict candle open_time should be <= market_ts * 1_000_000.
     market_ts_us = market_ts * 1_000_000
-    need = window_size + 1
+
+    # --- Step 1: Auto-sync candles from Binance API ---
+    sync_info = {}
+    try:
+        sync_result = await sync_candles_up_to(market_ts, window_candles=window_size + 50, table=table)
+        sync_info["sync"] = sync_result
+        if sync_result.get("downloaded", 0) > 0:
+            # Also fill any internal gaps
+            fill_result = await check_and_fill_gaps(market_ts, window_candles=window_size, table=table)
+            sync_info["gap_fill"] = fill_result
+    except Exception as e:
+        sync_info["sync_error"] = str(e)
+
+    # --- Step 2: Load candles ending at market_ts ---
+    need = window_size
 
     rows = await db.fetchall(
         f"""
@@ -657,14 +755,39 @@ async def predict_for_market(
 
     if not rows or len(rows) < need:
         have = len(rows) if rows else 0
+        # Find latest candle to help diagnose
+        latest_row = await db.fetchone(f"SELECT MAX(open_time) FROM {table}")
+        latest_us = int(latest_row[0]) if latest_row and latest_row[0] else 0
+        latest_dt = pd.Timestamp(latest_us, unit="us").strftime("%Y-%m-%d %H:%M:%S") if latest_us else "none"
+        market_dt = pd.Timestamp(market_ts_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
         return {
-            "error": f"Not enough candles. Need {need}, have {have}.",
+            "error": f"Not enough candles before market timestamp. Need {need}, have {have}. "
+                     f"Market ts: {market_dt} (epoch {market_ts}). "
+                     f"Latest candle in DB: {latest_dt}.",
             "need": need,
             "have": have,
+            "market_ts": market_ts,
+            "latest_candle_us": latest_us,
+            **sync_info,
         }
 
     # Reverse to ascending order
     rows = list(reversed(rows))
+
+    # --- Step 2b: Verify last candle aligns with market_ts ---
+    last_candle_open_us = int(rows[-1][0])
+    if last_candle_open_us != market_ts_us:
+        last_dt = pd.Timestamp(last_candle_open_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
+        market_dt = pd.Timestamp(market_ts_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
+        diff_min = round((market_ts_us - last_candle_open_us) / 1_000_000 / 60, 1)
+        return {
+            "error": f"Candle at market timestamp not found. Market ts: {market_dt}, "
+                     f"latest candle: {last_dt} ({diff_min} min before). "
+                     f"The exact 5m candle for this market is missing.",
+            "market_ts_us": market_ts_us,
+            "last_candle_us": last_candle_open_us,
+            **sync_info,
+        }
 
     # Build DataFrame
     df = pd.DataFrame(rows, columns=[
@@ -676,7 +799,7 @@ async def predict_for_market(
         df[c] = df[c].astype(float)
     df["trades"] = df["trades"].astype(int)
 
-    # --- Continuity check ---
+    # --- Step 3: Continuity check ---
     open_times = df["open_time"].values.astype(np.int64)
     diffs = np.diff(open_times)
     bad_idx = np.where(diffs != interval_us)[0]
@@ -688,17 +811,24 @@ async def predict_for_market(
         gap_to_dt = pd.Timestamp(gap_to_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
         actual_gap_min = round((gap_to_us - gap_from_us) / 1_000_000 / 60, 1)
         return {
-            "error": f"Candle gap detected at position {first_bad}: {gap_from_dt} -> {gap_to_dt} ({actual_gap_min} min instead of 5 min). {len(bad_idx)} gap(s) total.",
+            "error": f"Candle gap detected at position {first_bad}: {gap_from_dt} -> {gap_to_dt} "
+                     f"({actual_gap_min} min instead of 5 min). {len(bad_idx)} gap(s) total in {need} candles.",
             "gap_from_ts": gap_from_us,
             "gap_to_ts": gap_to_us,
             "gaps_total": int(len(bad_idx)),
+            **sync_info,
         }
 
-    # --- Run strategy ---
+    # --- Step 4: Run strategy ---
     df = add_direction(df)
     df = df.reset_index(drop=True)
     df_feat = add_technical_features(df)
 
+    # --- Exact backtester mechanism (run_backtest lines 128-162) ---
+    # Train on all candles BEFORE the last one, predict on the LAST candle only.
+    # This is identical to how the backtester evaluates each candle:
+    #   train = df_feat[i-window : i]   (exclusive of candle i)
+    #   pred  = strategy.predict(df_feat[[i]])
     df_train = df_feat.iloc[:-1].reset_index(drop=True)
     df_predict = df_feat.iloc[[-1]].reset_index(drop=True)
 
@@ -709,8 +839,68 @@ async def predict_for_market(
 
     pred = int(pred_arr[0])
     prob = float(prob_arr[0])
-
     label = "UP" if pred == 1 else ("DOWN" if pred == 0 else "UNDEFINED")
+
+    # --- Diagnostics: show WHY this candle got this signal ---
+    period = strategy.params.get("rsi_period", 14)
+    rsi_col = f"rsi_{period}" if f"rsi_{period}" in df_predict.columns else "rsi_14"
+    pred_rsi = float(np.nan_to_num(df_predict[rsi_col].values[0], nan=50.0))
+    pred_bb = float(np.nan_to_num(df_predict["bb_pos"].values[0], nan=0.5)) if "bb_pos" in df_predict.columns else 0.5
+
+    base_oversold = strategy.params.get("rsi_oversold", 30)
+    base_overbought = strategy.params.get("rsi_overbought", 70)
+    rsi_p10 = getattr(strategy, '_rsi_p10', None)
+    rsi_p90 = getattr(strategy, '_rsi_p90', None)
+    if rsi_p10 is not None:
+        effective_oversold = (base_oversold + rsi_p10) / 2
+        effective_overbought = (base_overbought + rsi_p90) / 2
+    else:
+        effective_oversold = base_oversold
+        effective_overbought = base_overbought
+
+    # Also show last 10 candles context (what happened just before)
+    context_start = max(0, len(df_feat) - 10)
+    tail_detail = []
+    for k in range(context_start, len(df_feat)):
+        row = df_feat.iloc[k]
+        ot = int(row["open_time"])
+        dt_str = pd.Timestamp(ot, unit="us").strftime("%m-%d %H:%M")
+        r_rsi = float(np.nan_to_num(row[rsi_col], nan=50.0))
+        r_bb = float(np.nan_to_num(row.get("bb_pos", 0.5), nan=0.5))
+        # Re-predict each context candle to show what backtest would have said
+        df_k = df_feat.iloc[[k]].reset_index(drop=True)
+        k_pred = int(strategy.predict(df_k, horizon=1)[0])
+        k_prob = float(strategy.predict_proba(df_k, horizon=1)[0])
+        tail_detail.append({
+            "dt": dt_str,
+            "rsi": round(r_rsi, 1),
+            "bb": round(r_bb, 3),
+            "prob": round(k_prob, 4),
+            "pred": k_pred,
+        })
+
+    # Collect RSI stats from the last 10 candles for diagnostics
+    tail_rsi_vals = [d["rsi"] for d in tail_detail if d["rsi"] is not None]
+    diag = {
+        "base_oversold": round(float(base_oversold), 1),
+        "base_overbought": round(float(base_overbought), 1),
+        "effective_oversold": round(effective_oversold, 1),
+        "effective_overbought": round(effective_overbought, 1),
+        "rsi_p10": round(rsi_p10, 1) if rsi_p10 is not None else None,
+        "rsi_p90": round(rsi_p90, 1) if rsi_p90 is not None else None,
+        "train_size": len(df_train),
+        "tail_size": len(tail_detail),
+        "pred_rsi": round(pred_rsi, 1),
+        "pred_bb": round(pred_bb, 3),
+        "tail_rsi_min": round(min(tail_rsi_vals), 1) if tail_rsi_vals else None,
+        "tail_rsi_max": round(max(tail_rsi_vals), 1) if tail_rsi_vals else None,
+        "tail_rsi_last": round(tail_rsi_vals[-1], 1) if tail_rsi_vals else None,
+        "tail_detail": tail_detail,
+    }
+
+    signals_in_tail = sum(1 for d in tail_detail if d["pred"] != -1)
+    total_in_tail = len(tail_detail)
+    candles_ago = 0 if pred != -1 else -1
 
     last_candle_ts_us = int(open_times[-1])
     last_candle_dt = pd.Timestamp(last_candle_ts_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
@@ -728,8 +918,10 @@ async def predict_for_market(
             (label, int(prediction_ts), slug),
         )
     except Exception:
-        # Non-fatal: prediction result still returned to caller.
         pass
+
+    # Signal candle = the last candle (we predict on exactly one candle)
+    signal_candle_dt = last_candle_dt if pred != -1 else None
 
     return {
         "prediction": label,
@@ -740,9 +932,70 @@ async def predict_for_market(
         "candles_used": need,
         "last_candle_ts": last_candle_ts_us,
         "last_candle_dt": last_candle_dt,
+        "signal_candle_dt": signal_candle_dt,
+        "candles_ago": candles_ago,
+        "signals_in_tail": signals_in_tail,
+        "tail_size": total_in_tail,
         "market_slug": slug,
         "market_ts": market_ts,
         "prediction_ts": int(prediction_ts),
+        "diag": diag,
+        **sync_info,
+    }
+
+
+async def get_prediction_candles(
+    slug: str,
+    window_size: int = 1000,
+    tail: int = 200,
+    table: str = "c_5m",
+) -> Dict[str, Any]:
+    """Return the last *tail* candles (from the *window_size* window) used for
+    prediction on *slug*.  The frontend draws a chart from these."""
+    import pandas as pd
+
+    m_row = await db.fetchone("SELECT ts FROM poly_markets WHERE slug=%s", (slug,))
+    if not m_row:
+        return {"error": f"Market not found: {slug}"}
+    market_ts = int(m_row[0])
+    market_ts_us = market_ts * 1_000_000
+
+    rows = await db.fetchall(
+        f"""
+        SELECT open_time, open, high, low, close, volume
+        FROM {table}
+        WHERE open_time <= %s
+        ORDER BY open_time DESC
+        LIMIT %s
+        """,
+        (market_ts_us, window_size),
+    )
+
+    if not rows:
+        return {"error": "No candles found", "market_ts": market_ts}
+
+    rows = list(reversed(rows))
+    # Take only the last `tail` candles for the chart
+    rows = rows[-tail:]
+
+    candles = []
+    for r in rows:
+        ot = int(r[0])
+        candles.append({
+            "t": ot // 1_000_000,  # epoch seconds for JS
+            "o": float(r[1]),
+            "h": float(r[2]),
+            "l": float(r[3]),
+            "c": float(r[4]),
+            "v": float(r[5]),
+        })
+
+    return {
+        "slug": slug,
+        "market_ts": market_ts,
+        "window_size": window_size,
+        "total_in_window": len(list(reversed(rows))),
+        "candles": candles,
     }
 
 

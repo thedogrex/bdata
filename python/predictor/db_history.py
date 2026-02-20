@@ -5,6 +5,15 @@ from db import DbProvider
 db = DbProvider()
 
 
+def _safe_json_loads(val, default):
+    if not val:
+        return default
+    try:
+        return json.loads(val)
+    except Exception:
+        return default
+
+
 async def save_backtest_run(result: dict) -> int:
     """Save a backtest run + horizon results to MySQL. Returns run_id."""
     params_json = json.dumps(result.get("params", {}), ensure_ascii=False)
@@ -34,8 +43,12 @@ async def save_backtest_run(result: dict) -> int:
 
     horizons = result.get("horizons", {})
     for horizon_str, h in horizons.items():
-        if "error" in h:
-            continue
+        err_msg = h.get("error") if isinstance(h, dict) else None
+        conf_json = h.get("confidence_distribution", {}) if isinstance(h, dict) else {}
+        if err_msg:
+            # Persist the horizon anyway (otherwise history shows "no results")
+            # Store the reason inside confidence_json for visibility.
+            conf_json = {"error": str(err_msg)}
         await db.execute("""
             INSERT INTO backtest_horizons
                 (run_id, horizon, accuracy, accuracy_pct, total_candles, signals,
@@ -66,7 +79,7 @@ async def save_backtest_run(result: dict) -> int:
             h.get("predict_time_sec", 0),
             json.dumps(h.get("monthly", []), ensure_ascii=False),
             json.dumps(h.get("daily", []), ensure_ascii=False),
-            json.dumps(h.get("confidence_distribution", {}), ensure_ascii=False),
+            json.dumps(conf_json, ensure_ascii=False),
         ))
 
     return run_id
@@ -102,7 +115,7 @@ async def get_history(limit: int = 100, strategy: Optional[str] = None,
         run = {
             "id": run_id,
             "strategy": row[1],
-            "params": json.loads(row[2]) if row[2] else {},
+            "params": _safe_json_loads(row[2], {}),
             "train_start": row[3],
             "train_end": row[4],
             "test_start": row[5],
@@ -144,9 +157,9 @@ async def get_history(limit: int = 100, strategy: Optional[str] = None,
                 },
                 "fit_time_sec": hr[18],
                 "predict_time_sec": hr[19],
-                "monthly": json.loads(hr[20]) if hr[20] else [],
-                "daily": json.loads(hr[21]) if hr[21] else [],
-                "confidence_distribution": json.loads(hr[22]) if hr[22] else {},
+                "monthly": _safe_json_loads(hr[20], []),
+                "daily": _safe_json_loads(hr[21], []),
+                "confidence_distribution": _safe_json_loads(hr[22], {}),
             }
 
         # Apply min_accuracy filter after loading horizons
@@ -177,7 +190,7 @@ async def get_history_detail(run_id: int) -> Optional[dict]:
     run = {
         "id": row[0],
         "strategy": row[1],
-        "params": json.loads(row[2]) if row[2] else {},
+        "params": _safe_json_loads(row[2], {}),
         "train_start": row[3],
         "train_end": row[4],
         "test_start": row[5],
@@ -219,9 +232,9 @@ async def get_history_detail(run_id: int) -> Optional[dict]:
             },
             "fit_time_sec": hr[18],
             "predict_time_sec": hr[19],
-            "monthly": json.loads(hr[20]) if hr[20] else [],
-            "daily": json.loads(hr[21]) if hr[21] else [],
-            "confidence_distribution": json.loads(hr[22]) if hr[22] else {},
+            "monthly": _safe_json_loads(hr[20], []),
+            "daily": _safe_json_loads(hr[21], []),
+            "confidence_distribution": _safe_json_loads(hr[22], {}),
         }
 
     return run

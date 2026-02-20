@@ -64,10 +64,12 @@ RECOMMENDED_PARAMS: dict[str, dict] = {
     },
     "momentum": {
         "notes": "Rule-based, no training needed. Very fast execution. Trend-following approach. Weight params must be tuned together (should roughly sum to 1).",
-        "fast_preset": {"ema_fast": 5, "ema_slow": 20, "macd_weight": 0.35, "ema_weight": 0.3, "volume_weight": 0.2, "momentum_weight": 0.15, "volume_surge_threshold": 1.5},
-        "trend_heavy_preset": {"ema_fast": 3, "ema_slow": 15, "macd_weight": 0.45, "ema_weight": 0.35, "volume_weight": 0.1, "momentum_weight": 0.1, "volume_surge_threshold": 1.3},
-        "volume_heavy_preset": {"ema_fast": 5, "ema_slow": 20, "macd_weight": 0.25, "ema_weight": 0.2, "volume_weight": 0.35, "momentum_weight": 0.2, "volume_surge_threshold": 2.0},
-        "brute_force_include": ["macd_weight", "ema_weight", "volume_weight", "volume_surge_threshold"],
+        "fast_preset": {"ema_fast": 5, "ema_slow": 20, "macd_weight": 0.35, "ema_weight": 0.3, "volume_weight": 0.2, "momentum_weight": 0.15, "volume_surge_threshold": 1.5, "threshold": 0.55},
+        "sensitive_preset": {"ema_fast": 3, "ema_slow": 12, "macd_weight": 0.4, "ema_weight": 0.35, "volume_weight": 0.15, "momentum_weight": 0.1, "volume_surge_threshold": 1.15, "threshold": 0.53},
+        "ultra_sensitive_preset": {"ema_fast": 2, "ema_slow": 10, "macd_weight": 0.45, "ema_weight": 0.35, "volume_weight": 0.1, "momentum_weight": 0.1, "volume_surge_threshold": 1.05, "threshold": 0.52},
+        "trend_heavy_preset": {"ema_fast": 3, "ema_slow": 15, "macd_weight": 0.45, "ema_weight": 0.35, "volume_weight": 0.1, "momentum_weight": 0.1, "volume_surge_threshold": 1.3, "threshold": 0.55},
+        "volume_heavy_preset": {"ema_fast": 5, "ema_slow": 20, "macd_weight": 0.25, "ema_weight": 0.2, "volume_weight": 0.35, "momentum_weight": 0.2, "volume_surge_threshold": 2.0, "threshold": 0.55},
+        "brute_force_include": ["macd_weight", "ema_weight", "volume_weight", "volume_surge_threshold", "threshold"],
     },
     "pattern_sequence": {
         "notes": "Trains on historical candle direction patterns. Fast training. min_occurrences controls signal reliability vs frequency tradeoff.",

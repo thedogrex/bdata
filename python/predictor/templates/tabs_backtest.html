@@ -4,8 +4,8 @@
       <h2 class="text-lg font-semibold mb-4">Run Moving-Window Backtest</h2>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
         <div><label class="block text-xs text-slate-400 mb-1">Strategy <span class="tooltip cursor-help text-blue-400" id="bt-strategy-info">&#9432;<span class="tt"></span></span></label><select id="bt-strategy" class="w-full"></select></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Train Start</label><input type="date" id="bt-train-start" value="2022-01-01" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Train End</label><input type="date" id="bt-train-end" value="2025-06-30" class="w-full"></div>
+        <div id="bt-train-start-wrap"><label class="block text-xs text-slate-400 mb-1">Train Start</label><input type="date" id="bt-train-start" value="2022-01-01" class="w-full"></div>
+        <div id="bt-train-end-wrap"><label class="block text-xs text-slate-400 mb-1">Train End</label><input type="date" id="bt-train-end" value="2025-06-30" class="w-full"></div>
         <div><label class="block text-xs text-slate-400 mb-1">Test Start</label><input type="date" id="bt-test-start" value="2025-07-01" class="w-full"></div>
         <div><label class="block text-xs text-slate-400 mb-1">Test End</label><input type="date" id="bt-test-end" value="2025-12-31" class="w-full"></div>
         <div><label class="block text-xs text-slate-400 mb-1">Horizons</label><input type="text" id="bt-horizons" value="1" class="w-full" placeholder="1,2,3"></div>

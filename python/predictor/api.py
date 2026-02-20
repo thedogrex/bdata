@@ -9,7 +9,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from predictor.backtester import run_backtest
+from predictor.backtester import (
+    run_backtest,
+    preload_backtest_data,
+    run_backtest_vectorized,
+    RULE_BASED_STRATEGIES,
+)
 from predictor.strategies import list_strategies, STRATEGY_REGISTRY
 from predictor.db_history import (
     save_backtest_run, get_history, get_history_detail,
@@ -223,19 +228,43 @@ async def api_poly_sim_markets_with_positions():
 async def api_run_backtest(req: BacktestRequest):
     """Queue a backtest task. Returns task_id immediately."""
     async def _run(progress):
-        result = await run_backtest(
-            strategy_name=req.strategy,
-            strategy_params=req.params,
-            train_start=req.train_start,
-            train_end=req.train_end,
-            test_start=req.test_start,
-            test_end=req.test_end,
-            horizons=req.horizons,
-            table=req.table,
-            window_size=req.window_size,
-            retrain_every=req.retrain_every,
-            progress=progress,
-        )
+        if req.strategy in RULE_BASED_STRATEGIES:
+            preloaded = await preload_backtest_data(
+                train_start=req.train_start,
+                train_end=req.train_end,
+                test_start=req.test_start,
+                test_end=req.test_end,
+                horizons=req.horizons,
+                table=req.table,
+                progress=progress,
+            )
+            result = run_backtest_vectorized(
+                strategy_name=req.strategy,
+                strategy_params=req.params,
+                preloaded=preloaded,
+                horizons=req.horizons,
+                window_size=req.window_size,
+                retrain_every=req.retrain_every,
+                train_start=req.train_start,
+                train_end=req.train_end,
+                test_start=req.test_start,
+                test_end=req.test_end,
+                table=req.table,
+            )
+        else:
+            result = await run_backtest(
+                strategy_name=req.strategy,
+                strategy_params=req.params,
+                train_start=req.train_start,
+                train_end=req.train_end,
+                test_start=req.test_start,
+                test_end=req.test_end,
+                horizons=req.horizons,
+                table=req.table,
+                window_size=req.window_size,
+                retrain_every=req.retrain_every,
+                progress=progress,
+            )
         if "error" not in result:
             run_id = await save_backtest_run(result)
             result["id"] = run_id
@@ -253,22 +282,50 @@ async def api_compare_strategies(req: CompareRequest):
         results = []
         strats = [s for s in req.strategies if s in STRATEGY_REGISTRY]
         progress.total = len(strats)
+
+        preloaded = None
+        if any(s in RULE_BASED_STRATEGIES for s in strats):
+            preloaded = await preload_backtest_data(
+                train_start=req.train_start,
+                train_end=req.train_end,
+                test_start=req.test_start,
+                test_end=req.test_end,
+                horizons=req.horizons,
+                table=req.table,
+                progress=progress,
+            )
+
         for idx, strategy_name in enumerate(strats):
             await progress.check_pause_cancel()
             progress.update(idx, len(strats), f"Running {strategy_name} ({idx+1}/{len(strats)})")
             try:
-                result = await run_backtest(
-                    strategy_name=strategy_name,
-                    strategy_params=None,
-                    train_start=req.train_start,
-                    train_end=req.train_end,
-                    test_start=req.test_start,
-                    test_end=req.test_end,
-                    horizons=req.horizons,
-                    table=req.table,
-                    window_size=req.window_size,
-                    retrain_every=req.retrain_every,
-                )
+                if strategy_name in RULE_BASED_STRATEGIES and preloaded is not None:
+                    result = run_backtest_vectorized(
+                        strategy_name=strategy_name,
+                        strategy_params=None,
+                        preloaded=preloaded,
+                        horizons=req.horizons,
+                        window_size=req.window_size,
+                        retrain_every=req.retrain_every,
+                        train_start=req.train_start,
+                        train_end=req.train_end,
+                        test_start=req.test_start,
+                        test_end=req.test_end,
+                        table=req.table,
+                    )
+                else:
+                    result = await run_backtest(
+                        strategy_name=strategy_name,
+                        strategy_params=None,
+                        train_start=req.train_start,
+                        train_end=req.train_end,
+                        test_start=req.test_start,
+                        test_end=req.test_end,
+                        horizons=req.horizons,
+                        table=req.table,
+                        window_size=req.window_size,
+                        retrain_every=req.retrain_every,
+                    )
                 await save_backtest_run(result)
                 results.append(result)
             except Exception as e:

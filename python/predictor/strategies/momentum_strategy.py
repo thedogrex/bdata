@@ -25,6 +25,7 @@ class MomentumStrategy(BaseStrategy):
             "volume_weight": 0.2,
             "momentum_weight": 0.15,
             "volume_surge_threshold": 1.5,
+            "threshold": 0.55,
         }
 
     @staticmethod
@@ -37,17 +38,17 @@ class MomentumStrategy(BaseStrategy):
             "volume_weight": "Weight of volume surge signal in final decision (0-1). Typical: 0.1-0.3.",
             "momentum_weight": "Weight of price momentum signal in final decision (0-1). Typical: 0.1-0.2.",
             "volume_surge_threshold": "Volume surge multiplier vs recent average. Higher = rarer signals. Typical: 1.3-2.0.",
+            "threshold": "Decision threshold for UP/DOWN. Higher = fewer signals; lower = more signals. Default: 0.55.",
         }
 
     def fit(self, df: pd.DataFrame, horizon: int = 1) -> None:
         # Learn adaptive baselines from training window
         if "macd_hist" not in df.columns:
             df = add_technical_features(df)
-        df = df.fillna(0)
 
-        macd = df["macd_hist"].values if "macd_hist" in df.columns else np.zeros(len(df))
-        vol_r = df["volume_ratio"].values if "volume_ratio" in df.columns else np.ones(len(df))
-        mom = df["momentum_3"].values if "momentum_3" in df.columns else np.zeros(len(df))
+        macd = np.nan_to_num(df["macd_hist"].values, nan=0.0) if "macd_hist" in df.columns else np.zeros(len(df))
+        vol_r = np.nan_to_num(df["volume_ratio"].values, nan=1.0) if "volume_ratio" in df.columns else np.ones(len(df))
+        mom = np.nan_to_num(df["momentum_3"].values, nan=0.0) if "momentum_3" in df.columns else np.zeros(len(df))
 
         if len(df) > 100:
             self._macd_mean = float(np.mean(macd))
@@ -64,17 +65,23 @@ class MomentumStrategy(BaseStrategy):
         # Use pre-computed features if available, else compute
         if "macd_hist" not in df.columns:
             df = add_technical_features(df)
-        df = df.fillna(0)
 
-        fast_key = f"ema_{self.params['ema_fast']}"
-        slow_key = f"ema_{self.params['ema_slow']}"
+        fast_span = int(self.params["ema_fast"])
+        slow_span = int(self.params["ema_slow"])
+        fast_key = f"ema_{fast_span}"
+        slow_key = f"ema_{slow_span}"
+
+        if fast_key not in df.columns:
+            df[fast_key] = df["close"].ewm(span=fast_span, adjust=False).mean()
+        if slow_key not in df.columns:
+            df[slow_key] = df["close"].ewm(span=slow_span, adjust=False).mean()
 
         n = len(df)
-        macd_hist = df["macd_hist"].values if "macd_hist" in df.columns else np.zeros(n)
-        ema_fast = df[fast_key].values if fast_key in df.columns else df["close"].values
-        ema_slow = df[slow_key].values if slow_key in df.columns else df["close"].values
-        vol_ratio = df["volume_ratio"].values if "volume_ratio" in df.columns else np.ones(n)
-        mom = df["momentum_3"].values if "momentum_3" in df.columns else np.zeros(n)
+        macd_hist = np.nan_to_num(df["macd_hist"].values, nan=0.0) if "macd_hist" in df.columns else np.zeros(n)
+        ema_fast = np.nan_to_num(df[fast_key].values, nan=0.0)
+        ema_slow = np.nan_to_num(df[slow_key].values, nan=0.0)
+        vol_ratio = np.nan_to_num(df["volume_ratio"].values, nan=1.0) if "volume_ratio" in df.columns else np.ones(n)
+        mom = np.nan_to_num(df["momentum_3"].values, nan=0.0) if "momentum_3" in df.columns else np.zeros(n)
 
         w_macd = self.params["macd_weight"]
         w_ema = self.params["ema_weight"]
@@ -120,7 +127,10 @@ class MomentumStrategy(BaseStrategy):
 
     def predict(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
         proba = self.predict_proba(df, horizon)
+        thr = float(self.params.get("threshold", 0.55))
+        up_thr = max(thr, 1 - thr)      # always >= 0.5
+        down_thr = 1 - up_thr            # always <= 0.5
         preds = np.full(len(proba), -1, dtype=np.int8)
-        preds[proba > 0.55] = 1
-        preds[proba < 0.45] = 0
+        preds[proba > up_thr] = 1
+        preds[proba < down_thr] = 0
         return preds

@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 
 from predictor.strategies.base import BaseStrategy
@@ -12,7 +11,6 @@ class RandomForestStrategy(BaseStrategy):
     def __init__(self, params: dict):
         super().__init__(params)
         self.model = None
-        self.scaler = StandardScaler()
         self.feature_cols = []
 
     @staticmethod
@@ -54,11 +52,9 @@ class RandomForestStrategy(BaseStrategy):
         df = df.dropna()
         self.feature_cols = get_feature_columns(df)
 
-        X = df[self.feature_cols].values
-        y = df[target_col].values
-
-        self.scaler.fit(X)
-        X_scaled = self.scaler.transform(X)
+        X = df[self.feature_cols].to_numpy(dtype=np.float32, copy=False)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+        y = df[target_col].to_numpy(copy=False)
 
         max_features = self.params["max_features"]
         if isinstance(max_features, str) and max_features not in ("sqrt", "log2"):
@@ -75,15 +71,14 @@ class RandomForestStrategy(BaseStrategy):
             random_state=42,
             n_jobs=-1,
         )
-        self.model.fit(X_scaled, y)
+        self.model.fit(X, y)
 
     def predict_proba_row(self, x_row: np.ndarray) -> float:
         """Fast path: predict probability for a single candle feature row."""
         if self.model is None or not self.feature_cols:
             return 0.5
-        x_row = np.nan_to_num(x_row, nan=0.0, posinf=0.0, neginf=0.0).astype(float, copy=False)
-        x_scaled = self.scaler.transform(x_row.reshape(1, -1))
-        return float(self.model.predict_proba(x_scaled)[0, 1])
+        x_row = np.nan_to_num(x_row, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+        return float(self.model.predict_proba(x_row.reshape(1, -1))[0, 1])
 
     def predict_row(self, x_row: np.ndarray) -> int:
         """Fast path: predict class for a single candle feature row."""
@@ -99,9 +94,9 @@ class RandomForestStrategy(BaseStrategy):
         if "rsi_14" not in df.columns:
             df = add_technical_features(df)
         df = df.fillna(0)
-        X = df[self.feature_cols].values
-        X_scaled = self.scaler.transform(X)
-        return self.model.predict_proba(X_scaled)[:, 1]
+        X = df[self.feature_cols].to_numpy(dtype=np.float32, copy=False)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+        return self.model.predict_proba(X)[:, 1]
 
     def predict(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
         proba = self.predict_proba(df, horizon)

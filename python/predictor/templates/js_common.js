@@ -176,6 +176,10 @@ function updateDesc(){
       presets.innerHTML=html;
     }else{presets.innerHTML=''}
   }else{presets.innerHTML=''}
+  const noTrain=s&&!s.needs_training;
+  ['bt-train-start-wrap','bt-train-end-wrap'].forEach(id=>{
+    const el=document.getElementById(id);if(el)el.style.display=noTrain?'none':'';
+  });
 }
 
 function applyPreset(jsonStr){

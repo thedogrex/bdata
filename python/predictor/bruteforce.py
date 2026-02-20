@@ -46,6 +46,7 @@ PARAM_GRIDS: dict[str, dict[str, list]] = {
         "volume_weight": [0.1, 0.2, 0.3],
         "momentum_weight": [0.1, 0.15, 0.2],
         "volume_surge_threshold": [1.3, 1.5, 2.0],
+        "threshold": [0.50, 0.52, 0.53, 0.55],
         "window_size": [2000, 3000, 5000, 8000],
     },
     "pattern_sequence": {

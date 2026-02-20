@@ -103,7 +103,7 @@ async function obLoadMarkets(){
   el.textContent='Loading...';
   try{
     const [res, posRes] = await Promise.all([
-      fetch(API+'/api/poly/markets?limit=80'),
+      fetch(API+'/api/poly/markets?limit=500'),
       fetch(API+'/api/poly/sim/markets_with_positions')
     ]);
     const data=await res.json();
@@ -142,11 +142,24 @@ async function obLoadMarkets(){
         : (resolved === 'DOWN'
           ? '<span style="margin-left:8px;color:#ef4444;font-weight:700">▼</span>'
           : '');
+
+      const pred = (m.prediction_outcome||'');
+      const predTri = pred === 'UP'
+        ? '<span style="margin-left:8px;color:#22c55e;font-weight:700;background:rgba(245,158,11,0.22);padding:1px 6px;border-radius:6px">▲</span>'
+        : (pred === 'DOWN'
+          ? '<span style="margin-left:8px;color:#ef4444;font-weight:700;background:rgba(245,158,11,0.22);padding:1px 6px;border-radius:6px">▼</span>'
+          : (pred === 'UNDEFINED'
+            ? '<span style="margin-left:8px;color:#94a3b8;font-weight:700;background:rgba(245,158,11,0.22);padding:1px 6px;border-radius:6px">?</span>'
+            : ''));
+      const predTs = (m.prediction_ts||null);
+      const predTitle = predTs ? ` title="pred @ ${new Date(predTs*1000).toLocaleString('ru-RU')}"` : '';
+      const predWrap = predTri ? `<span${predTitle}>${predTri}</span>` : '';
+
       const isActive = (polyActiveTs!==null && (m.ts||0)===polyActiveTs && !m.closed);
       const dot = isActive ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ef4444;margin-right:4px"></span>' : '';
       const posDot = marketsWithPos.has(m.slug) ? '<span title="has position" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-right:4px"></span>' : '';
       const sel = obSelectedSlug===m.slug ? 'bg-blue-900' : '';
-      html+=`<tr class="cursor-pointer ${sel}" onclick="obSelectMarket('${m.slug}')"><td class="text-xs text-slate-400">${dot}${posDot}${dateStr}</td><td><span class="${statusClass}">${status}</span>${resolvedBadge}</td></tr>`;
+      html+=`<tr class="cursor-pointer ${sel}" onclick="obSelectMarket('${m.slug}')"><td class="text-xs text-slate-400">${dot}${posDot}${dateStr}</td><td><span class="${statusClass}">${status}</span>${resolvedBadge}${predWrap}</td></tr>`;
     });
     html+='</tbody></table>';
     el.innerHTML=html;

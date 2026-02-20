@@ -66,6 +66,9 @@ class LightGBMStrategy(BaseStrategy):
         self.scaler.fit(X)
         X_scaled = self.scaler.transform(X)
 
+        # Keep feature names consistent for sklearn validation + debugging
+        X_scaled_df = pd.DataFrame(X_scaled, columns=self.feature_cols)
+
         self.model = lgb.LGBMClassifier(
             n_estimators=self.params["n_estimators"],
             max_depth=self.params["max_depth"],
@@ -78,7 +81,7 @@ class LightGBMStrategy(BaseStrategy):
             n_jobs=-1,
             verbose=-1,
         )
-        self.model.fit(X_scaled, y)
+        self.model.fit(X_scaled_df, y)
 
     def predict_proba(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
         if "rsi_14" not in df.columns:
@@ -86,7 +89,8 @@ class LightGBMStrategy(BaseStrategy):
         df = df.fillna(0)
         X = df[self.feature_cols].values
         X_scaled = self.scaler.transform(X)
-        return self.model.predict_proba(X_scaled)[:, 1]
+        X_scaled_df = pd.DataFrame(X_scaled, columns=self.feature_cols)
+        return self.model.predict_proba(X_scaled_df)[:, 1]
 
     def predict(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
         proba = self.predict_proba(df, horizon)

@@ -371,8 +371,14 @@ def run_backtest_vectorized(
         # Create strategy, fit on training window, predict on full test set
         strategy = get_strategy(strategy_name, strategy_params)
         strategy.fit(df_train, horizon)  # learns adaptive stats from training window
-        pred_arr = strategy.predict(df_test, horizon)
         prob_arr = strategy.predict_proba(df_test, horizon)
+        # Derive predictions from probabilities directly (avoids double predict_proba call)
+        thr_val = float(strategy.params.get("threshold", 0.55))
+        up_thr = max(thr_val, 1 - thr_val)
+        down_thr = 1 - up_thr
+        pred_arr = np.full(len(prob_arr), -1, dtype=np.int8)
+        pred_arr[prob_arr > up_thr] = 1
+        pred_arr[prob_arr < down_thr] = 0
 
         actuals = df_feat[target_col].iloc[valid_test].values.astype(int)
         preds = pred_arr.astype(int)

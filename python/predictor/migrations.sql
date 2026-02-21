@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS backtest_horizons (
     INDEX idx_accuracy (accuracy_pct DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+ALTER TABLE backtest_horizons
+    MODIFY COLUMN daily_json LONGTEXT NULL;
+
 -- Brute-force sessions
 CREATE TABLE IF NOT EXISTS bruteforce_sessions (
     id              INT AUTO_INCREMENT PRIMARY KEY,

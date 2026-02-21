@@ -57,6 +57,10 @@ STATEMENTS = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    ALTER TABLE backtest_horizons
+        MODIFY COLUMN daily_json LONGTEXT NULL
+    """,
+    """
     CREATE TABLE IF NOT EXISTS bruteforce_sessions (
         id              INT AUTO_INCREMENT PRIMARY KEY,
         strategy        VARCHAR(64)     NOT NULL,

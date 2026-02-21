@@ -67,27 +67,37 @@
             <div id="poly-pred-popup" class="hidden mt-2" style="width:520px;max-width:100%">
               <div class="card p-4" style="background:#0f172a;border:1px solid #334155;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
                 <div class="flex items-center justify-between mb-3">
-                  <h3 class="font-semibold text-sm">Prediction Settings</h3>
+                  <h3 class="font-semibold text-sm">Prediction</h3>
                   <div class="flex items-center gap-2">
                     <span class="text-xs text-slate-400">Strategy: <span class="text-blue-300 font-mono" id="poly-pred-strategy-name">rsi_mean_reversion</span></span>
                     <button onclick="polyHidePredDetails()" class="text-slate-400 hover:text-white text-xs px-1">✕</button>
                   </div>
                 </div>
-                <div class="grid grid-cols-2 gap-3 mb-2">
-                  <div>
-                    <label class="block text-xs text-slate-400 mb-1">Window Size</label>
-                    <input id="poly-pred-window" type="number" value="1000" min="100" max="10000" class="w-full">
+
+                <div id="poly-pred-settings-section">
+                  <div class="text-xs font-semibold text-slate-200 mb-2">Settings</div>
+                  <div class="grid grid-cols-2 gap-3 mb-2">
+                    <div>
+                      <label class="block text-xs text-slate-400 mb-1">Window Size</label>
+                      <input id="poly-pred-window" type="number" value="1000" min="100" max="10000" class="w-full">
+                    </div>
+                    <div class="flex items-end justify-end gap-2">
+                      <button id="poly-pred-save" onclick="savePolyPredictionSettings()" class="btn btn-slate text-xs">Save</button>
+                      <div id="poly-pred-save-msg" class="text-xs text-slate-500"></div>
+                    </div>
                   </div>
-                  <div class="flex items-end justify-end gap-2">
-                    <button id="poly-pred-save" onclick="savePolyPredictionSettings()" class="btn btn-slate text-xs">Save</button>
-                    <div id="poly-pred-save-msg" class="text-xs text-slate-500"></div>
+                  <div class="mb-2">
+                    <label class="block text-xs text-slate-400 mb-1">Strategy Settings (JSON)</label>
+                    <textarea id="poly-pred-params" rows="3" class="w-full text-xs font-mono" placeholder='{"rsi_period":14,"rsi_oversold":30,"rsi_overbought":70,"use_bb_confirm":true,"bb_low":0.2,"bb_high":0.8}'></textarea>
                   </div>
                 </div>
-                <div class="mb-2">
-                  <label class="block text-xs text-slate-400 mb-1">Strategy Settings (JSON)</label>
-                  <textarea id="poly-pred-params" rows="3" class="w-full text-xs font-mono" placeholder='{"rsi_period":14,"rsi_oversold":30,"rsi_overbought":70,"use_bb_confirm":true,"bb_low":0.2,"bb_high":0.8}'></textarea>
+
+                <div class="my-3" style="border-top:1px solid #334155"></div>
+
+                <div id="poly-pred-analyse-section">
+                  <div class="text-xs font-semibold text-slate-200 mb-2">Analyse</div>
+                  <div id="poly-pred-result" class="text-sm"></div>
                 </div>
-                <div id="poly-pred-result" class="mt-2 text-sm"></div>
               </div>
             </div>
           </div>

@@ -996,7 +996,7 @@ async def predict_for_market(
     # Signal candle = the last candle (we predict on exactly one candle)
     signal_candle_dt = last_candle_dt if pred != -1 else None
 
-    return {
+    ret = {
         "prediction": label,
         "probability": round(prob, 4),
         "strategy": strategy_name,
@@ -1015,6 +1015,37 @@ async def predict_for_market(
         "diag": diag,
         **sync_info,
     }
+
+    # Persist full payload for instant UI analysis later
+    try:
+        payload_json = json.dumps(ret, ensure_ascii=False)
+        await db.execute(
+            """
+            INSERT INTO poly_predictions (slug, prediction_ts, payload_json)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                prediction_ts=%s,
+                payload_json=%s
+            """,
+            (slug, int(prediction_ts), payload_json, int(prediction_ts), payload_json),
+        )
+    except Exception:
+        pass
+
+    return ret
+
+
+async def get_saved_prediction(slug: str) -> Dict[str, Any]:
+    row = await db.fetchone(
+        "SELECT payload_json FROM poly_predictions WHERE slug=%s LIMIT 1",
+        (slug,),
+    )
+    if not row or not row[0]:
+        return {"error": "Prediction not found"}
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return {"error": "Prediction payload corrupted"}
 
 
 async def get_prediction_candles(

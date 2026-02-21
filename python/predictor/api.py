@@ -191,6 +191,11 @@ async def api_poly_save_settings(req: SettingsRequest):
     )
 
 
+@app.get("/api/poly/prediction/{slug}")
+async def api_poly_prediction(slug: str):
+    return await poly_service.get_saved_prediction(slug=slug)
+
+
 @app.get("/api/poly/prediction_candles/{slug}")
 async def api_poly_prediction_candles(slug: str, window: int = Query(1000), tail: int = Query(200)):
     return await poly_service.get_prediction_candles(slug=slug, window_size=window, tail=tail)

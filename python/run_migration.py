@@ -181,6 +181,17 @@ STATEMENTS = [
         INDEX idx_slug (slug)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+
+    """
+    CREATE TABLE IF NOT EXISTS poly_predictions (
+        slug           VARCHAR(255)    NOT NULL,
+        prediction_ts  INT             NOT NULL,
+        payload_json   LONGTEXT        NOT NULL,
+        updated_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (slug),
+        INDEX idx_pred_ts (prediction_ts)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 ]
 
 

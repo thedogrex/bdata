@@ -36,7 +36,7 @@ async function loadAutopredictState(){
 
 }
 
-function polySetDetailTab(tab){
+function polySetDetailTab(tab, isEnded = null){
   polyDetailTab = (tab === 'history') ? 'history' : 'live';
   const liveBtn = document.getElementById('poly-detail-tab-live');
   const histBtn = document.getElementById('poly-detail-tab-history');
@@ -48,12 +48,27 @@ function polySetDetailTab(tab){
   }
 
   const lbl = document.getElementById('poly-tab-content-label');
-  if(lbl) lbl.textContent = (polyDetailTab === 'history') ? 'HISTORY' : 'LIVE';
+  const nowUtc = Math.floor(Date.now() / 1000);
+  const isMarketEnded = (isEnded !== null)
+    ? isEnded
+    : (polySelectedMarket && (polySelectedMarket.closed || (polySelectedMarket.ts && polySelectedMarket.ts <= nowUtc)));
+  if(lbl) lbl.textContent = isMarketEnded ? 'Market Ended' : (polyDetailTab === 'history' ? 'HISTORY' : 'LIVE');
+
+  // Hide tab buttons for ended markets
+  const tabsDiv = document.getElementById('poly-detail-tabs');
+  if(tabsDiv) tabsDiv.classList.toggle('hidden', !!isMarketEnded);
 
   const livePanel = document.getElementById('poly-live-panel');
   const histPanel = document.getElementById('poly-history-panel');
-  if(livePanel) livePanel.classList.toggle('hidden', polyDetailTab !== 'live');
-  if(histPanel) histPanel.classList.toggle('hidden', polyDetailTab !== 'history');
+  if(isMarketEnded){
+    // Force show history panel, hide live panel
+    if(livePanel) livePanel.classList.add('hidden');
+    if(histPanel) histPanel.classList.remove('hidden');
+  } else {
+    // Normal tab switching
+    if(livePanel) livePanel.classList.toggle('hidden', polyDetailTab !== 'live');
+    if(histPanel) histPanel.classList.toggle('hidden', polyDetailTab !== 'history');
+  }
 
   if(polyDetailTab === 'live'){
     if(polySelectedMarket && !polySelectedMarket.closed){
@@ -516,9 +531,6 @@ async function showPolyMarket(slug){
     if(emptyEl) emptyEl.classList.add('hidden');
     if(secEl) secEl.classList.remove('hidden');
     const isDone = isEnded;
-    // Hide Live/History tab buttons for ended markets
-    const tabsDiv = document.getElementById('poly-detail-tabs');
-    if(tabsDiv) tabsDiv.classList.toggle('hidden', !!isDone);
     const obPanel = document.getElementById('poly-ob-panel');
     if(obPanel) obPanel.classList.toggle('hidden', !!isDone);
     const predPanel = document.getElementById('poly-predict-panel');
@@ -543,6 +555,8 @@ async function showPolyMarket(slug){
       const a = pred==='UP' ? '▲' : (pred==='DOWN' ? '▼' : '?');
       const t = predTs ? new Date(predTs*1000).toLocaleString('ru-RU',{timeZone:'UTC'}) : '';
       predHtml = ` | pred: <span style="color:${c};font-weight:700;background:rgba(245,158,11,0.22);padding:1px 6px;border-radius:6px">${a} ${pred}</span>${t?` <span class=\"text-slate-500\">@ ${t}</span>`:''}`;
+      // Auto-load prediction details if available
+      polyLoadPredictionDetails(m.slug);
     }
     let html=`<div class="mb-2 text-xs text-slate-400"><span class="font-mono">${m.slug}</span> | ts: ${m.ts} | closed: ${m.closed}${predHtml}</div>`;
     html+=countdownDisplay;
@@ -558,13 +572,41 @@ async function showPolyMarket(slug){
 
     // For ended markets: show only history, no tab buttons
     if(isDone){
-      polySetDetailTab('history');
+      polySetDetailTab('history', true);
     } else if(m.outcomes && m.outcomes.length >= 2){
-      polySetDetailTab('live');
+      polySetDetailTab('live', false);
     } else {
-      polySetDetailTab('history');
+      polySetDetailTab('history', false);
     }
+
+    // Refresh positions/trades for the selected market (panels auto-hide if empty)
+    try{
+      loadSimPositions();
+      loadSimTrades();
+    }catch(e){/* ignore */}
+    // Update tab visibility based on market ended status
+    updateTabVisibilityForMarket();
   }catch(e){el.textContent='Error loading market';}
+}
+
+function updateTabVisibilityForMarket(){
+  const tabsDiv = document.getElementById('poly-detail-tabs');
+  const lbl = document.getElementById('poly-tab-content-label');
+  const livePanel = document.getElementById('poly-live-panel');
+  const histPanel = document.getElementById('poly-history-panel');
+  if(!tabsDiv || !lbl || !livePanel || !histPanel) return;
+  const nowUtc = Math.floor(Date.now() / 1000);
+  const isMarketEnded = polySelectedMarket && (polySelectedMarket.closed || (polySelectedMarket.ts && polySelectedMarket.ts <= nowUtc));
+  console.log('[updateTabVisibilityForMarket] polySelectedMarket:', polySelectedMarket?.slug, 'isMarketEnded:', isMarketEnded);
+  tabsDiv.classList.toggle('hidden', !!isMarketEnded);
+  lbl.textContent = isMarketEnded ? 'Market Ended' : (polyDetailTab === 'history' ? 'HISTORY' : 'LIVE');
+  if(isMarketEnded){
+    livePanel.classList.add('hidden');
+    histPanel.classList.remove('hidden');
+  } else {
+    livePanel.classList.toggle('hidden', polyDetailTab !== 'live');
+    histPanel.classList.toggle('hidden', polyDetailTab !== 'history');
+  }
 }
 
 function selectPolyOutcome(assetId, name){
@@ -654,6 +696,97 @@ function polyShowPredDetails(){
 function polyHidePredDetails(){
   const popup = document.getElementById('poly-pred-popup');
   if(popup) popup.classList.add('hidden');
+}
+
+async function polyLoadPredictionDetails(slug){
+  try{
+    // Prefer persisted full payload (instant Analyse rendering)
+    console.log('[polyLoadPredictionDetails] slug:', slug);
+    let res = await fetch(API+'/api/poly/prediction/'+encodeURIComponent(slug));
+    let data = await res.json();
+    console.log('[polyLoadPredictionDetails] response status:', res.status, 'data:', data);
+    if(!data || data.error){
+      // Fallback to market summary
+      res = await fetch(API+'/api/poly/market/'+encodeURIComponent(slug));
+      data = await res.json();
+      if(!data || data.error) return;
+      const pred = (data.prediction_outcome||'');
+      const predTs = (data.prediction_ts||null);
+      if(!pred) return;
+      const inlineEl = document.getElementById('poly-pred-result-inline');
+      const resultEl = document.getElementById('poly-pred-result');
+      if(!inlineEl || !resultEl) return;
+      const color = pred === 'UP' ? '#22c55e' : (pred === 'DOWN' ? '#ef4444' : '#94a3b8');
+      const arrow = pred === 'UP' ? '\u25b2' : (pred === 'DOWN' ? '\u25bc' : '\u2014');
+      const t = predTs ? new Date(predTs*1000).toLocaleString('ru-RU',{timeZone:'UTC'}) : '';
+      inlineEl.innerHTML=
+        `<span style="color:${color};font-weight:700;font-size:14px">${arrow} ${pred}</span>`
+        + (t ? ` <span class="text-slate-500 text-xs">@ ${t}</span>` : '')
+        +`<button onclick="polyShowPredDetails()" class="btn btn-slate text-xs" style="margin-left:8px">Analyse</button>`;
+      resultEl.innerHTML=`<div class="p-4 rounded-lg text-center" style="background:#1e293b;border:2px solid ${color}">`
+        +`<div style="font-size:48px;font-weight:800;color:${color}">${arrow} ${pred}</div>`
+        +`<div class="text-xs text-slate-400 mt-2">Saved prediction summary is available${t?` @ <b>${t}</b>`:''}.</div>`
+        +`<div class="text-xs text-slate-500 mt-1">Detailed diagnostics are not available yet for this prediction.</div>`
+        +`</div>`;
+      return;
+    }
+
+    // Full payload (same shape as /api/poly/predict)
+    const inlineEl = document.getElementById('poly-pred-result-inline');
+    const resultEl = document.getElementById('poly-pred-result');
+    if(!inlineEl || !resultEl) return;
+    const pred = data.prediction || '';
+    if(!pred) return;
+    const color = pred === 'UP' ? '#22c55e' : (pred === 'DOWN' ? '#ef4444' : '#94a3b8');
+    const arrow = pred === 'UP' ? '\u25b2' : (pred === 'DOWN' ? '\u25bc' : '\u2014');
+    const prob = (typeof data.probability === 'number') ? Math.round(data.probability * 100) : null;
+    inlineEl.innerHTML=
+      `<span style="color:${color};font-weight:700;font-size:14px">${arrow} ${pred}</span> `
+      + (prob !== null ? `<span class="text-slate-400 text-xs">${prob}%</span>` : '')
+      +`<button onclick="polyShowPredDetails()" class="btn btn-slate text-xs" style="margin-left:8px">Analyse</button>`;
+
+    const agoText = (typeof data.candles_ago === 'number' && data.candles_ago >= 0) ? `${data.candles_ago} candles ago` : 'no signal in tail';
+    const sigDt = data.signal_candle_dt || '—';
+    const sigRate = (typeof data.tail_size === 'number' && data.tail_size > 0) ? `${data.signals_in_tail}/${data.tail_size}` : '—';
+
+    let diagHtml = '';
+    if(data.diag){
+      const d = data.diag;
+      diagHtml += `<div class="mt-3 text-left" style="background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px">`;
+      diagHtml += `<div class="text-xs text-slate-400 mb-1"><b>Diagnostics</b> (train: ${d.train_size}, tail: ${d.tail_size})</div>`;
+      const baseOs = (d.base_oversold!==undefined && d.base_oversold!==null) ? d.base_oversold : '—';
+      const baseOb = (d.base_overbought!==undefined && d.base_overbought!==null) ? d.base_overbought : '—';
+      diagHtml += `<div class="text-xs text-slate-400">RSI base: &lt;${baseOs} / &gt;${baseOb} | effective: <b style="color:#22c55e">&lt;${d.effective_oversold}</b> / <b style="color:#ef4444">&gt;${d.effective_overbought}</b> (adaptive p10=${d.rsi_p10}, p90=${d.rsi_p90})</div>`;
+      diagHtml += `<div class="text-xs text-slate-400">Tail RSI range: ${d.tail_rsi_min} — ${d.tail_rsi_max} | last: <b>${d.tail_rsi_last}</b></div>`;
+      if(d.tail_detail && d.tail_detail.length){
+        diagHtml += `<table class="mt-2 w-full text-xs"><thead><tr><th>Time</th><th>RSI</th><th>BB</th><th>Prob</th><th>Signal</th></tr></thead><tbody>`;
+        d.tail_detail.forEach(r => {
+          const sigLabel = r.pred === 1 ? '<span style="color:#22c55e;font-weight:700">UP</span>' : (r.pred === 0 ? '<span style="color:#ef4444;font-weight:700">DOWN</span>' : '<span style="color:#64748b">—</span>');
+          const rsiColor = r.rsi < d.effective_oversold ? '#22c55e' : (r.rsi > d.effective_overbought ? '#ef4444' : '#94a3b8');
+          diagHtml += `<tr><td>${r.dt}</td><td style="color:${rsiColor};font-weight:600">${r.rsi}</td><td>${r.bb}</td><td>${r.prob}</td><td>${sigLabel}</td></tr>`;
+        });
+        diagHtml += `</tbody></table>`;
+      }
+      diagHtml += `</div>`;
+    }
+
+    const ws = data.window_size || (parseInt(document.getElementById('poly-pred-window')?.value||'')||1000);
+    resultEl.innerHTML=`<div class="p-4 rounded-lg text-center" style="background:#1e293b;border:2px solid ${color}">`
+      +`<div style="font-size:48px;font-weight:800;color:${color}">${arrow} ${pred}</div>`
+      + (prob !== null ? `<div class="text-lg text-slate-300 mt-1">Probability: <b>${prob}%</b></div>` : '')
+      +`<div class="text-xs text-slate-400 mt-2">Signal: <b>${agoText}</b> (${sigDt}) | Signals in tail: <b>${sigRate}</b></div>`
+      +`<div class="text-xs text-slate-400 mt-1">Strategy: ${data.strategy||'—'} | Window: ${ws} | Last candle: ${data.last_candle_dt||'—'}</div>`
+      +`<details class="mt-2 text-left">`
+      +`<summary class="text-blue-400 cursor-pointer text-xs font-semibold">Check Json Params</summary>`
+      +`<pre class="mt-2 text-xs text-slate-300" style="white-space:pre-wrap;word-break:break-word;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px">${JSON.stringify(data.params||{},null,2)}</pre>`
+      +`</details>`
+      +diagHtml
+      +`<div class="mt-3"><button onclick="loadPredictionCandles('${slug}',${ws})" class="btn btn-primary text-xs">Show Candles Chart</button></div>`
+      +`</div>`
+      +`<div id="poly-pred-chart-wrap" class="mt-3"></div>`;
+  }catch(e){
+    // ignore errors
+  }
 }
 
 // ===== Order Book rendering (asks only, 5 lowest) =====

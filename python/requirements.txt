@@ -40,12 +40,12 @@ pandas==2.3.3
 pillow==12.1.0
 plotly==6.5.2
 protobuf==6.33.4
-py-dotenv==0.1
 pydantic==2.12.5
 pydantic_core==2.41.5
 Pygments==2.19.2
 PyMySQL==1.1.2
 python-dateutil==2.9.0.post0
+python-dotenv==1.2.1
 pytz==2025.2
 requests==2.32.5
 rich==14.2.0

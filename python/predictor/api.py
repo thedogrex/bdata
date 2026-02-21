@@ -89,6 +89,8 @@ class SimTradeRequest(BaseModel):
     slug: str
     asset_id: str
     qty: float
+    outcome_side: str | None = None
+    price: float | None = None
 
 
 class PredictRequest(BaseModel):
@@ -205,7 +207,10 @@ async def api_candles_sync(target_ts: int = Query(...), window: int = Query(1100
 @app.post("/api/poly/sim/trade")
 async def api_poly_sim_trade(req: SimTradeRequest):
     try:
-        return await poly_service.create_sim_trade(req.slug, req.asset_id, "BUY", req.qty)
+        return await poly_service.create_sim_trade(
+            req.slug, req.asset_id, "BUY", req.qty,
+            outcome_side=req.outcome_side, requested_price=req.price,
+        )
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 

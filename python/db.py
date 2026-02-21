@@ -23,11 +23,6 @@ class DbProvider:
         self.__db = None
         self.__cursor = None
 
-        if self.__pool:
-            with self.__pool.acquire() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SET time_zone = '+00:00';")
-
         print(f'[complete] inited Mysql provider')
 
         print(f'[{self.TAG}] inited! {self.__db}')
@@ -39,7 +34,8 @@ class DbProvider:
                 user="root",
                 password="",
                 db="trading",
-                autocommit=True
+                autocommit=True,
+                init_command="SET time_zone = '+00:00'"
             )
 
     # -----------------------------------------------------

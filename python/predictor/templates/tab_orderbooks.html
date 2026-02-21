@@ -51,13 +51,16 @@
           <div class="flex gap-2 items-end mb-3 flex-wrap">
             <div>
               <label class="block text-xs text-slate-400 mb-1">Show</label>
-              <select id="ob-hist-side" class="w-48">
-                <option value="BOTH">BOTH</option>
-                <option value="UP">UP</option>
-                <option value="DOWN">DOWN</option>
-              </select>
+              <input type="hidden" id="ob-hist-side" value="UP" />
+              <div class="inline-flex rounded-lg overflow-hidden" style="border:1px solid #334155;background:#0f172a">
+                <button onclick="obSetHistSide('UP')" id="ob-hist-side-up" class="px-3 py-2 text-xs font-semibold" style="color:#22c55e;background:#052e16">
+                  <span style="display:inline-block;margin-right:6px;font-weight:800">▲</span>UP
+                </button>
+                <button onclick="obSetHistSide('DOWN')" id="ob-hist-side-down" class="px-3 py-2 text-xs font-semibold" style="color:#ef4444;background:transparent">
+                  <span style="display:inline-block;margin-right:6px;font-weight:800">▼</span>DOWN
+                </button>
+              </div>
             </div>
-            <button onclick="obLoadHistory()" class="btn btn-primary text-xs">Load</button>
           </div>
 
           <!-- Sub-tabs: Chart / Table -->

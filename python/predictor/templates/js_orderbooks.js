@@ -22,6 +22,36 @@ function obSetMode(mode){
     obStartLive();
   } else if(mode==='history'){
     obStopLive();
+    if(obSelectedMarket){
+      const sideEl = document.getElementById('ob-hist-side');
+      if(sideEl && !sideEl.value) sideEl.value = 'UP';
+      obUpdateHistSideButtons();
+      obLoadHistory();
+    }
+  }
+}
+
+function obUpdateHistSideButtons(){
+  const side = (document.getElementById('ob-hist-side')?.value || 'UP').toUpperCase();
+  const upBtn = document.getElementById('ob-hist-side-up');
+  const downBtn = document.getElementById('ob-hist-side-down');
+  if(upBtn){
+    upBtn.style.background = side === 'UP' ? '#052e16' : 'transparent';
+    upBtn.style.color = '#22c55e';
+  }
+  if(downBtn){
+    downBtn.style.background = side === 'DOWN' ? '#450a0a' : 'transparent';
+    downBtn.style.color = '#ef4444';
+  }
+}
+
+function obSetHistSide(side){
+  const s = String(side || 'UP').toUpperCase();
+  const sideEl = document.getElementById('ob-hist-side');
+  if(sideEl) sideEl.value = (s === 'DOWN' ? 'DOWN' : 'UP');
+  obUpdateHistSideButtons();
+  if(obMode === 'history' && obSelectedMarket){
+    obLoadHistory();
   }
 }
 
@@ -54,7 +84,7 @@ function obRenderHistoryPage(){
   obHistoryData.slice(startIdx, endIdx).forEach((snap, localIdx)=>{
     const idx = startIdx + localIdx;
     const d = new Date(snap.ts*1000);
-    const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}) + ' ' + d.toLocaleTimeString('ru-RU');
+    const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',timeZone:'UTC'}) + ' ' + d.toLocaleTimeString('ru-RU',{timeZone:'UTC'});
     const isUp = (snap.outcome_name||'').toUpperCase().includes('UP');
     const nameClass = isUp ? 'text-green-400' : 'text-red-400';
     html+=`<tr class="ob-snapshot-row cursor-pointer" onclick="obShowSnapshot(${idx})"><td class="text-xs">${dateStr}</td><td class="${nameClass} text-xs">${snap.outcome_name}</td><td class="font-mono text-xs">${snap.best_ask_cents!==null?snap.best_ask_cents+'¢':'-'}</td></tr>`;
@@ -133,7 +163,7 @@ async function obLoadMarkets(){
     let html='<table><thead><tr><th>Time</th><th>Status</th></tr></thead><tbody>';
     data.slice(startIdx, endIdx).forEach(m=>{
       const d=new Date((m.ts||0)*1000);
-      const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}) + ' ' + d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+      const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',timeZone:'UTC'}) + ' ' + d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'});
       const status = m.status || (m.closed ? '[DONE]' : 'open');
       const statusClass = status==='[DONE]' ? 'badge badge-queue' : 'badge badge-done';
       const resolved = (m.resolved_outcome||'');
@@ -152,7 +182,7 @@ async function obLoadMarkets(){
             ? '<span style="margin-left:8px;color:#94a3b8;font-weight:700;background:rgba(245,158,11,0.22);padding:1px 6px;border-radius:6px">?</span>'
             : ''));
       const predTs = (m.prediction_ts||null);
-      const predTitle = predTs ? ` title="pred @ ${new Date(predTs*1000).toLocaleString('ru-RU')}"` : '';
+      const predTitle = predTs ? ` title="pred @ ${new Date(predTs*1000).toLocaleString('ru-RU',{timeZone:'UTC'})}"` : '';
       const predWrap = predTri ? `<span${predTitle}>${predTri}</span>` : '';
 
       const isActive = (polyActiveTs!==null && (m.ts||0)===polyActiveTs && !m.closed);
@@ -192,7 +222,7 @@ async function obSelectMarket(slug){
     const isDone = m.closed || (m.ts && (m.ts+300) < Math.floor(Date.now()/1000));
     const statusStr = isDone ? '<span class="badge badge-queue">[DONE]</span>' : '<span class="badge badge-done">open</span>';
     const d = new Date((m.ts||0)*1000);
-    const dateStr = d.toLocaleDateString('ru-RU') + ' ' + d.toLocaleTimeString('ru-RU');
+    const dateStr = d.toLocaleDateString('ru-RU',{timeZone:'UTC'}) + ' ' + d.toLocaleTimeString('ru-RU',{timeZone:'UTC'});
     document.getElementById('ob-market-info').innerHTML = `<span class="font-mono">${m.slug}</span> · ${dateStr} · ${statusStr}`;
 
     const liveBtn = document.getElementById('ob-mode-live');
@@ -202,7 +232,8 @@ async function obSelectMarket(slug){
     }
 
     const sideSel = document.getElementById('ob-hist-side');
-    if(sideSel && !sideSel.value) sideSel.value = 'BOTH';
+    if(sideSel && !sideSel.value) sideSel.value = 'UP';
+    obUpdateHistSideButtons();
 
     if(obMode==='live' && !isDone) obStartLive();
     else obLoadHistory();
@@ -211,7 +242,7 @@ async function obSelectMarket(slug){
 
 function toLocalISOString(d){
   const pad=(n)=>String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
 async function obUpdateLive(){
@@ -230,7 +261,7 @@ async function obUpdateLive(){
     const [upData, downData] = await Promise.all([upRes.json(), downRes.json()]);
     document.getElementById('ob-live-up').innerHTML = upData ? renderAsks(upData, pair.up.name) : '<span class="text-slate-400">No data.</span>';
     document.getElementById('ob-live-down').innerHTML = downData ? renderAsks(downData, pair.down.name) : '<span class="text-slate-400">No data.</span>';
-    document.getElementById('ob-live-status').innerHTML = `<span class="text-green-400">Updated ${new Date().toLocaleTimeString()}</span>`;
+    document.getElementById('ob-live-status').innerHTML = `<span class="text-green-400">Updated ${new Date().toLocaleTimeString('ru-RU',{timeZone:'UTC'})}</span>`;
   }catch(e){
     document.getElementById('ob-live-up').innerHTML='<span class="text-red-400">Error.</span>';
     document.getElementById('ob-live-down').innerHTML='<span class="text-red-400">Error.</span>';
@@ -245,13 +276,11 @@ async function obLoadHistory(){
   listEl.textContent='Loading...';
   document.getElementById('ob-hist-detail').innerHTML='<span class="text-slate-400">Click a snapshot to view.</span>';
 
-  const side = (document.getElementById('ob-hist-side')?.value || 'BOTH').toUpperCase();
+  const side = (document.getElementById('ob-hist-side')?.value || 'UP').toUpperCase();
   const pair = findUpDownOutcomes(obSelectedMarket);
   let outcomes = [];
-  if(pair && (side === 'UP' || side === 'DOWN' || side === 'BOTH')){
-    if(side === 'UP') outcomes = [pair.up];
-    else if(side === 'DOWN') outcomes = [pair.down];
-    else outcomes = [pair.up, pair.down];
+  if(pair && (side === 'UP' || side === 'DOWN')){
+    outcomes = [side === 'DOWN' ? pair.down : pair.up];
   } else {
     outcomes = obSelectedMarket.outcomes || [];
   }
@@ -385,7 +414,7 @@ function obDrawChart(){
   for(let i=0;i<allTs.length;i+=labelStep){
     const x=tsToX(allTs[i]);
     const d=new Date(allTs[i]*1000);
-    const lbl=d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const lbl=d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'UTC'});
     ctx.fillText(lbl,x,totalH-paddingBottom+16);
     ctx.beginPath();ctx.moveTo(x,paddingTop);ctx.lineTo(x,totalH-paddingBottom);ctx.strokeStyle='#1e293b';ctx.stroke();
   }
@@ -497,8 +526,8 @@ function obChartHover(e){
   }
 
   const d = new Date(bestSnap.ts*1000);
-  const timeStr = d.toLocaleTimeString('ru-RU');
-  const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'});
+  const timeStr = d.toLocaleTimeString('ru-RU',{timeZone:'UTC'});
+  const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',timeZone:'UTC'});
 
   // Build volume breakdown from asks
   let volHtml='';
@@ -545,7 +574,7 @@ function obShowSnapshot(idx){
 
   const el = document.getElementById('ob-hist-detail');
   const d = new Date(snap.ts*1000);
-  const fullDate = d.toLocaleDateString('ru-RU') + ' ' + d.toLocaleTimeString('ru-RU');
+  const fullDate = d.toLocaleDateString('ru-RU',{timeZone:'UTC'}) + ' ' + d.toLocaleTimeString('ru-RU',{timeZone:'UTC'});
   const isUp = (snap.outcome_name||'').toUpperCase().includes('UP');
   const nameClass = isUp ? 'text-green-400' : 'text-red-400';
 

@@ -519,7 +519,10 @@ async def get_price_series(asset_id: str, minutes: int = 60, limit: int = 2000) 
     ]
 
 
-async def create_sim_trade(slug: str, asset_id: str, side: str, qty: float) -> Dict[str, Any]:
+async def create_sim_trade(
+    slug: str, asset_id: str, side: str, qty: float,
+    outcome_side: str | None = None, requested_price: float | None = None,
+) -> Dict[str, Any]:
     slug = str(slug or "").strip()
     if not slug:
         raise ValueError("slug is required")
@@ -532,6 +535,8 @@ async def create_sim_trade(slug: str, asset_id: str, side: str, qty: float) -> D
     if qty <= 0:
         raise ValueError("qty must be > 0")
 
+    outcome_side = (outcome_side or "").upper().strip() or None
+
     # Validate asset belongs to this market
     market = await get_market(slug)
     if not market:
@@ -542,7 +547,7 @@ async def create_sim_trade(slug: str, asset_id: str, side: str, qty: float) -> D
 
     row = await db.fetchone(
         """
-        SELECT slug, ts, best_ask_cents
+        SELECT slug, ts, best_ask_cents, asks_json
         FROM poly_orderbook_snapshots
         WHERE asset_id=%s
         ORDER BY ts DESC
@@ -556,20 +561,67 @@ async def create_sim_trade(slug: str, asset_id: str, side: str, qty: float) -> D
     slug = row[0]
     snap_ts = int(row[1])
     best_ask = row[2]
+    asks_raw = row[3]
 
-    fill = best_ask
-    if fill is None:
-        raise RuntimeError("No ask price available for this asset_id yet")
+    # Parse asks from snapshot
+    import json as _json
+    asks = []
+    if asks_raw:
+        try:
+            asks = _json.loads(asks_raw) if isinstance(asks_raw, str) else asks_raw
+        except Exception:
+            asks = []
 
+    if not asks:
+        raise RuntimeError("Order book has 0 records — buy impossible")
+
+    # Sort asks ascending by price
+    asks_sorted = sorted(asks, key=lambda a: float(a.get("price", 9999)))
+
+    if requested_price is not None:
+        req_p = float(requested_price)
+        # Check if the requested price still exists in the current snapshot
+        available = [a for a in asks_sorted if float(a.get("price", 9999)) <= req_p]
+        if not available:
+            raise RuntimeError("Price has been changed")
+
+        # Fill at the best available price <= requested price, check size
+        remaining_qty = qty
+        fill_price = None
+        for ask in available:
+            ask_size = float(ask.get("size", 0))
+            ask_price = float(ask.get("price", 0))
+            if ask_size >= remaining_qty:
+                fill_price = ask_price
+                break
+            remaining_qty -= ask_size
+            fill_price = ask_price
+
+        if remaining_qty > 0 and fill_price is not None:
+            # Check total available size across all qualifying asks
+            total_size = sum(float(a.get("size", 0)) for a in available)
+            if total_size < qty:
+                raise RuntimeError("Not enough in order book")
+
+        if fill_price is None:
+            raise RuntimeError("No ask price available")
+    else:
+        fill_price = best_ask
+        if fill_price is None:
+            raise RuntimeError("No ask price available for this asset_id yet")
+
+    fill = float(fill_price)
     trade_ts = int(time.time())
 
     trade_id = await db.execute(
         """
         INSERT INTO poly_sim_trades
-            (ts, slug, asset_id, side, qty, fill_price_cents, snapshot_ts)
-        VALUES (%s,%s,%s,%s,%s,%s,%s)
+            (ts, slug, asset_id, side, outcome_side, qty, requested_price_cents, fill_price_cents, snapshot_ts)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
-        (trade_ts, slug, str(asset_id), side, qty, float(fill), snap_ts),
+        (trade_ts, slug, str(asset_id), side, outcome_side, qty,
+         float(requested_price) if requested_price is not None else None,
+         fill, snap_ts),
     )
 
     return {
@@ -578,8 +630,10 @@ async def create_sim_trade(slug: str, asset_id: str, side: str, qty: float) -> D
         "slug": slug,
         "asset_id": str(asset_id),
         "side": side,
+        "outcome_side": outcome_side,
         "qty": qty,
-        "fill_price_cents": float(fill),
+        "requested_price_cents": float(requested_price) if requested_price is not None else None,
+        "fill_price_cents": fill,
         "snapshot_ts": snap_ts,
     }
 
@@ -587,7 +641,7 @@ async def create_sim_trade(slug: str, asset_id: str, side: str, qty: float) -> D
 async def list_sim_trades(limit: int = 200) -> List[Dict[str, Any]]:
     rows = await db.fetchall(
         """
-        SELECT id, ts, slug, asset_id, side, qty, fill_price_cents
+        SELECT id, ts, slug, asset_id, side, outcome_side, qty, fill_price_cents
         FROM poly_sim_trades
         ORDER BY ts DESC
         LIMIT %s
@@ -601,8 +655,9 @@ async def list_sim_trades(limit: int = 200) -> List[Dict[str, Any]]:
             "slug": r[2],
             "asset_id": r[3],
             "side": r[4],
-            "qty": float(r[5]),
-            "fill_price_cents": float(r[6]),
+            "outcome_side": r[5],
+            "qty": float(r[6]),
+            "fill_price_cents": float(r[7]),
         }
         for r in rows
     ]

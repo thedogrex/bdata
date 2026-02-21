@@ -8,6 +8,7 @@ function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
 
 async function pollStatus(){
   try{
+    // Silence network logs for /api/tasks/status polling
     const res=await fetch(API+'/api/tasks/status');
     const d=await res.json();
     renderTaskbar(d.current);
@@ -102,6 +103,7 @@ async function init(){
   document.getElementById('bt-strategy').addEventListener('change',updateDesc);
   document.getElementById('bf-strategy').addEventListener('change',()=>{loadDefaultGrid();updateDesc()});
   updateDesc();
+  histUpdateHorizonButtons();
   loadDefaultGrid();
   startPolling();
   loadAutopredictState();
@@ -187,7 +189,7 @@ function applyPreset(jsonStr){
 }
 
 // ===== TABS =====
-const TABS=['backtest','compare','bruteforce','history','best','poly','orderbooks'];
+const TABS=['backtest','bruteforce','history','best','poly','orderbooks'];
 function switchTab(tab){
   TABS.forEach(t=>{
     document.getElementById('panel-'+t).classList.toggle('hidden',t!==tab);
@@ -339,11 +341,154 @@ async function resumeBf(bfId){
 }
 
 // ===== HISTORY =====
+const histBfState={};
+
+function histGetSelectedHorizons(){
+  const v=document.getElementById('hist-horizons')?.value||'1,2,3';
+  return String(v).split(',').map(s=>parseInt(String(s).trim(),10)).filter(n=>!isNaN(n));
+}
+
+function histUpdateHorizonButtons(){
+  const hs=new Set(histGetSelectedHorizons());
+  [1,2,3].forEach(h=>{
+    const b=document.getElementById('hist-h'+h);
+    if(!b)return;
+    const on=hs.has(h);
+    b.style.background=on?'#052e16':'transparent';
+    b.style.color=on?'#22c55e':'#94a3b8';
+  });
+}
+
+function histToggleHorizon(h){
+  const el=document.getElementById('hist-horizons');
+  if(!el)return;
+  const hs=new Set(histGetSelectedHorizons());
+  const hh=parseInt(h,10);
+  if(hs.has(hh))hs.delete(hh);else hs.add(hh);
+  if(hs.size===0)hs.add(hh);
+  el.value=[...hs].sort((a,b)=>a-b).join(',');
+  histUpdateHorizonButtons();
+}
+
+function histMaxAccBySelectedHorizons(run, selectedHorizons){
+  const h=run?.horizons||{};
+  let m=0;
+  selectedHorizons.forEach(k=>{
+    const d=h[String(k)];
+    const a=(d&&d.accuracy_pct!=null)?Number(d.accuracy_pct):0;
+    if(a>m)m=a;
+  });
+  return m;
+}
+
+function histHorizonsHtml(run, selectedHorizons){
+  const h=run?.horizons||{};
+  const parts=[];
+  selectedHorizons.forEach(k=>{
+    const d=h[String(k)];
+    if(!d){parts.push(`H${k}:--`);return;}
+    if(d.error){parts.push(`H${k}:err`);return;}
+    const a=(d.accuracy_pct!=null)?Number(d.accuracy_pct):0;
+    parts.push(`H${k}:<span class="${accClass(a)}">${a}%</span>`);
+  });
+  return parts.join(' | ');
+}
+
+async function histLoadBfRuns(bfId){
+  const st=histBfState[bfId]||{page:1,pageSize:20,win:''};
+  histBfState[bfId]=st;
+  const minAcc=document.getElementById('hist-min-acc')?.value||'';
+  const selectedHorizons=histGetSelectedHorizons();
+  const fetchLimit=5000;
+  let url=API+`/api/history?limit=${fetchLimit}&bruteforce_id=${bfId}`;
+  if(minAcc)url+='&min_accuracy='+minAcc;
+  try{
+    const res=await fetch(url);
+    const data=await res.json();
+    let runs=Array.isArray(data)?data:[];
+    const win=String(st.win||'').trim();
+    if(win)runs=runs.filter(r=>String(r.window_size||'')===win);
+    if(minAcc){
+      const ma=Number(minAcc);
+      if(!isNaN(ma))runs=runs.filter(r=>histMaxAccBySelectedHorizons(r, selectedHorizons)>=ma);
+    }
+    st.runs=runs;
+    st.page=Math.max(1,Math.min(st.page, Math.max(1, Math.ceil(runs.length/st.pageSize))));
+  }catch(e){
+    st.runs=[];
+    st.page=1;
+  }
+}
+
+function histRenderBfBody(bfId){
+  const st=histBfState[bfId]||{page:1,pageSize:20,win:'',runs:[]};
+  const selectedHorizons=histGetSelectedHorizons();
+  const total=st.runs?st.runs.length:0;
+  const pages=Math.max(1,Math.ceil(total/st.pageSize));
+  const page=Math.max(1,Math.min(st.page,pages));
+  const start=(page-1)*st.pageSize;
+  const slice=(st.runs||[]).slice(start,start+st.pageSize);
+  const body=document.getElementById('hist-bf-body-'+bfId);
+  if(!body)return;
+
+  const prevDisabled=page<=1?'disabled':'';
+  const nextDisabled=page>=pages?'disabled':'';
+  const winVal=st.win!=null?String(st.win):'';
+  let html=`
+    <div class="flex flex-wrap items-end justify-between gap-3 mt-3">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Window Size</label>
+        <input type="number" value="${winVal}" placeholder="5000" class="w-32" oninput="histSetBfWin(${bfId},this.value)" />
+      </div>
+      <div class="flex items-center gap-2">
+        <button class="btn btn-slate text-xs" ${prevDisabled} onclick="histSetBfPage(${bfId},${page-1})">Prev</button>
+        <span class="text-xs text-slate-400">Page ${page} / ${pages} (${total})</span>
+        <button class="btn btn-slate text-xs" ${nextDisabled} onclick="histSetBfPage(${bfId},${page+1})">Next</button>
+      </div>
+    </div>
+    <table class="mt-2"><thead><tr><th>ID</th><th>Params</th><th>Win</th><th>Horizons</th><th>Time</th><th></th></tr></thead><tbody>
+  `;
+
+  slice.forEach(r=>{
+    const hs=histHorizonsHtml(r, selectedHorizons);
+    const ps=JSON.stringify(r.params||{}).substring(0,80);
+    html+=`<tr class="cursor-pointer hover:bg-slate-700" onclick="event.stopPropagation();showDetail(${r.id})"><td>${r.id}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td><td>${r.window_size||'?'} </td><td>${hs}</td><td>${r.total_time_sec}s</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`;
+  });
+  html+='</tbody></table>';
+  body.innerHTML=html;
+}
+
+async function histOnToggleBf(bfId, detailsEl){
+  if(!detailsEl||!detailsEl.open)return;
+  await histLoadBfRuns(bfId);
+  histRenderBfBody(bfId);
+}
+
+async function histSetBfPage(bfId, page){
+  const st=histBfState[bfId]||{page:1,pageSize:20,win:''};
+  histBfState[bfId]=st;
+  st.page=Math.max(1,parseInt(page,10)||1);
+  histRenderBfBody(bfId);
+}
+
+async function histSetBfWin(bfId, win){
+  const st=histBfState[bfId]||{page:1,pageSize:20,win:''};
+  histBfState[bfId]=st;
+  st.win=String(win||'').trim();
+  st.page=1;
+  await histLoadBfRuns(bfId);
+  histRenderBfBody(bfId);
+}
+
 async function loadHistory(){
+  histUpdateHorizonButtons();
   const strategy=document.getElementById('hist-strategy')?.value||'';
   const minAcc=document.getElementById('hist-min-acc')?.value||'';
   const limit=document.getElementById('hist-limit')?.value||'50';
-  let url=API+'/api/history?limit='+limit;
+  const selectedHorizons=histGetSelectedHorizons();
+  const itemLimit=Math.max(1,parseInt(limit,10)||50);
+  const fetchLimit=Math.max(itemLimit*50,200);
+  let url=API+'/api/history?limit='+fetchLimit;
   if(strategy)url+='&strategy='+strategy;if(minAcc)url+='&min_accuracy='+minAcc;
   try{const res=await fetch(url);const data=await res.json();const el=document.getElementById('history-list');
     if(!data.length){el.innerHTML='<div class="card p-6 text-center text-slate-400">No results.</div>';return}
@@ -354,15 +499,28 @@ async function loadHistory(){
         bfGroups[r.bruteforce_id].runs.push(r);
       }else{standalone.push(r)}
     });
-    let html='<div class="card p-6">';
     const bfIds=Object.keys(bfGroups).sort((a,b)=>b-a);
+    const items=[];
     bfIds.forEach(bfId=>{
       const g=bfGroups[bfId];
+      const createdAt=Math.max(...g.runs.map(r=>new Date(r.created_at||0).getTime()||0),0);
+      items.push({type:'bf',bfId:Number(bfId),createdAt});
+    });
+    standalone.forEach(r=>{
+      items.push({type:'run',run:r,createdAt:new Date(r.created_at||0).getTime()||0});
+    });
+    items.sort((a,b)=>b.createdAt-a.createdAt);
+    const limited=items.slice(0,itemLimit);
+
+    let html='<div class="card p-6">';
+    limited.filter(x=>x.type==='bf').forEach(it=>{
+      const bfId=it.bfId;
+      const g=bfGroups[String(bfId)];
       const best=g.runs.reduce((b,r)=>{
-        const acc=Object.values(r.horizons||{}).reduce((m,h)=>Math.max(m,h.accuracy_pct||0),0);
+        const acc=histMaxAccBySelectedHorizons(r, selectedHorizons);
         return acc>b.acc?{acc,r}:b;
       },{acc:0,r:null});
-      html+=`<details class="mb-3 p-3 rounded-lg" style="background:#0f172a;border:1px solid #334155">
+      html+=`<details class="mb-3 p-3 rounded-lg" style="background:#0f172a;border:1px solid #334155" ontoggle="histOnToggleBf(${bfId},this)">
         <summary class="cursor-pointer flex items-center justify-between">
           <span><span class="badge badge-bf">BF#${bfId}</span> <b class="ml-2">${g.strategy}</b> <span class="text-slate-400 text-xs ml-2">${g.runs.length} runs</span></span>
           <span class="flex items-center gap-3">
@@ -370,18 +528,16 @@ async function loadHistory(){
             <button onclick="event.stopPropagation();deleteBruteforceGroup(${bfId})" class="text-red-400 text-xs hover:underline">remove pack</button>
           </span>
         </summary>
-        <table class="mt-2"><thead><tr><th>ID</th><th>Params</th><th>Win</th><th>Horizons</th><th>Time</th><th></th></tr></thead><tbody>`;
-      g.runs.forEach(r=>{
-        const hs=Object.entries(r.horizons||{}).map(([h,d])=>d.error?`H${h}:err`:`H${h}:<span class="${accClass(d.accuracy_pct)}">${d.accuracy_pct}%</span>`).join(' | ');
-        const ps=JSON.stringify(r.params||{}).substring(0,80);
-        html+=`<tr class="cursor-pointer hover:bg-slate-700" onclick="event.stopPropagation();showDetail(${r.id})"><td>${r.id}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td><td>${r.window_size||'?'} </td><td>${hs}</td><td>${r.total_time_sec}s</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
-      html+=`</tbody></table></details>`;
+        <div id="hist-bf-body-${bfId}"></div>
+      </details>`;
     });
-    if(standalone.length){
+
+    const standaloneLimited=limited.filter(x=>x.type==='run').map(x=>x.run);
+    if(standaloneLimited.length){
       html+=`<table><thead><tr><th>ID</th><th>Strategy</th><th>Test Period</th><th>Win</th><th>Horizons</th><th>Time</th><th>Date</th><th></th></tr></thead><tbody>`;
-      standalone.forEach(r=>{
-        const hs=Object.entries(r.horizons||{}).map(([h,d])=>d.error?`H${h}:err`:`H${h}:<span class="${accClass(d.accuracy_pct)}">${d.accuracy_pct}%</span>`).join(' | ');
-        html+=`<tr class="cursor-pointer" onclick="showDetail(${r.id})"><td>${r.id}</td><td class="font-medium">${r.strategy}</td><td class="text-xs">${r.test_period||''}</td><td>${r.window_size||'?'}</td><td>${hs}</td><td>${r.total_time_sec}s</td><td class="text-slate-400 text-xs">${r.created_at||''}</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
+      standaloneLimited.forEach(r=>{
+        const hs=histHorizonsHtml(r, selectedHorizons);
+        html+=`<tr class="cursor-pointer" onclick="showDetail(${r.id})"><td>${r.id}</td><td class="font-medium">${r.strategy}</td><td class="text-xs">${r.test_period||''}</td><td>${r.window_size||'?'} </td><td>${hs}</td><td>${r.total_time_sec}s</td><td class="text-slate-400 text-xs">${r.created_at||''}</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
       html+=`</tbody></table>`;
     }
     html+='</div>';el.innerHTML=html}catch(e){console.error(e)}
@@ -406,4 +562,25 @@ async function loadBest(){
     data.forEach((r,i)=>{const ps=JSON.stringify(r.params||{}).substring(0,60);
       html+=`<tr class="cursor-pointer" onclick="showDetail(${r.id})"><td>${i+1}</td><td class="font-medium">${r.strategy}</td><td class="${accClass(r.accuracy_pct)} font-bold text-lg">${r.accuracy_pct}%</td><td>${r.signals}</td><td class="text-green-400">${r.correct}</td><td class="text-red-400">${r.wrong}</td><td>${r.max_win_streak}/${r.max_lose_streak}</td><td>${r.window_size}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td></tr>`});
     html+='</tbody></table></div>';el.innerHTML=html}catch(e){console.error(e)}
+}
+
+// ===== COMPARE DEVELOPMENT POPUP =====
+function showCompareDevPopup(){
+  const button = document.getElementById('tab-compare');
+  const popup = document.getElementById('compare-dev-popup');
+  if(!button || !popup) return;
+  
+  // Position popup above the button
+  const rect = button.getBoundingClientRect();
+  popup.style.position = 'fixed';
+  popup.style.left = (rect.left + rect.width/2 - 60) + 'px'; // Center horizontally
+  popup.style.top = (rect.top - 40) + 'px'; // Position above button
+  popup.classList.remove('hidden');
+  
+  // Auto-hide after 2 seconds
+  setTimeout(() => hideCompareDevPopup(), 2000);
+}
+function hideCompareDevPopup(){
+  const popup = document.getElementById('compare-dev-popup');
+  if(popup) popup.classList.add('hidden');
 }

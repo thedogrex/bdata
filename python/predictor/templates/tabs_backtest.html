@@ -2,15 +2,63 @@
   <div id="panel-backtest">
     <div class="card p-6 mb-6">
       <h2 class="text-lg font-semibold mb-4">Run Moving-Window Backtest</h2>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-        <div><label class="block text-xs text-slate-400 mb-1">Strategy <span class="tooltip cursor-help text-blue-400" id="bt-strategy-info">&#9432;<span class="tt"></span></span></label><select id="bt-strategy" class="w-full"></select></div>
-        <div id="bt-train-start-wrap"><label class="block text-xs text-slate-400 mb-1">Train Start</label><input type="date" id="bt-train-start" value="2022-01-01" class="w-full"></div>
-        <div id="bt-train-end-wrap"><label class="block text-xs text-slate-400 mb-1">Train End</label><input type="date" id="bt-train-end" value="2025-06-30" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Test Start</label><input type="date" id="bt-test-start" value="2025-07-01" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Test End</label><input type="date" id="bt-test-end" value="2025-12-31" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Horizons</label><input type="text" id="bt-horizons" value="1" class="w-full" placeholder="1,2,3"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Window Size</label><input type="number" id="bt-window" value="5000" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Retrain Every</label><input type="number" id="bt-retrain" value="500" class="w-full"></div>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4 items-start">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Strategy <span class="tooltip cursor-help text-blue-400" id="bt-strategy-info">&#9432;<span class="tt"></span></span></label>
+          <select id="bt-strategy" class="w-full"></select>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <div class="text-xs text-slate-300 font-semibold mb-2">Train</div>
+            <div class="grid gap-3">
+              <div id="bt-train-start-wrap"><label class="block text-xs text-slate-400 mb-1">Start</label><input type="date" id="bt-train-start" value="2022-01-01" class="w-40"></div>
+              <div id="bt-train-end-wrap"><label class="block text-xs text-slate-400 mb-1">End</label><input type="date" id="bt-train-end" value="2025-06-30" class="w-40"></div>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs text-slate-300 font-semibold mb-2">Test</div>
+            <div class="grid gap-3">
+              <div><label class="block text-xs text-slate-400 mb-1">Start</label><input type="date" id="bt-test-start" value="2025-07-01" class="w-40"></div>
+              <div><label class="block text-xs text-slate-400 mb-1">End</label><input type="date" id="bt-test-end" value="2025-12-31" class="w-40"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid gap-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Window Size</label>
+            <input type="number" id="bt-window" value="5000" class="w-40">
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Retrain Every</label>
+            <input type="number" id="bt-retrain" value="500" class="w-40">
+          </div>
+
+          <div class="flex items-end justify-end gap-3 pt-1">
+            <div class="text-right">
+              <label class="block text-xs text-slate-400 mb-1">Horizons</label>
+              <input type="text" id="bt-horizons" value="1" class="w-28 text-right" placeholder="1,2,3">
+            </div>
+            <div class="text-xs text-slate-500" style="line-height:1.1">
+              <div class="flex items-center gap-2 justify-end">
+                <span class="text-slate-500">H1</span>
+                <span style="display:inline-flex;align-items:flex-end;gap:3px">
+                  <span style="width:6px;height:14px;background:#e2e8f0;border-radius:2px"></span>
+                  <span style="width:6px;height:14px;border:1px dashed #60a5fa;border-radius:2px"></span>
+                </span>
+              </div>
+              <div class="flex items-center gap-2 justify-end mt-1">
+                <span class="text-slate-500">H2</span>
+                <span style="display:inline-flex;align-items:flex-end;gap:3px">
+                  <span style="width:6px;height:14px;background:#e2e8f0;border-radius:2px"></span>
+                  <span style="width:6px;height:14px;background:#64748b;border-radius:2px"></span>
+                  <span style="width:6px;height:14px;border:1px dashed #60a5fa;border-radius:2px"></span>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
       <details class="mt-2"><summary class="text-xs text-slate-400 cursor-pointer">Custom Params (JSON) <span class="tooltip cursor-help text-blue-400" id="bt-params-info">&#9432;<span class="tt"></span></span></summary>
         <textarea id="bt-params" rows="3" class="w-full mt-2 text-xs font-mono" placeholder='{"n_estimators":300}'></textarea>
@@ -69,7 +117,16 @@
     <div class="card p-6 mb-4">
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div><label class="block text-xs text-slate-400 mb-1">Strategy</label><select id="hist-strategy" class="w-full"><option value="">All</option></select></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Min Accuracy %</label><input type="number" id="hist-min-acc" value="" placeholder="53" class="w-full"></div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Horizons</label>
+          <input type="hidden" id="hist-horizons" value="1,2,3" />
+          <div class="inline-flex rounded-lg overflow-hidden" style="border:1px solid #334155;background:#0f172a">
+            <button onclick="histToggleHorizon(1)" id="hist-h1" class="px-3 py-2 text-xs font-semibold" style="background:#052e16;color:#22c55e">H1</button>
+            <button onclick="histToggleHorizon(2)" id="hist-h2" class="px-3 py-2 text-xs font-semibold" style="background:#052e16;color:#22c55e">H2</button>
+            <button onclick="histToggleHorizon(3)" id="hist-h3" class="px-3 py-2 text-xs font-semibold" style="background:#052e16;color:#22c55e">H3</button>
+          </div>
+        </div>
+        <div><label class="block text-xs text-slate-400 mb-1">Min Accuracy %</label><input type="number" id="hist-min-acc" value="" placeholder="53" class="w-20"></div>
         <div><label class="block text-xs text-slate-400 mb-1">Limit</label><input type="number" id="hist-limit" value="50" class="w-full"></div>
         <div class="flex items-end gap-2">
           <button onclick="loadHistory()" class="btn btn-primary">Search</button>

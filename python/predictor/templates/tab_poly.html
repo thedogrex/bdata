@@ -1,5 +1,10 @@
   <!-- ============ TAB: POLYMARKET ============ -->
   <div id="panel-poly" class="hidden">
+    <style>
+      #panel-poly input[type=number]{appearance:textfield;-moz-appearance:textfield;}
+      #panel-poly input[type=number]::-webkit-outer-spin-button,
+      #panel-poly input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
+    </style>
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="card p-6 lg:col-span-1">
         <div class="flex items-center justify-between mb-3">
@@ -27,65 +32,85 @@
 
         <div id="poly-market-detail" class="text-sm text-slate-400">Select a market.</div>
 
-        <!-- Prediction Panel -->
-        <div class="mt-4" id="poly-predict-panel">
+        <!-- Prediction Popup Trigger + Popup -->
+        <div class="mt-3 flex items-center gap-2" id="poly-predict-panel">
+          <button onclick="polyTogglePredPopup()" id="poly-pred-trigger" class="flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer border-none text-white transition-all" style="background:linear-gradient(135deg,#3b82f6,#8b5cf6)">
+            <span style="font-size:14px">🔮</span> Prediction
+          </button>
+          <div id="poly-pred-result-inline" class="text-sm"></div>
+        </div>
+        <div id="poly-pred-popup" class="hidden mt-2">
           <div class="card p-4" style="background:#0f172a;border:1px solid #334155">
             <div class="flex items-center justify-between mb-3">
-              <h3 class="font-semibold">Prediction</h3>
-              <span class="text-xs text-slate-400">Strategy: <span class="text-blue-300 font-mono" id="poly-pred-strategy-name">rsi_mean_reversion</span></span>
+              <h3 class="font-semibold text-sm">Prediction</h3>
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-slate-400">Strategy: <span class="text-blue-300 font-mono" id="poly-pred-strategy-name">rsi_mean_reversion</span></span>
+                <button onclick="polyTogglePredPopup()" class="text-slate-400 hover:text-white text-xs px-1">✕</button>
+              </div>
             </div>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-2">
+            <div class="grid grid-cols-2 gap-3 mb-2">
               <div>
-                <label class="block text-xs text-slate-400 mb-1">Window Size (candles)</label>
+                <label class="block text-xs text-slate-400 mb-1">Window Size</label>
                 <input id="poly-pred-window" type="number" value="1000" min="100" max="10000" class="w-full">
               </div>
               <div class="flex items-end justify-end gap-2">
-                <button id="poly-pred-save" onclick="savePolyPredictionSettings()" class="btn btn-slate text-xs">Save Settings</button>
+                <button id="poly-pred-save" onclick="savePolyPredictionSettings()" class="btn btn-slate text-xs">Save</button>
                 <div id="poly-pred-save-msg" class="text-xs text-slate-500"></div>
               </div>
             </div>
-            <div class="text-xs text-slate-500 mb-3">Number of historical 5m candles used for prediction. All must exist with no gaps.</div>
-            <div class="mb-3">
+            <div class="mb-2">
               <label class="block text-xs text-slate-400 mb-1">Strategy Settings (JSON)</label>
-              <textarea id="poly-pred-params" rows="4" class="w-full text-xs font-mono" placeholder='{"rsi_period":14,"rsi_oversold":30,"rsi_overbought":70,"use_bb_confirm":true,"bb_low":0.2,"bb_high":0.8}'></textarea>
+              <textarea id="poly-pred-params" rows="3" class="w-full text-xs font-mono" placeholder='{"rsi_period":14,"rsi_oversold":30,"rsi_overbought":70,"use_bb_confirm":true,"bb_low":0.2,"bb_high":0.8}'></textarea>
             </div>
-            <button id="poly-pred-btn" onclick="runPolyPrediction()" class="w-full py-3 text-lg font-bold rounded-lg cursor-pointer border-none text-white transition-all" style="background:linear-gradient(135deg,#3b82f6,#8b5cf6);font-size:18px">PREDICT</button>
+            <button id="poly-pred-btn" onclick="runPolyPrediction()" class="btn btn-primary w-full py-2 text-sm font-bold">Predict</button>
             <div id="poly-pred-result" class="mt-3 text-sm"></div>
           </div>
         </div>
 
-        <!-- Real-Time Order Books: only 5 lowest asks per side -->
+        <!-- Direction Selection: UP / DOWN rect buttons -->
         <div class="mt-4" id="poly-ob-panel">
           <div class="flex items-center justify-between mb-2">
-            <h3 class="font-semibold">Asks (Instant Buy Prices)</h3>
+            <div class="flex items-center gap-3">
+              <h3 class="font-semibold">Asks (Instant Buy Prices)</h3>
+            </div>
             <div id="poly-ob-status" class="text-xs text-slate-400">Auto-updating</div>
           </div>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
+            <div id="poly-ob-side-up" class="p-2 rounded" style="border:1px solid #334155;background:#0b1220">
               <h4 class="text-sm font-semibold text-green-400 mb-2">UP</h4>
               <div id="poly-orderbook-up" class="text-xs text-slate-400">Select a market.</div>
             </div>
-            <div>
+            <div id="poly-ob-side-down" class="p-2 rounded" style="border:1px solid #334155;background:#0b1220">
               <h4 class="text-sm font-semibold text-red-400 mb-2">DOWN</h4>
               <div id="poly-orderbook-down" class="text-xs text-slate-400">Select a market.</div>
             </div>
           </div>
+
+          <!-- Buy panel integrated into OB section -->
+          <div class="mt-3 p-3 rounded-lg" id="poly-buy-panel" style="background:#0f172a;border:1px solid #334155">
+            <div class="flex items-center gap-3 flex-wrap">
+              <div>
+                <span class="text-xs font-semibold text-white">Buy</span>
+                <span class="text-xs text-slate-500 ml-1">[ simulated ]</span>
+              </div>
+              <div id="poly-sim-side" class="text-xs"></div>
+              <div class="flex items-center gap-2">
+                <label class="text-xs text-slate-400">Price</label>
+                <input id="poly-sim-price" type="number" readonly class="w-20 text-xs font-mono" style="background:#1e293b;cursor:default" placeholder="—">
+                <span class="text-xs text-slate-500">¢</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <label class="text-xs text-slate-400">Qty</label>
+                <input id="poly-sim-qty" type="number" value="1" step="0.1" min="0.1" max="9999" class="w-20 text-xs text-center">
+              </div>
+              <button id="poly-sim-submit" onclick="submitSimTrade()" class="btn btn-green text-xs" disabled>Buy</button>
+              <div id="poly-sim-msg" class="text-xs text-slate-400"></div>
+            </div>
+          </div>
         </div>
 
-        <!-- Sim Trade & Positions -->
-        <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div class="card p-4" id="poly-buy-panel" style="background:#0f172a;border:1px solid #334155">
-            <h3 class="font-semibold mb-2">Sim Trade (Test Mode)</h3>
-            <div class="grid grid-cols-1 gap-2">
-              <div>
-                <label class="block text-xs text-slate-400 mb-1">Qty</label>
-                <input id="poly-sim-qty" type="number" value="1" step="0.1" class="w-full">
-              </div>
-            </div>
-            <button id="poly-sim-submit" onclick="submitSimTrade()" class="btn btn-green text-xs mt-3">Submit</button>
-            <div id="poly-sim-msg" class="text-xs text-slate-400 mt-2"></div>
-          </div>
-
+        <!-- Positions -->
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
           <div class="card p-4" style="background:#0f172a;border:1px solid #334155">
             <div class="flex items-center justify-between mb-2">
               <h3 class="font-semibold">Positions</h3>
@@ -97,7 +122,7 @@
 
         <div class="mt-4">
           <div class="flex items-center justify-between mb-2">
-            <h3 class="font-semibold">Sim Trades</h3>
+            <h3 class="font-semibold">Trades</h3>
             <button onclick="loadSimTrades()" class="btn btn-primary text-xs">Refresh</button>
           </div>
           <div id="poly-trades" class="text-xs text-slate-400">Loading...</div>

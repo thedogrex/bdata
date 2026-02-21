@@ -221,8 +221,8 @@ async def api_poly_sim_trades(limit: int = Query(200)):
 
 
 @app.get("/api/poly/sim/positions")
-async def api_poly_sim_positions():
-    return await poly_service.get_sim_positions()
+async def api_poly_sim_positions(slug: str | None = Query(None)):
+    return await poly_service.get_sim_positions(slug=slug)
 
 
 @app.get("/api/poly/sim/markets_with_positions")

@@ -420,12 +420,12 @@ async def list_markets(limit: int = 50) -> List[Dict[str, Any]]:
         slug, ts, end_date, question, closed, resolved_outcome, prediction_outcome, prediction_ts = r
         status = "open"
         
-        # Mark past markets as [DONE]
+        # Mark past markets as ended
         if closed:
-            status = "[DONE]"
+            status = "ended"
         elif ts < current_ts:
             # Past but not marked as closed yet
-            status = "[DONE]"
+            status = "ended"
         
         out.append({
             "slug": slug, 
@@ -663,22 +663,39 @@ async def list_sim_trades(limit: int = 200) -> List[Dict[str, Any]]:
     ]
 
 
-async def get_sim_positions() -> List[Dict[str, Any]]:
-    rows = await db.fetchall(
-        """
-        SELECT asset_id,
-               SUM(CASE WHEN side='BUY' THEN qty ELSE -qty END) as pos_qty,
-               SUM(CASE WHEN side='BUY' THEN qty*fill_price_cents ELSE -qty*fill_price_cents END) as cashflow
-        FROM poly_sim_trades
-        GROUP BY asset_id
-        """
-    )
+async def get_sim_positions(slug: str | None = None) -> List[Dict[str, Any]]:
+    slug = str(slug).strip() if slug is not None else None
+    if slug:
+        rows = await db.fetchall(
+            """
+            SELECT slug,
+                   asset_id,
+                   SUM(CASE WHEN side='BUY' THEN qty ELSE -qty END) as pos_qty,
+                   SUM(CASE WHEN side='BUY' THEN qty*fill_price_cents ELSE -qty*fill_price_cents END) as cashflow
+            FROM poly_sim_trades
+            WHERE slug=%s
+            GROUP BY slug, asset_id
+            """,
+            (slug,),
+        )
+    else:
+        rows = await db.fetchall(
+            """
+            SELECT NULL as slug,
+                   asset_id,
+                   SUM(CASE WHEN side='BUY' THEN qty ELSE -qty END) as pos_qty,
+                   SUM(CASE WHEN side='BUY' THEN qty*fill_price_cents ELSE -qty*fill_price_cents END) as cashflow
+            FROM poly_sim_trades
+            GROUP BY asset_id
+            """
+        )
 
     out: List[Dict[str, Any]] = []
     for r in rows:
-        asset_id = str(r[0])
-        pos_qty = float(r[1]) if r[1] is not None else 0.0
-        cashflow = float(r[2]) if r[2] is not None else 0.0
+        row_slug = str(r[0]) if r[0] is not None else None
+        asset_id = str(r[1])
+        pos_qty = float(r[2]) if r[2] is not None else 0.0
+        cashflow = float(r[3]) if r[3] is not None else 0.0
 
         last = await db.fetchone(
             """
@@ -707,6 +724,7 @@ async def get_sim_positions() -> List[Dict[str, Any]]:
 
         out.append(
             {
+                "slug": row_slug,
                 "asset_id": asset_id,
                 "pos_qty": pos_qty,
                 "cashflow_cents": cashflow,

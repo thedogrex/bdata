@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Candle ABRA — Admin Panel</title>
+<title>Candy MARK — Admin Panel</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   body{background:#0f172a;color:#e2e8f0;font-family:'Inter',system-ui,sans-serif}
@@ -75,7 +75,7 @@
   <!-- Header -->
   <div class="flex items-center justify-between mb-6">
     <div>
-      <h1 class="text-2xl font-bold">Candle <span class="bg-gradient-to-r from-purple-400 via-pink-400 to-indigo-400 bg-clip-text text-transparent">ABRA</span></h1>
+      <h1 class="text-2xl font-bold">Candy <span class="bg-gradient-to-r from-purple-400 via-pink-400 to-indigo-400 bg-clip-text text-transparent">MARK</span></h1>
       <p class="text-slate-400 text-sm mt-1">Moving-window backtest &bull; brute-force &bull; task queue</p>
     </div>
     <div class="flex items-center gap-3">
@@ -95,7 +95,6 @@
     <button onclick="switchTab('history')" id="tab-history" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">History</button>
     <button onclick="switchTab('best')" id="tab-best" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Best Runs</button>
     <button onclick="switchTab('poly')" id="tab-poly" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Polymarket</button>
-    <button onclick="switchTab('orderbooks')" id="tab-orderbooks" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Order Books</button>
   </div>
 
   {{TAB_BACKTEST}}
@@ -104,7 +103,6 @@
   {{TAB_HISTORY}}
   {{TAB_BEST}}
   {{TAB_POLY}}
-  {{TAB_ORDERBOOKS}}
 
   <!-- Compare Development Dialog -->
   <div id="compare-dev-popup" class="hidden absolute bg-slate-800 border border-slate-600 rounded-md p-2 shadow-lg z-50" style="min-width:120px;">

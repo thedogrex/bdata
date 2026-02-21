@@ -4,6 +4,19 @@
       #panel-poly input[type=number]{appearance:textfield;-moz-appearance:textfield;}
       #panel-poly input[type=number]::-webkit-outer-spin-button,
       #panel-poly input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
+
+      #poly-detail-tabs{display:inline-flex;border:1px solid #334155;background:#0f172a;border-radius:10px;overflow:hidden}
+      #poly-detail-tabs button{padding:8px 14px;font-size:12px;font-weight:800;color:#94a3b8;background:transparent;border:none;border-right:1px solid #334155}
+      #poly-detail-tabs button:last-child{border-right:none}
+      #poly-detail-tabs button.poly-subtab-active{color:#e2e8f0;background:#1e293b}
+      #poly-detail-tabs button:disabled{opacity:0.5;cursor:not-allowed}
+
+      #poly-tab-content-label{font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin-bottom:10px}
+
+      #ob-histview-group{display:inline-flex;border:1px solid #334155;background:#0f172a;border-radius:10px;overflow:hidden}
+      #ob-histview-group button{padding:8px 10px;font-size:12px;font-weight:800;color:#94a3b8;background:transparent;border:none;border-right:1px solid #334155;min-width:38px;text-align:center}
+      #ob-histview-group button:last-child{border-right:none}
+      #ob-histview-group button.ob-histview-active{color:#e2e8f0;background:#1e293b}
     </style>
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="card p-6 lg:col-span-1">
@@ -22,53 +35,81 @@
       </div>
 
       <div class="card p-6 lg:col-span-2">
-        <div class="flex items-center justify-between mb-3">
-          <div>
-            <h2 class="text-lg font-semibold">Market Detail</h2>
-            <div id="poly-market-title" class="text-xs text-slate-400"></div>
-          </div>
-          <button onclick="clearPolySelection()" class="btn btn-slate text-xs">Clear</button>
-        </div>
-
-        <div id="poly-market-detail" class="text-sm text-slate-400">Select a market.</div>
-
-        <!-- Prediction Popup Trigger + Popup -->
-        <div class="mt-3 flex items-center gap-2" id="poly-predict-panel">
-          <button onclick="polyTogglePredPopup()" id="poly-pred-trigger" class="flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer border-none text-white transition-all" style="background:linear-gradient(135deg,#3b82f6,#8b5cf6)">
-            <span style="font-size:14px">🔮</span> Prediction
-          </button>
-          <div id="poly-pred-result-inline" class="text-sm"></div>
-        </div>
-        <div id="poly-pred-popup" class="hidden mt-2">
-          <div class="card p-4" style="background:#0f172a;border:1px solid #334155">
-            <div class="flex items-center justify-between mb-3">
-              <h3 class="font-semibold text-sm">Prediction</h3>
-              <div class="flex items-center gap-2">
-                <span class="text-xs text-slate-400">Strategy: <span class="text-blue-300 font-mono" id="poly-pred-strategy-name">rsi_mean_reversion</span></span>
-                <button onclick="polyTogglePredPopup()" class="text-slate-400 hover:text-white text-xs px-1">✕</button>
-              </div>
+        <div id="poly-market-empty" class="py-10">
+          <div class="flex items-center justify-center gap-4">
+            <div class="text-3xl" style="color:#60a5fa">←</div>
+            <div>
+              <div class="text-base font-semibold text-slate-200">Please select the market</div>
+              <div class="text-xs text-slate-400">Choose one on the left to view order book, buy, positions and trades.</div>
             </div>
-            <div class="grid grid-cols-2 gap-3 mb-2">
-              <div>
-                <label class="block text-xs text-slate-400 mb-1">Window Size</label>
-                <input id="poly-pred-window" type="number" value="1000" min="100" max="10000" class="w-full">
-              </div>
-              <div class="flex items-end justify-end gap-2">
-                <button id="poly-pred-save" onclick="savePolyPredictionSettings()" class="btn btn-slate text-xs">Save</button>
-                <div id="poly-pred-save-msg" class="text-xs text-slate-500"></div>
-              </div>
-            </div>
-            <div class="mb-2">
-              <label class="block text-xs text-slate-400 mb-1">Strategy Settings (JSON)</label>
-              <textarea id="poly-pred-params" rows="3" class="w-full text-xs font-mono" placeholder='{"rsi_period":14,"rsi_oversold":30,"rsi_overbought":70,"use_bb_confirm":true,"bb_low":0.2,"bb_high":0.8}'></textarea>
-            </div>
-            <button id="poly-pred-btn" onclick="runPolyPrediction()" class="btn btn-primary w-full py-2 text-sm font-bold">Predict</button>
-            <div id="poly-pred-result" class="mt-3 text-sm"></div>
           </div>
         </div>
 
-        <!-- Direction Selection: UP / DOWN rect buttons -->
-        <div class="mt-4" id="poly-ob-panel">
+        <div id="poly-market-sections" class="hidden">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <h2 class="text-lg font-semibold">Market Detail</h2>
+              <div id="poly-market-title" class="text-xs text-slate-400"></div>
+            </div>
+          </div>
+          <div id="poly-market-detail" class="text-sm text-slate-400"></div>
+
+          <!-- Prediction bar: PREDICT button + gear, grouped -->
+          <div id="poly-predict-panel" class="mb-3">
+            <div class="inline-flex items-center rounded-lg" style="background:#1e293b;border:1px solid #334155;padding:3px 4px;gap:5px">
+              <button id="poly-pred-run-btn" onclick="runPolyPrediction()" class="text-xs font-bold px-3 py-1.5 rounded-md" style="background:linear-gradient(135deg,#6366f1,#a855f7,#ec4899);color:#fff;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px">
+                <span style="font-size:14px">✨</span> PREDICT
+              </button>
+              <button id="poly-pred-gear-btn" onclick="polyTogglePredSettings()" class="text-slate-400 hover:text-white px-1.5 py-1 rounded" style="font-size:15px;background:transparent;border:none;cursor:pointer" title="Prediction Settings">⚙</button>
+            </div>
+            <div id="poly-pred-result-inline" class="inline-block ml-3 text-sm align-middle"></div>
+            <!-- Inline prediction details (pushes content down) -->
+            <div id="poly-pred-popup" class="hidden mt-2" style="width:520px;max-width:100%">
+              <div class="card p-4" style="background:#0f172a;border:1px solid #334155;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
+                <div class="flex items-center justify-between mb-3">
+                  <h3 class="font-semibold text-sm">Prediction Settings</h3>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs text-slate-400">Strategy: <span class="text-blue-300 font-mono" id="poly-pred-strategy-name">rsi_mean_reversion</span></span>
+                    <button onclick="polyHidePredDetails()" class="text-slate-400 hover:text-white text-xs px-1">✕</button>
+                  </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3 mb-2">
+                  <div>
+                    <label class="block text-xs text-slate-400 mb-1">Window Size</label>
+                    <input id="poly-pred-window" type="number" value="1000" min="100" max="10000" class="w-full">
+                  </div>
+                  <div class="flex items-end justify-end gap-2">
+                    <button id="poly-pred-save" onclick="savePolyPredictionSettings()" class="btn btn-slate text-xs">Save</button>
+                    <div id="poly-pred-save-msg" class="text-xs text-slate-500"></div>
+                  </div>
+                </div>
+                <div class="mb-2">
+                  <label class="block text-xs text-slate-400 mb-1">Strategy Settings (JSON)</label>
+                  <textarea id="poly-pred-params" rows="3" class="w-full text-xs font-mono" placeholder='{"rsi_period":14,"rsi_oversold":30,"rsi_overbought":70,"use_bb_confirm":true,"bb_low":0.2,"bb_high":0.8}'></textarea>
+                </div>
+                <div id="poly-pred-result" class="mt-2 text-sm"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-2 mb-2" style="border-top:1px solid #334155;padding-top:10px">
+          <div class="flex flex-col gap-2">
+            <div class="flex items-center justify-between">
+              <h1 class="text-base font-bold">Order Book</h1>
+            </div>
+          </div>
+        </div>
+
+        <div id="poly-tab-content" class="mt-2 rounded-lg" style="background:#0b1220;border:1px solid #334155">
+        <div id="poly-tab-content-label" class="p-2 pb-0">LIVE</div>
+        <!-- Live/History tab buttons (hidden for ended markets) -->
+        <div id="poly-detail-tabs" class="px-3" style="margin-left:8px">
+          <button id="poly-detail-tab-live" onclick="polySetDetailTab('live')" class="poly-subtab">Live</button>
+          <button id="poly-detail-tab-history" onclick="polySetDetailTab('history')" class="poly-subtab">History</button>
+        </div>
+        <div class="px-3 pb-3" style="margin-top:8px">
+        <div id="poly-live-panel">
+        <div id="poly-ob-panel">
           <div class="flex items-center justify-between mb-2">
             <div class="flex items-center gap-3">
               <h3 class="font-semibold">Asks (Instant Buy Prices)</h3>
@@ -108,9 +149,65 @@
             </div>
           </div>
         </div>
+        </div>
+        </div>
+
+        <div class="hidden" id="poly-history-panel">
+          <div class="px-3 pb-3">
+          <div class="card p-4" style="background:#0f172a;border:1px solid #334155">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="font-semibold">Ask Price History</h3>
+              <div class="flex gap-2 flex-wrap justify-end">
+                <input type="hidden" id="ob-hist-side" value="UP" />
+                <div class="inline-flex rounded-lg overflow-hidden" style="border:1px solid #334155;background:#0f172a">
+                  <button onclick="obSetHistSide('UP')" id="ob-hist-side-up" class="px-3 py-2 text-xs font-semibold" style="color:#22c55e;background:#052e16">
+                    <span style="display:inline-block;margin-right:6px;font-weight:800">▲</span>UP
+                  </button>
+                  <button onclick="obSetHistSide('DOWN')" id="ob-hist-side-down" class="px-3 py-2 text-xs font-semibold" style="color:#ef4444;background:transparent">
+                    <span style="display:inline-block;margin-right:6px;font-weight:800">▼</span>DOWN
+                  </button>
+                </div>
+                <div id="ob-histview-group">
+                  <button onclick="obSetHistView('chart')" id="ob-histview-chart" class="ob-histview-btn" title="Chart">📈</button>
+                  <button onclick="obSetHistView('table')" id="ob-histview-table" class="ob-histview-btn" title="Table">▦</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="ob-hist-chart-panel">
+              <div id="ob-chart-container" style="width:100%;overflow-x:auto;position:relative;">
+                <canvas id="ob-chart-canvas" style="height:260px;"></canvas>
+              </div>
+              <div id="ob-chart-tooltip" style="display:none;position:fixed;background:#1e293b;border:1px solid #475569;border-radius:6px;padding:8px 12px;font-size:11px;color:#e2e8f0;pointer-events:none;z-index:9999;max-width:280px;"></div>
+            </div>
+
+            <div id="ob-hist-table-panel" class="hidden">
+              <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div>
+                  <div class="flex items-center justify-between mb-2">
+                    <h4 class="text-sm font-semibold">Snapshots</h4>
+                    <div class="flex gap-2">
+                      <button id="ob-hist-prev" onclick="obHistPrevPage()" class="btn btn-slate text-xs">Prev</button>
+                      <button id="ob-hist-next" onclick="obHistNextPage()" class="btn btn-slate text-xs">Next</button>
+                    </div>
+                  </div>
+                  <div id="ob-hist-page" class="text-xs text-slate-500 mb-2"></div>
+                  <div id="ob-hist-list" class="max-h-72 overflow-y-auto text-xs text-slate-400">No data.</div>
+                </div>
+                <div>
+                  <h4 class="text-sm font-semibold mb-2">Snapshot Detail</h4>
+                  <div id="ob-hist-detail" class="text-xs text-slate-400">Click a snapshot to view.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          </div>
+        </div>
+
+        </div>
 
         <!-- Positions -->
-        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4" id="poly-positions-panel">
           <div class="card p-4" style="background:#0f172a;border:1px solid #334155">
             <div class="flex items-center justify-between mb-2">
               <h3 class="font-semibold">Positions</h3>
@@ -120,13 +217,15 @@
           </div>
         </div>
 
-        <div class="mt-4">
+        <div class="mt-4" id="poly-trades-panel">
           <div class="flex items-center justify-between mb-2">
             <h3 class="font-semibold">Trades</h3>
             <button onclick="loadSimTrades()" class="btn btn-primary text-xs">Refresh</button>
           </div>
           <div id="poly-trades" class="text-xs text-slate-400">Loading...</div>
         </div>
+
+        </div> <!-- /poly-market-sections -->
       </div>
     </div>
   </div>

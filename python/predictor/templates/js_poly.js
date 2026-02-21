@@ -14,6 +14,8 @@ const POLY_MARKETS_PER_PAGE = 20;
 let polyMarketsCache = null;
 let polyMarketsWithPosCache = null;
 
+let polyDetailTab = 'live';
+
 const POLY_PRED_SETTINGS_KEY = 'poly_pred_settings_v1';
 
 // ===== AUTOPREDICT =====
@@ -31,6 +33,49 @@ async function loadAutopredictState(){
     if(wEl && data.window_size) wEl.value = String(data.window_size);
     if(pEl && data.params) pEl.value = JSON.stringify(data.params);
   }catch(e){ console.error('loadAutopredictState error:', e); }
+
+}
+
+function polySetDetailTab(tab){
+  polyDetailTab = (tab === 'history') ? 'history' : 'live';
+  const liveBtn = document.getElementById('poly-detail-tab-live');
+  const histBtn = document.getElementById('poly-detail-tab-history');
+  if(liveBtn){
+    liveBtn.classList.toggle('poly-subtab-active', polyDetailTab === 'live');
+  }
+  if(histBtn){
+    histBtn.classList.toggle('poly-subtab-active', polyDetailTab === 'history');
+  }
+
+  const lbl = document.getElementById('poly-tab-content-label');
+  if(lbl) lbl.textContent = (polyDetailTab === 'history') ? 'HISTORY' : 'LIVE';
+
+  const livePanel = document.getElementById('poly-live-panel');
+  const histPanel = document.getElementById('poly-history-panel');
+  if(livePanel) livePanel.classList.toggle('hidden', polyDetailTab !== 'live');
+  if(histPanel) histPanel.classList.toggle('hidden', polyDetailTab !== 'history');
+
+  if(polyDetailTab === 'live'){
+    if(polySelectedMarket && !polySelectedMarket.closed){
+      updatePolyOrderBooks();
+      startPolyOrderBookUpdates();
+    }
+  } else {
+    stopPolyOrderBookUpdates();
+    try{
+      if(typeof obStopLive === 'function') obStopLive();
+      if(polySelectedMarket){
+        // Bind embedded history viewer to current selected market
+        obSelectedMarket = polySelectedMarket;
+        obSelectedSlug = polySelectedMarket.slug;
+        obMode = 'history';
+        const sideEl = document.getElementById('ob-hist-side');
+        if(sideEl && !sideEl.value) sideEl.value = 'UP';
+        if(typeof obUpdateHistSideButtons === 'function') obUpdateHistSideButtons();
+        if(typeof obLoadHistory === 'function') obLoadHistory();
+      }
+    }catch(e){/* ignore */}
+  }
 }
 
 function updateAutopredictUI(){
@@ -135,7 +180,12 @@ function clearPolySelection(){
   polySelectedOutcomeAssetId=null;
   stopPolyOrderBookUpdates();
   document.getElementById('poly-market-title').textContent='';
-  document.getElementById('poly-market-detail').innerHTML='<span class="text-slate-400">Select a market.</span>';
+  const emptyEl = document.getElementById('poly-market-empty');
+  const secEl = document.getElementById('poly-market-sections');
+  if(emptyEl) emptyEl.classList.remove('hidden');
+  if(secEl) secEl.classList.add('hidden');
+  const detailEl = document.getElementById('poly-market-detail');
+  if(detailEl) detailEl.innerHTML='';
   document.getElementById('poly-orderbook-up').innerHTML='<span class="text-slate-400">Select a market.</span>';
   document.getElementById('poly-orderbook-down').innerHTML='<span class="text-slate-400">Select a market.</span>';
   document.getElementById('poly-ob-status').textContent='';
@@ -160,7 +210,12 @@ function clearPolySelectionComplete(){
   stopPolyOrderBookUpdates();
   stopPolyCountdown();
   document.getElementById('poly-market-title').textContent='';
-  document.getElementById('poly-market-detail').innerHTML='<span class="text-slate-400">Select a market.</span>';
+  const emptyEl = document.getElementById('poly-market-empty');
+  const secEl = document.getElementById('poly-market-sections');
+  if(emptyEl) emptyEl.classList.remove('hidden');
+  if(secEl) secEl.classList.add('hidden');
+  const detailEl = document.getElementById('poly-market-detail');
+  if(detailEl) detailEl.innerHTML='';
   document.getElementById('poly-orderbook-up').innerHTML='<span class="text-slate-400">Select a market.</span>';
   document.getElementById('poly-orderbook-down').innerHTML='<span class="text-slate-400">Select a market.</span>';
   document.getElementById('poly-ob-status').textContent='';
@@ -180,7 +235,7 @@ function clearPolySelectionComplete(){
 function startPolyOrderBookUpdates(){
   stopPolyOrderBookUpdates();
   if(polySelectedMarket && polySelectedMarket.outcomes && polySelectedMarket.outcomes.length >= 2){
-    polyOrderBookInterval = setInterval(()=>{ updatePolyOrderBooks(); }, 3000);
+    polyOrderBookInterval = setInterval(updatePolyOrderBooks, 800);
   }
 }
 
@@ -273,6 +328,14 @@ async function loadPolyMarkets(){
     polyMarketsWithPosCache = marketsWithPos;
     renderPolyMarkets();
 
+    // Auto-select live market if present; otherwise poll for live market
+    const liveMarket = data.find(m => polyActiveTs !== null && (m.ts||0) === polyActiveTs && !m.closed);
+    if(liveMarket){
+      await selectPolyMarket(liveMarket.slug);
+    } else {
+      startLiveMarketPoll();
+    }
+
     // Apply saved prediction settings whenever the Poly tab is loaded.
     loadPolyPredictionSettings();
   }catch(e){el.textContent='Error loading markets';}
@@ -309,8 +372,8 @@ function renderPolyMarkets(){
     const d=new Date((m.ts||0)*1000);
     const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',timeZone:'UTC'}) + ' ' + d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'});
     const slugSuffix = (m.slug||'').split('-').pop();
-    const status = m.status || (m.closed ? '[DONE]' : 'open');
-    const statusClass = status === '[DONE]' ? 'badge badge-queue' : 'badge badge-done';
+    const status = m.status || (m.closed ? 'ended' : 'open');
+    const statusClass = status === 'ended' ? 'badge badge-queue' : 'badge badge-done';
     const resolved = (m.resolved_outcome||'');
     const resolvedTri = resolved === 'UP'
       ? '<span style="margin-left:8px;color:#22c55e;font-weight:700">▲</span>'
@@ -350,7 +413,58 @@ function polyMarketsNextPage(){
   loadPolyMarkets();
 }
 
+let liveMarketPollInterval = null;
+function startLiveMarketPoll(){
+  stopLiveMarketPoll();
+  liveMarketPollInterval = setInterval(async () => {
+    try{
+      const st = await fetch(API+'/api/poly/status');
+      const s = await st.json();
+      polyActiveTs = s.active_ts || null;
+      const res = await fetch(API+'/api/poly/markets?limit=500');
+      const data = await res.json();
+      polyMarketsCache = data;
+      renderPolyMarkets();
+      const liveMarket = data.find(m => polyActiveTs !== null && (m.ts||0) === polyActiveTs && !m.closed);
+      if(liveMarket){
+        stopLiveMarketPoll();
+        await selectPolyMarket(liveMarket.slug);
+      }
+    }catch(e){
+      // ignore errors, keep polling
+    }
+  }, 3000);
+  // Show loading bar in empty state
+  const emptyEl = document.getElementById('poly-market-empty');
+  if(emptyEl){
+    emptyEl.innerHTML = `
+      <div class="py-10">
+        <div class="flex flex-col items-center gap-4">
+          <div class="text-3xl" style="color:#60a5fa">←</div>
+          <div class="text-center">
+            <div class="text-base font-semibold text-slate-200">Waiting for live market</div>
+            <div class="text-xs text-slate-400 mb-3">No active market right now. We’ll auto-select when one appears.</div>
+            <div class="w-64 h-2 bg-slate-700 rounded-full overflow-hidden">
+              <div class="h-full bg-blue-500 animate-pulse" style="width:100%;animation:slide 2s linear infinite;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <style>
+        @keyframes slide {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
+        }
+      </style>
+    `;
+  }
+}
+function stopLiveMarketPoll(){
+  if(liveMarketPollInterval){ clearInterval(liveMarketPollInterval); liveMarketPollInterval = null; }
+}
+
 async function selectPolyMarket(slug){
+  stopLiveMarketPoll(); // Stop auto-polling if user manually selects
   polySelectedMarketSlug = slug;
   document.querySelectorAll('#poly-markets tr').forEach(tr=>tr.classList.remove('bg-blue-900'));
   const rows = document.querySelectorAll('#poly-markets tr');
@@ -386,14 +500,28 @@ async function showPolyMarket(slug){
     const m=await res.json();
     if(m.error){el.textContent=m.error;return}
     polySelectedMarket=m;
-    title.textContent=m.question||m.slug;
     const extUrl=`https://polymarket.com/event/${m.slug}`;
     const isActive = (polyActiveTs!==null && m.ts===polyActiveTs && !m.closed);
-    const activeBadge = isActive ? '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:6px"></span><span class="text-red-400 font-semibold">ACTIVE</span>' : '';
-    const isDone = m.closed || (m.ts && (m.ts + 300) < Math.floor(Date.now() / 1000));
+    const isEnded = m.closed || (m.ts && (m.ts + 300) < Math.floor(Date.now() / 1000));
+    let badge = '';
+    if(isActive){
+      badge = '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:6px"></span><span class="text-red-400 font-semibold">ACTIVE</span>';
+    } else if(isEnded){
+      badge = '<span class="text-slate-400 font-semibold">[ENDED]</span>';
+    }
+    title.innerHTML = (badge ? badge + ' ' : '') + (m.question||m.slug);
+
+    const emptyEl = document.getElementById('poly-market-empty');
+    const secEl = document.getElementById('poly-market-sections');
+    if(emptyEl) emptyEl.classList.add('hidden');
+    if(secEl) secEl.classList.remove('hidden');
+    const isDone = isEnded;
+    // Hide Live/History tab buttons for ended markets
+    const tabsDiv = document.getElementById('poly-detail-tabs');
+    if(tabsDiv) tabsDiv.classList.toggle('hidden', !!isDone);
     const obPanel = document.getElementById('poly-ob-panel');
-    const predPanel = document.getElementById('poly-predict-panel');
     if(obPanel) obPanel.classList.toggle('hidden', !!isDone);
+    const predPanel = document.getElementById('poly-predict-panel');
     if(predPanel){
       predPanel.classList.remove('hidden');
       predPanel.style.display = '';
@@ -416,7 +544,7 @@ async function showPolyMarket(slug){
       const t = predTs ? new Date(predTs*1000).toLocaleString('ru-RU',{timeZone:'UTC'}) : '';
       predHtml = ` | pred: <span style="color:${c};font-weight:700;background:rgba(245,158,11,0.22);padding:1px 6px;border-radius:6px">${a} ${pred}</span>${t?` <span class=\"text-slate-500\">@ ${t}</span>`:''}`;
     }
-    let html=`<div class="mb-2 text-xs text-slate-400"><span class="font-mono">${m.slug}</span> | ts: ${m.ts} | closed: ${m.closed} ${activeBadge}${predHtml}</div>`;
+    let html=`<div class="mb-2 text-xs text-slate-400"><span class="font-mono">${m.slug}</span> | ts: ${m.ts} | closed: ${m.closed}${predHtml}</div>`;
     html+=countdownDisplay;
     html+=`<div class="mb-3 text-xs"><a href="${extUrl}" target="_blank" class="text-blue-400 hover:underline">Open on Polymarket</a></div>`;
     if(m.description) html+=`<div class="text-xs text-slate-400 mb-3">${m.description}</div>`;
@@ -428,10 +556,13 @@ async function showPolyMarket(slug){
 
     if(isActive) startPolyCountdown(m.ts, 300);
 
-    // Auto-start order book updates (skip for DONE markets)
-    if(!isDone && m.outcomes && m.outcomes.length >= 2){
-      updatePolyOrderBooks();
-      startPolyOrderBookUpdates();
+    // For ended markets: show only history, no tab buttons
+    if(isDone){
+      polySetDetailTab('history');
+    } else if(m.outcomes && m.outcomes.length >= 2){
+      polySetDetailTab('live');
+    } else {
+      polySetDetailTab('history');
     }
   }catch(e){el.textContent='Error loading market';}
 }
@@ -510,6 +641,20 @@ function polyTogglePredPopup(){
   const popup = document.getElementById('poly-pred-popup');
   if(popup) popup.classList.toggle('hidden');
 }
+function polyTogglePredSettings(){
+  const popup = document.getElementById('poly-pred-popup');
+  if(popup) popup.classList.toggle('hidden');
+}
+
+function polyShowPredDetails(){
+  const popup = document.getElementById('poly-pred-popup');
+  if(popup) popup.classList.remove('hidden');
+}
+
+function polyHidePredDetails(){
+  const popup = document.getElementById('poly-pred-popup');
+  if(popup) popup.classList.add('hidden');
+}
 
 // ===== Order Book rendering (asks only, 5 lowest) =====
 
@@ -552,11 +697,14 @@ function renderAsks(data, outcomeName){
   if(!data || !data.asks || !data.asks.length) return `<div class="text-slate-400">${outcomeName}: no asks</div>`;
   const ts = new Date((data.ts||0)*1000);
   const timeStr = ts.toLocaleTimeString('ru-RU',{timeZone:'UTC'});
+  const now = Date.now() / 1000;
+  const delaySec = (now - (data.ts||0));
+  const delayStr = delaySec >= 0 ? `+${delaySec.toFixed(1)} sec` : `${delaySec.toFixed(1)} sec`;
   const side = (outcomeName||'').toUpperCase().includes('DOWN') ? 'DOWN' : 'UP';
   // Sort ascending by price, take 5 lowest
   const sorted = [...data.asks].sort((a,b)=>parseFloat(a.price)-parseFloat(b.price));
   const top5 = sorted.slice(0,5);
-  let html=`<div class="text-slate-500 text-xs mb-1">${outcomeName} · ${timeStr}</div>`;
+  let html=`<div class="text-slate-500 text-xs mb-1">${side} · ${delayStr} · ${timeStr}</div>`;
   html+='<table class="text-xs"><thead><tr><th>Price (¢)</th><th>Size</th></tr></thead><tbody>';
   top5.forEach(a=>{
     const p = Math.round(parseFloat(a.price));
@@ -577,21 +725,24 @@ function renderAsks(data, outcomeName){
 
 async function runPolyPrediction(){
   if(!polySelectedMarket || !polySelectedMarket.slug){
-    document.getElementById('poly-pred-result').innerHTML='<span class="text-red-400">Select a market first.</span>';
+    const inlineEl = document.getElementById('poly-pred-result-inline');
+    if(inlineEl) inlineEl.innerHTML='<span class="text-red-400 text-xs">Select a market first.</span>';
     return;
   }
-  const btn = document.getElementById('poly-pred-btn');
+  const btn = document.getElementById('poly-pred-run-btn');
   const resultEl = document.getElementById('poly-pred-result');
-  btn.disabled = true;
-  btn.textContent = 'Predicting...';
-  resultEl.innerHTML='<span class="text-slate-400">Running prediction...</span>';
+  const inlineEl = document.getElementById('poly-pred-result-inline');
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span style="font-size:14px">⏳</span> PREDICTING...'; }
+  if(inlineEl) inlineEl.innerHTML='<span class="text-slate-400 text-xs">Running...</span>';
+  if(resultEl) resultEl.innerHTML='<span class="text-slate-400">Running prediction...</span>';
 
   let params = null;
   const paramsText = document.getElementById('poly-pred-params').value.trim();
   if(paramsText){
     try{ params = JSON.parse(paramsText); }catch(e){
-      resultEl.innerHTML='<span class="text-red-400">Invalid JSON in strategy settings.</span>';
-      btn.disabled = false; btn.textContent = 'Predict'; return;
+      if(resultEl) resultEl.innerHTML='<span class="text-red-400">Invalid JSON in strategy settings.</span>';
+      if(inlineEl) inlineEl.innerHTML='<span class="text-red-400 text-xs">Invalid JSON</span>';
+      if(btn){ btn.disabled = false; btn.innerHTML = '<span style="font-size:14px">✨</span> PREDICT'; } return;
     }
   }
   const windowSize = parseInt(document.getElementById('poly-pred-window').value) || 1000;
@@ -615,9 +766,12 @@ async function runPolyPrediction(){
       const color = data.prediction === 'UP' ? '#22c55e' : (data.prediction === 'DOWN' ? '#ef4444' : '#94a3b8');
       const arrow = data.prediction === 'UP' ? '\u25b2' : (data.prediction === 'DOWN' ? '\u25bc' : '\u2014');
       const prob = Math.round(data.probability * 100);
-      // Show inline result next to the trigger button
+      // Show inline result next to the trigger button + Analyse button
       const inlineEl = document.getElementById('poly-pred-result-inline');
-      if(inlineEl) inlineEl.innerHTML=`<span style="color:${color};font-weight:700;font-size:14px">${arrow} ${data.prediction}</span> <span class="text-slate-400 text-xs">${prob}%</span>`;
+      if(inlineEl) inlineEl.innerHTML=
+        `<span style="color:${color};font-weight:700;font-size:14px">${arrow} ${data.prediction}</span> `
+        +`<span class="text-slate-400 text-xs">${prob}%</span>`
+        +`<button onclick="polyShowPredDetails()" class="btn btn-slate text-xs" style="margin-left:8px">Analyse</button>`;
       const slug = data.market_slug || polySelectedMarket.slug;
       const ws = data.window_size || windowSize;
 
@@ -670,10 +824,10 @@ async function runPolyPrediction(){
         +`<div id="poly-pred-chart-wrap" class="mt-3"></div>`;
     }
   }catch(e){
-    resultEl.innerHTML=`<span class="text-red-400">Request failed: ${e.message}</span>`;
+    if(resultEl) resultEl.innerHTML=`<span class="text-red-400">Request failed: ${e.message}</span>`;
+    if(inlineEl) inlineEl.innerHTML=`<span class="text-red-400 text-xs">Error</span>`;
   }
-  btn.disabled = false;
-  btn.textContent = 'Predict';
+  if(btn){ btn.disabled = false; btn.innerHTML = '<span style="font-size:14px">✨</span> PREDICT'; }
 }
 
 // ===== Prediction candle chart =====
@@ -861,11 +1015,26 @@ async function loadSimTrades(){
   const el=document.getElementById('poly-trades');
   el.textContent='Loading...';
   try{
+    const panel = document.getElementById('poly-trades-panel');
+    if(!polySelectedMarketSlug){
+      if(panel) panel.classList.add('hidden');
+      el.innerHTML='';
+      return;
+    }
     const res=await fetch(API+'/api/poly/sim/trades?limit=200');
     const data=await res.json();
-    if(!Array.isArray(data)||!data.length){el.innerHTML='<div class="text-slate-400">No trades yet.</div>';return}
+    let rows = Array.isArray(data) ? data : [];
+    if(polySelectedMarketSlug){
+      rows = rows.filter(t => t && t.slug === polySelectedMarketSlug);
+    }
+    if(!rows.length){
+      if(panel) panel.classList.add('hidden');
+      el.innerHTML='';
+      return;
+    }
+    if(panel) panel.classList.remove('hidden');
     let html='<div class="max-h-56 overflow-y-auto"><table><thead><tr><th>Time</th><th>Direction</th><th>Side</th><th>Qty</th><th>Fill (¢)</th></tr></thead><tbody>';
-    data.forEach(t=>{
+    rows.forEach(t=>{
       const d=new Date((t.ts||0)*1000).toISOString().substring(11,19);
       const side=t.side==='BUY'?'<span class="badge badge-up">BUY</span>':'<span class="badge badge-down">SELL</span>';
       const os = t.outcome_side || '';
@@ -881,15 +1050,45 @@ async function loadSimPositions(){
   const el=document.getElementById('poly-positions');
   el.textContent='Loading...';
   try{
-    const res=await fetch(API+'/api/poly/sim/positions');
+    const panel = document.getElementById('poly-positions-panel');
+    const slug = polySelectedMarketSlug || '';
+    if(!slug){
+      if(panel) panel.classList.add('hidden');
+      el.innerHTML='';
+      return;
+    }
+    const url = slug ? (API+'/api/poly/sim/positions?slug='+encodeURIComponent(slug)) : (API+'/api/poly/sim/positions');
+    const res=await fetch(url);
     const data=await res.json();
-    if(!Array.isArray(data)||!data.length){el.innerHTML='<div class="text-slate-400">No positions.</div>';return}
-    let html='<table><thead><tr><th>Asset</th><th>Pos</th><th>Mark</th><th>PnL (c)</th></tr></thead><tbody>';
-    data.forEach(p=>{
+    const rows = Array.isArray(data) ? data : [];
+    if(!rows.length){
+      if(panel) panel.classList.add('hidden');
+      el.innerHTML='';
+      return;
+    }
+    if(panel) panel.classList.remove('hidden');
+    let html='<table><thead><tr><th>Side</th><th>Pos</th><th>Mark</th><th>PnL (c)</th></tr></thead><tbody>';
+    rows.forEach(p=>{
       const pnl=p.pnl_cents;
       const cls=pnl>0?'text-green-400':pnl<0?'text-red-400':'text-slate-300';
-      const shortId = p.asset_id.length > 8 ? p.asset_id.substring(0,8)+'...' : p.asset_id;
-      html+=`<tr><td class="font-mono text-xs"><span title="${p.asset_id}">${shortId}</span><button onclick="event.stopPropagation();copyToClipboard('${p.asset_id}')" class="text-blue-400 hover:text-blue-300 text-xs px-1 py-0.5 rounded hover:bg-blue-900/20 ml-1" title="Copy">📋</button></td><td>${p.pos_qty}</td><td>${p.mark_cents??''}</td><td class="font-bold ${cls}">${p.pnl_cents??''}</td></tr>`;
+      // Determine side from asset_id by checking if it contains 'up' or 'down' (case-insensitive)
+      const asset = (p.asset_id||'').toLowerCase();
+      let side = '';
+      let sideCls = '';
+      if(asset.includes('up')){
+        side = 'UP';
+        sideCls = 'text-green-400 font-semibold';
+      } else if(asset.includes('down')){
+        side = 'DOWN';
+        sideCls = 'text-red-400 font-semibold';
+      } else {
+        side = '—';
+        sideCls = 'text-slate-400';
+      }
+      const posQty = typeof p.pos_qty === 'number' ? p.pos_qty.toFixed(1) : (p.pos_qty??'');
+      const mark = typeof p.mark_cents === 'number' ? p.mark_cents.toFixed(1) : (p.mark_cents??'');
+      const pnlVal = typeof pnl === 'number' ? pnl.toFixed(1) : (p.pnl_cents??'');
+      html+=`<tr><td class="${sideCls}">${side}</td><td>${posQty}</td><td>${mark}</td><td class="font-bold ${cls}">${pnlVal}</td></tr>`;
     });
     html+='</tbody></table>';
     el.innerHTML=html;

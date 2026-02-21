@@ -15,7 +15,7 @@ class AccessLogFilter(logging.Filter):
         try:
             if hasattr(record, "args") and len(record.args) >= 3:
                 path = record.args[2]
-                if "/api/tasks/status" in path or "/favicon.ico" in path:
+                if "/api/tasks/status" in path or "/favicon.ico" in path or "/api/poly/orderbook" in path and "/latest" in path:
                     return False
         except Exception:
             pass
@@ -27,8 +27,12 @@ class AccessLogFilter(logging.Filter):
 async def filter_tasks_status_logs(request: Request, call_next):
     response = await call_next(request)
     
-    # Skip logging for /api/tasks/status and /favicon.ico if enabled
-    if FILTER_TASKS_STATUS_LOGS and (request.url.path == "/api/tasks/status" or request.url.path == "/favicon.ico"):
+    # Skip logging for /api/tasks/status, /favicon.ico, and live orderbook updates if enabled
+    if FILTER_TASKS_STATUS_LOGS and (
+        request.url.path == "/api/tasks/status"
+        or request.url.path == "/favicon.ico"
+        or (request.url.path.startswith("/api/poly/orderbook") and request.url.path.endswith("/latest"))
+    ):
         return response
     
     return response

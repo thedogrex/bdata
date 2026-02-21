@@ -51,6 +51,11 @@ function obSetHistSide(side){
   if(sideEl) sideEl.value = (s === 'DOWN' ? 'DOWN' : 'UP');
   obUpdateHistSideButtons();
   if(obMode === 'history' && obSelectedMarket){
+    // Hide chart/table to avoid flicker while loading
+    const chartPanel = document.getElementById('ob-hist-chart-panel');
+    const tablePanel = document.getElementById('ob-hist-table-panel');
+    chartPanel.classList.add('hidden');
+    tablePanel.classList.add('hidden');
     obLoadHistory();
   }
 }
@@ -105,10 +110,21 @@ function obHistNextPage(){
 
 function obSetHistView(view){
   obHistView=view;
-  document.getElementById('ob-histview-chart').className = view==='chart' ? 'btn btn-green text-xs' : 'btn btn-slate text-xs';
-  document.getElementById('ob-histview-table').className = view==='table' ? 'btn btn-green text-xs' : 'btn btn-slate text-xs';
-  document.getElementById('ob-hist-chart-panel').classList.toggle('hidden', view!=='chart');
-  document.getElementById('ob-hist-table-panel').classList.toggle('hidden', view!=='table');
+  const chartBtn = document.getElementById('ob-histview-chart');
+  const tableBtn = document.getElementById('ob-histview-table');
+  if(chartBtn) chartBtn.classList.toggle('ob-histview-active', view==='chart');
+  if(tableBtn) tableBtn.classList.toggle('ob-histview-active', view==='table');
+  const chartPanel = document.getElementById('ob-hist-chart-panel');
+  const tablePanel = document.getElementById('ob-hist-table-panel');
+  // Hide both first to avoid flicker
+  chartPanel.classList.add('hidden');
+  tablePanel.classList.add('hidden');
+  // Then show the target
+  if(view==='chart'){
+    chartPanel.classList.remove('hidden');
+  } else {
+    tablePanel.classList.remove('hidden');
+  }
 }
 
 function obStopLive(){
@@ -164,8 +180,8 @@ async function obLoadMarkets(){
     data.slice(startIdx, endIdx).forEach(m=>{
       const d=new Date((m.ts||0)*1000);
       const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',timeZone:'UTC'}) + ' ' + d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'});
-      const status = m.status || (m.closed ? '[DONE]' : 'open');
-      const statusClass = status==='[DONE]' ? 'badge badge-queue' : 'badge badge-done';
+      const status = m.status || (m.closed ? 'ended' : 'open');
+      const statusClass = status==='ended' ? 'badge badge-queue' : 'badge badge-done';
       const resolved = (m.resolved_outcome||'');
       const resolvedBadge = resolved === 'UP'
         ? '<span style="margin-left:8px;color:#22c55e;font-weight:700">▲</span>'
@@ -220,7 +236,7 @@ async function obSelectMarket(slug){
     obSelectedMarket=m;
 
     const isDone = m.closed || (m.ts && (m.ts+300) < Math.floor(Date.now()/1000));
-    const statusStr = isDone ? '<span class="badge badge-queue">[DONE]</span>' : '<span class="badge badge-done">open</span>';
+    const statusStr = isDone ? '<span class="badge badge-queue">ended</span>' : '<span class="badge badge-done">open</span>';
     const d = new Date((m.ts||0)*1000);
     const dateStr = d.toLocaleDateString('ru-RU',{timeZone:'UTC'}) + ' ' + d.toLocaleTimeString('ru-RU',{timeZone:'UTC'});
     document.getElementById('ob-market-info').innerHTML = `<span class="font-mono">${m.slug}</span> · ${dateStr} · ${statusStr}`;
@@ -311,6 +327,14 @@ async function obLoadHistory(){
     if(!allSnapshots.length){
       listEl.innerHTML='<span class="text-slate-400">No snapshots in this range.</span>';
       obDrawChart();
+      // Restore view after drawing
+      const chartPanel = document.getElementById('ob-hist-chart-panel');
+      const tablePanel = document.getElementById('ob-hist-table-panel');
+      if(obHistView === 'chart'){
+        chartPanel.classList.remove('hidden');
+      } else {
+        tablePanel.classList.remove('hidden');
+      }
       return;
     }
 
@@ -318,6 +342,14 @@ async function obLoadHistory(){
 
     // Draw chart
     obDrawChart();
+    // Restore view after drawing
+    const chartPanel = document.getElementById('ob-hist-chart-panel');
+    const tablePanel = document.getElementById('ob-hist-table-panel');
+    if(obHistView === 'chart'){
+      chartPanel.classList.remove('hidden');
+    } else {
+      tablePanel.classList.remove('hidden');
+    }
   }catch(e){
     listEl.innerHTML='<span class="text-red-400">Error loading history.</span>';
   }
@@ -433,7 +465,7 @@ function obDrawChart(){
       ctx.fillStyle='#f59e0b';
       ctx.font='bold 10px monospace';
       ctx.textAlign='center';
-      ctx.fillText('▼ MARKET START',sx,paddingTop-6);
+      ctx.fillText('MARKET',sx,paddingTop-6);
       ctx.restore();
     }
   }

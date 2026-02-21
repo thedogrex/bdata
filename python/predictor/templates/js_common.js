@@ -189,7 +189,7 @@ function applyPreset(jsonStr){
 }
 
 // ===== TABS =====
-const TABS=['backtest','bruteforce','history','best','poly','orderbooks'];
+const TABS=['backtest','bruteforce','history','best','poly'];
 function switchTab(tab){
   TABS.forEach(t=>{
     document.getElementById('panel-'+t).classList.toggle('hidden',t!==tab);
@@ -204,9 +204,8 @@ function switchTab(tab){
   else{
     clearPolySelectionComplete();
     stopPolyOrderBookUpdates();
+    if(typeof stopLiveMarketPoll === 'function') stopLiveMarketPoll();
   }
-  if(tab==='orderbooks'){obLoadMarkets();}
-  else{obStopAll();}
 }
 
 // ===== BACKTEST =====

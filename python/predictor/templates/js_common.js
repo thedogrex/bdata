@@ -365,13 +365,16 @@ async function loadHistory(){
       html+=`<details class="mb-3 p-3 rounded-lg" style="background:#0f172a;border:1px solid #334155">
         <summary class="cursor-pointer flex items-center justify-between">
           <span><span class="badge badge-bf">BF#${bfId}</span> <b class="ml-2">${g.strategy}</b> <span class="text-slate-400 text-xs ml-2">${g.runs.length} runs</span></span>
-          <span class="${accClass(best.acc)} font-bold">Best: ${best.acc}%</span>
+          <span class="flex items-center gap-3">
+            <span class="${accClass(best.acc)} font-bold">Best: ${best.acc}%</span>
+            <button onclick="event.stopPropagation();deleteBruteforceGroup(${bfId})" class="text-red-400 text-xs hover:underline">remove pack</button>
+          </span>
         </summary>
         <table class="mt-2"><thead><tr><th>ID</th><th>Params</th><th>Win</th><th>Horizons</th><th>Time</th><th></th></tr></thead><tbody>`;
       g.runs.forEach(r=>{
         const hs=Object.entries(r.horizons||{}).map(([h,d])=>d.error?`H${h}:err`:`H${h}:<span class="${accClass(d.accuracy_pct)}">${d.accuracy_pct}%</span>`).join(' | ');
         const ps=JSON.stringify(r.params||{}).substring(0,80);
-        html+=`<tr class="cursor-pointer hover:bg-slate-700" onclick="event.stopPropagation();showDetail(${r.id})"><td>${r.id}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td><td>${r.window_size||'?'}</td><td>${hs}</td><td>${r.total_time_sec}s</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
+        html+=`<tr class="cursor-pointer hover:bg-slate-700" onclick="event.stopPropagation();showDetail(${r.id})"><td>${r.id}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td><td>${r.window_size||'?'} </td><td>${hs}</td><td>${r.total_time_sec}s</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
       html+=`</tbody></table></details>`;
     });
     if(standalone.length){
@@ -385,6 +388,13 @@ async function loadHistory(){
 }
 async function showDetail(id){try{const res=await fetch(API+'/api/history/'+id);const data=await res.json();if(data.error){alert(data.error);return}switchTab('backtest');renderResult(data,'bt-results');document.getElementById('bt-results').scrollIntoView({behavior:'smooth',block:'start'})}catch(e){alert(e.message)}}
 async function deleteRun(id){if(!confirm('Delete #'+id+'?'))return;await fetch(API+'/api/history/'+id,{method:'DELETE'});loadHistory()}
+async function deleteBruteforceGroup(bfId){
+  if(!confirm('Remove brute-force pack BF#'+bfId+' and ALL its runs?'))return;
+  const res=await fetch(API+'/api/history/bruteforce/'+bfId,{method:'DELETE'});
+  const data=await res.json();
+  if(data&&data.error){alert(data.error);return}
+  loadHistory();
+}
 async function clearAllHistory(){if(!confirm('Delete ALL?'))return;await fetch(API+'/api/history',{method:'DELETE'});loadHistory()}
 
 // ===== BEST =====

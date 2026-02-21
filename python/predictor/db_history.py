@@ -246,6 +246,37 @@ async def delete_run(run_id: int) -> bool:
     return True
 
 
+async def delete_bruteforce_group(bruteforce_id: int) -> dict:
+    run_rows = await db.fetchall(
+        "SELECT id FROM backtest_runs WHERE bruteforce_id = %s",
+        (bruteforce_id,)
+    )
+    run_ids = [r[0] for r in run_rows if r and r[0] is not None]
+    deleted_runs = len(run_ids)
+
+    if run_ids:
+        placeholders = ",".join(["%s"] * len(run_ids))
+        await db.execute(
+            f"DELETE FROM backtest_horizons WHERE run_id IN ({placeholders})",
+            tuple(run_ids),
+        )
+    await db.execute(
+        "DELETE FROM backtest_runs WHERE bruteforce_id = %s",
+        (bruteforce_id,),
+    )
+
+    await db.execute(
+        "DELETE FROM bruteforce_sessions WHERE id = %s",
+        (bruteforce_id,),
+    )
+
+    return {
+        "status": "deleted",
+        "bruteforce_id": bruteforce_id,
+        "deleted_runs": deleted_runs,
+    }
+
+
 async def clear_history() -> int:
     await db.execute("DELETE FROM backtest_horizons", None)
     await db.execute("DELETE FROM backtest_runs", None)

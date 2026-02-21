@@ -20,6 +20,7 @@ from predictor.db_history import (
     save_backtest_run, get_history, get_history_detail,
     delete_run, clear_history,
     get_bruteforce_sessions, get_bruteforce_session_by_id, get_best_runs,
+    delete_bruteforce_group,
 )
 from predictor.bruteforce import run_bruteforce, resume_bruteforce, get_default_grid, build_combos
 from predictor.task_manager import task_mgr
@@ -369,6 +370,11 @@ async def api_delete_run(run_id: int):
 async def api_clear_history():
     await clear_history()
     return {"status": "cleared"}
+
+
+@app.delete("/api/history/bruteforce/{bf_id}")
+async def api_delete_bruteforce_group(bf_id: int):
+    return await delete_bruteforce_group(bf_id)
 
 
 @app.get("/api/best")

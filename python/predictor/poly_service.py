@@ -298,6 +298,7 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
     last_future_update = 0
     last_market_refresh = 0
     last_resolution_scan = 0
+    last_active_missing_refresh = 0
     last_seen_active_ts: Optional[int] = None
     autopredicted_slugs: set = set()  # slugs we already auto-predicted
     autopredicted_ended_ts: set[int] = set()  # ended market ts we already processed
@@ -370,17 +371,37 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     seconds_to_start = int(ts) - int(current_time)
                     if 0 < seconds_to_start <= 20 * 60:
                         future_markets.append((slug, ts))
+
+            # If active market isn't present in DB (or missing outcomes), refresh it periodically.
+            # Without outcomes in poly_outcomes, snapshots can't be saved.
+            if not active_markets and current_time - last_active_missing_refresh >= 10:
+                last_active_missing_refresh = current_time
+                try:
+                    await refresh_tracked_markets(now=int(current_ts), count=2)
+                except Exception as e:
+                    print(f"[poly] refresh_tracked_markets for active failed: {e}")
             
             # Update active market every 3 seconds
-            if current_time - last_active_update >= orderbook_interval_sec and active_markets:
-                for slug, ts in active_markets[:1]:  # Only current active market
-                    await _take_orderbook_snapshot_for_slug(slug)
-                last_active_update = current_time
+            if current_time - last_active_update >= orderbook_interval_sec:
+                if active_markets:
+                    for slug, ts in active_markets[:1]:  # Only current active market
+                        try:
+                            await _take_orderbook_snapshot_for_slug(slug)
+                        except Exception as e:
+                            print(f"[poly] active orderbook snapshot failed (slug={slug}): {e}")
+                    last_active_update = current_time
+                else:
+                    # Log when active market is missing to help diagnose
+                    if current_time % 10 == 0:  # Log every 10 seconds to avoid spam
+                        print(f"[poly] No active market found (current_ts={current_ts})")
             
             # Update future markets every 10 seconds (next 4 markets)
             if current_time - last_future_update >= 10 and future_markets:
                 for slug, ts in future_markets[:4]:  # Next 4 future markets
-                    await _take_orderbook_snapshot_for_slug(slug)
+                    try:
+                        await _take_orderbook_snapshot_for_slug(slug)
+                    except Exception as e:
+                        print(f"[poly] future orderbook snapshot failed (slug={slug}): {e}")
                 last_future_update = current_time
 
             # Keep sets bounded to avoid memory leak

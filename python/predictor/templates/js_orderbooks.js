@@ -248,7 +248,16 @@ async function obSelectMarket(slug){
     }
 
     const sideSel = document.getElementById('ob-hist-side');
-    if(sideSel && !sideSel.value) sideSel.value = 'UP';
+    if(sideSel){
+      const pred = String(m.prediction_outcome || '').toUpperCase();
+      const nowUtc = Math.floor(Date.now() / 1000);
+      const notStartedYet = !!(m.ts && nowUtc < Number(m.ts));
+      if(notStartedYet && (pred === 'UP' || pred === 'DOWN')){
+        sideSel.value = pred;
+      } else if(!sideSel.value){
+        sideSel.value = 'UP';
+      }
+    }
     obUpdateHistSideButtons();
 
     if(obMode==='live' && !isDone) obStartLive();
@@ -291,6 +300,28 @@ async function obLoadHistory(){
   const listEl=document.getElementById('ob-hist-list');
   listEl.textContent='Loading...';
   document.getElementById('ob-hist-detail').innerHTML='<span class="text-slate-400">Click a snapshot to view.</span>';
+
+  // If we have a defined prediction for this market, auto-select that side for AskPriceHistory.
+  try{
+    let predSide = String(obSelectedMarket.prediction_outcome || '').toUpperCase();
+    if(predSide !== 'UP' && predSide !== 'DOWN'){
+      try{
+        const prRes = await fetch(API + '/api/poly/pred_runs/' + encodeURIComponent(obSelectedMarket.slug) + '?limit=50');
+        const runs = await prRes.json();
+        if(Array.isArray(runs)){
+          const r0 = runs.find(r => r && !r.error && (String(r.prediction || '').toUpperCase() === 'UP' || String(r.prediction || '').toUpperCase() === 'DOWN'));
+          if(r0) predSide = String(r0.prediction || '').toUpperCase();
+        }
+      }catch(e){/* ignore */}
+    }
+    if(predSide === 'UP' || predSide === 'DOWN'){
+      const sideEl = document.getElementById('ob-hist-side');
+      if(sideEl && sideEl.value !== predSide){
+        sideEl.value = predSide;
+        obUpdateHistSideButtons();
+      }
+    }
+  }catch(e){/* ignore */}
 
   const side = (document.getElementById('ob-hist-side')?.value || 'UP').toUpperCase();
   const pair = findUpDownOutcomes(obSelectedMarket);
@@ -345,6 +376,12 @@ async function obLoadHistory(){
 
     obRenderHistoryPage();
     obDrawChart();
+
+    // Auto-scroll chart to the latest data point
+    const chartContainer = document.getElementById('ob-chart-container');
+    if(chartContainer){
+      chartContainer.scrollLeft = chartContainer.scrollWidth;
+    }
   }catch(e){
     listEl.innerHTML='<span class="text-red-400">Error loading history.</span>';
   }

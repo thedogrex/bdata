@@ -204,7 +204,16 @@ function polySetDetailTab(tab, isEnded = null){
         obSelectedSlug = polySelectedMarket.slug;
         obMode = 'history';
         const sideEl = document.getElementById('ob-hist-side');
-        if(sideEl && !sideEl.value) sideEl.value = 'UP';
+        if(sideEl){
+          const pred = String(polySelectedMarket.prediction_outcome || '').toUpperCase();
+          const nowUtc = Math.floor(Date.now() / 1000);
+          const notStartedYet = !!(polySelectedMarket.ts && nowUtc < Number(polySelectedMarket.ts));
+          if(notStartedYet && (pred === 'UP' || pred === 'DOWN')){
+            sideEl.value = pred;
+          } else if(!sideEl.value){
+            sideEl.value = 'UP';
+          }
+        }
         if(typeof obUpdateHistSideButtons === 'function') obUpdateHistSideButtons();
         if(typeof obLoadHistory === 'function') obLoadHistory();
         // Pre-fetch pred_runs so markers appear on the ask price chart

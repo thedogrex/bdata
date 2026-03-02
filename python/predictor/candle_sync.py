@@ -31,7 +31,40 @@ INTERVAL_MS = 5 * 60 * 1000          # 300 000 ms
 INTERVAL_US = 5 * 60 * 1_000_000     # 300 000 000 us
 MAX_LIMIT = 1000                      # Binance max per request
 
+
+_SYNC_STATUS = {
+    "running": False,
+    "phase": None,
+    "message": "",
+    "start_ms": None,
+    "end_ms": None,
+    "cursor_ms": None,
+    "expected_candles": None,
+    "downloaded_candles": 0,
+    "inserted_rows": 0,
+    "updated_ts": 0,
+}
+
 db = DbProvider()
+
+
+def get_candle_sync_status() -> dict:
+    return dict(_SYNC_STATUS)
+
+
+def reset_candle_sync_status() -> None:
+    _SYNC_STATUS.update({
+        "running": False,
+        "phase": None,
+        "message": "",
+        "start_ms": None,
+        "end_ms": None,
+        "cursor_ms": None,
+        "expected_candles": None,
+        "downloaded_candles": 0,
+        "inserted_rows": 0,
+        "updated_ts": int(time.time()),
+    })
 
 
 async def fetch_and_store_klines(
@@ -39,6 +72,7 @@ async def fetch_and_store_klines(
     end_ms: int,
     symbol: str = SYMBOL,
     interval: str = INTERVAL,
+    limit: int = 100,
 ) -> int:
     """Download klines from Binance REST API and INSERT IGNORE into c_5m.
 
@@ -58,7 +92,7 @@ async def fetch_and_store_klines(
             "interval": interval,
             "startTime": cursor_ms,
             "endTime": end_ms,
-            "limit": MAX_LIMIT,
+            "limit": int(limit) if int(limit) > 0 else 100,
         }
 
         try:
@@ -69,10 +103,25 @@ async def fetch_and_store_klines(
             data = resp.json()
         except Exception as e:
             print(f"[candle_sync] Binance API error: {e}")
+            _SYNC_STATUS.update({
+                "running": False,
+                "phase": "error",
+                "message": f"Binance API error: {e}",
+                "updated_ts": int(time.time()),
+            })
             break
 
         if not data:
             break
+
+        _SYNC_STATUS.update({
+            "running": True,
+            "phase": "downloading",
+            "cursor_ms": int(cursor_ms),
+            "downloaded_candles": int(_SYNC_STATUS.get("downloaded_candles", 0)) + int(len(data)),
+            "message": f"Downloading candles... (+{len(data)})",
+            "updated_ts": int(time.time()),
+        })
 
         for k in data:
             # Binance kline format:
@@ -101,6 +150,11 @@ async def fetch_and_store_klines(
                 print_query=False,
             )
             total_inserted += 1
+
+        _SYNC_STATUS.update({
+            "inserted_rows": int(_SYNC_STATUS.get("inserted_rows", 0)) + int(len(data)),
+            "updated_ts": int(time.time()),
+        })
 
         # Advance cursor past the last candle we received
         last_open_ms = int(data[-1][0])
@@ -148,7 +202,26 @@ async def sync_candles_up_to(
         return {"status": "ok", "message": "No gap to fill", "downloaded": 0}
 
     print(f"[candle_sync] Downloading candles from {start_ms} to {end_ms} (ms)")
-    count = await fetch_and_store_klines(start_ms, end_ms)
+    reset_candle_sync_status()
+    expected = int(max(0, (end_ms - start_ms) // INTERVAL_MS + 1))
+    _SYNC_STATUS.update({
+        "running": True,
+        "phase": "sync",
+        "message": "Starting candle synchronization...",
+        "start_ms": int(start_ms),
+        "end_ms": int(end_ms),
+        "cursor_ms": int(start_ms),
+        "expected_candles": expected,
+        "updated_ts": int(time.time()),
+    })
+    count = await fetch_and_store_klines(start_ms, end_ms, limit=100)
+
+    _SYNC_STATUS.update({
+        "running": False,
+        "phase": "done",
+        "message": f"Downloaded {count} candles",
+        "updated_ts": int(time.time()),
+    })
 
     return {
         "status": "ok",

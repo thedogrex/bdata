@@ -1,6 +1,8 @@
 import asyncio
 import json
 import time
+import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -232,26 +234,58 @@ async def _try_autopredict(slug: str) -> None:
         settings = await get_settings()
         if not settings.get("autopredict"):
             return
-        # Skip if already predicted
+        # Skip if already predicted (any stored runs)
         row = await db.fetchone(
-            "SELECT prediction_outcome FROM poly_markets WHERE slug=%s", (slug,)
+            "SELECT 1 FROM poly_pred_runs WHERE slug=%s LIMIT 1", (slug,)
         )
-        if row and row[0]:
+        if row:
             return
-        strategy = settings.get("strategy", "rsi_mean_reversion")
-        params = settings.get("params")
-        window_size = settings.get("window_size", 1000)
-        print(f"[autopredict] Running prediction for {slug} (strategy={strategy}, window={window_size})")
-        result = await predict_for_market(
-            slug=slug,
-            strategy_name=strategy,
-            strategy_params=params,
-            window_size=window_size,
-        )
-        pred = result.get("prediction", "?")
-        print(f"[autopredict] {slug} -> {pred} (prob={result.get('probability', '?')})")
+        print(f"[autopredict] Running batch prediction for {slug}")
+        await batch_predict_for_market(slug=slug, quantum=False, table="c_5m")
     except Exception as e:
         print(f"[autopredict] Error for {slug}: {e}")
+
+
+async def _try_autopredict_after_end(ended_market_ts: int) -> None:
+    """After a market ends (ts), predict for the market starting +5 minutes (H2)."""
+    try:
+        settings = await get_settings()
+        if not settings.get("autopredict"):
+            return
+
+        min_target_ts = int(ended_market_ts) + 300
+        targets = await db.fetchall(
+            """
+            SELECT slug, ts
+            FROM poly_markets
+            WHERE closed=0 AND ts >= %s
+            ORDER BY ts ASC
+            LIMIT 1
+            """,
+            (int(min_target_ts),),
+        )
+
+        # If we don't yet have the upcoming market, refresh and retry once.
+        if not targets or len(targets) < 1:
+            try:
+                await refresh_tracked_markets()
+            except Exception:
+                pass
+            targets = await db.fetchall(
+                """
+                SELECT slug, ts
+                FROM poly_markets
+                WHERE closed=0 AND ts >= %s
+                ORDER BY ts ASC
+                LIMIT 1
+                """,
+                (int(min_target_ts),),
+            )
+
+        for slug, _ts in targets:
+            await _try_autopredict(str(slug))
+    except Exception as e:
+        print(f"[autopredict] after_end error (ended_ts={ended_market_ts}): {e}")
 
 
 async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) -> None:
@@ -266,6 +300,7 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
     last_resolution_scan = 0
     last_seen_active_ts: Optional[int] = None
     autopredicted_slugs: set = set()  # slugs we already auto-predicted
+    autopredicted_ended_ts: set[int] = set()  # ended market ts we already processed
     
     while not stop_event.is_set():
         try:
@@ -285,11 +320,19 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
             if last_seen_active_ts is None:
                 last_seen_active_ts = current_ts
             elif current_ts != last_seen_active_ts:
-                ended_slug = _slug_for_ts(int(last_seen_active_ts))
+                ended_ts = int(last_seen_active_ts)
+                ended_slug = _slug_for_ts(ended_ts)
                 try:
                     await _take_orderbook_snapshot_for_slug(ended_slug)
                 except Exception:
                     pass
+                # Backend autopredict: 1 second after end, run for markets at +10 minutes (H2) and next.
+                if ended_ts not in autopredicted_ended_ts:
+                    autopredicted_ended_ts.add(ended_ts)
+                    try:
+                        await _try_autopredict_after_end(ended_ts)
+                    except Exception:
+                        pass
                 last_seen_active_ts = current_ts
             
             # Get all markets (open only, skip closed/past)
@@ -327,16 +370,11 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     await _take_orderbook_snapshot_for_slug(slug)
                 last_future_update = current_time
 
-            # Autopredict: when a new market just became active (within 10s), predict it
-            for slug, ts in active_markets:
-                if slug not in autopredicted_slugs:
-                    seconds_since_start = current_time - int(ts)
-                    if 0 <= seconds_since_start <= 15:
-                        autopredicted_slugs.add(slug)
-                        await _try_autopredict(slug)
-            # Prune old slugs to avoid memory leak (keep last 50)
+            # Keep sets bounded to avoid memory leak
             if len(autopredicted_slugs) > 50:
                 autopredicted_slugs = set(list(autopredicted_slugs)[-30:])
+            if len(autopredicted_ended_ts) > 100:
+                autopredicted_ended_ts = set(list(autopredicted_ended_ts)[-60:])
 
             # Resolution polling: once per minute scan DONE markets without resolution.
             if current_time - last_resolution_scan >= 60:
@@ -364,7 +402,8 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
             pass
 
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=orderbook_interval_sec)
+            # Tick every 1s so backend countdown/autopredict is responsive.
+            await asyncio.wait_for(stop_event.wait(), timeout=1)
         except asyncio.TimeoutError:
             continue
 
@@ -412,12 +451,52 @@ async def save_settings(autopredict: bool, strategy: str, params: Optional[dict]
 async def list_markets(limit: int = 50) -> List[Dict[str, Any]]:
     current_ts = _get_current_ts()
     rows = await db.fetchall(
-        "SELECT slug, ts, end_date, question, closed, resolved_outcome, prediction_outcome, prediction_ts FROM poly_markets ORDER BY ts DESC LIMIT %s",
+        """
+        SELECT
+            pm.slug,
+            pm.ts,
+            pm.end_date,
+            pm.question,
+            pm.closed,
+            pm.resolved_outcome,
+            pm.prediction_outcome,
+            pm.prediction_ts,
+            MAX(CASE WHEN pr.id IS NULL THEN 0 ELSE 1 END) AS has_pred_any,
+            MAX(CASE WHEN pr.id IS NOT NULL AND pr.prediction IN ('UP','DOWN') THEN 1 ELSE 0 END) AS has_pred_defined,
+            MAX(
+                CASE
+                    WHEN pr.id IS NOT NULL
+                     AND pr.prediction IN ('UP','DOWN')
+                     AND pm.resolved_outcome IN ('UP','DOWN')
+                     AND pr.prediction = pm.resolved_outcome
+                    THEN 1 ELSE 0
+                END
+            ) AS has_pred_correct
+        FROM poly_markets pm
+        LEFT JOIN poly_pred_runs pr ON pr.slug = pm.slug
+        GROUP BY
+            pm.slug, pm.ts, pm.end_date, pm.question, pm.closed,
+            pm.resolved_outcome, pm.prediction_outcome, pm.prediction_ts
+        ORDER BY pm.ts DESC
+        LIMIT %s
+        """,
         (int(limit),),
     )
     out: List[Dict[str, Any]] = []
     for r in rows:
-        slug, ts, end_date, question, closed, resolved_outcome, prediction_outcome, prediction_ts = r
+        (
+            slug,
+            ts,
+            end_date,
+            question,
+            closed,
+            resolved_outcome,
+            prediction_outcome,
+            prediction_ts,
+            has_pred_any,
+            has_pred_defined,
+            has_pred_correct,
+        ) = r
         status = "open"
         
         # Mark past markets as ended
@@ -436,6 +515,22 @@ async def list_markets(limit: int = 50) -> List[Dict[str, Any]]:
             "resolved_outcome": resolved_outcome,
             "prediction_outcome": prediction_outcome,
             "prediction_ts": int(prediction_ts) if prediction_ts is not None else None,
+            "has_pred": bool(has_pred_any),
+            "has_pred_defined": bool(has_pred_defined),
+            "has_pred_correct": bool(has_pred_correct),
+            "pred_badge": (
+                None
+                if not has_pred_any
+                else (
+                    "green"
+                    if (resolved_outcome in ("UP", "DOWN") and has_pred_defined and has_pred_correct)
+                    else (
+                        "red"
+                        if (resolved_outcome in ("UP", "DOWN") and has_pred_defined and not has_pred_correct)
+                        else "neutral"
+                    )
+                )
+            ),
             "status": status
         })
     return out
@@ -763,6 +858,7 @@ async def predict_for_market(
     strategy_name: str = "rsi_mean_reversion",
     strategy_params: Optional[Dict[str, Any]] = None,
     window_size: int = 1000,
+    horizon: int = 1,
     table: str = "c_5m",
 ) -> Dict[str, Any]:
     """Run a single-candle prediction for the candle at the market's timestamp.
@@ -782,7 +878,9 @@ async def predict_for_market(
     from predictor.features import add_technical_features
     from predictor.strategies import get_strategy, STRATEGY_REGISTRY
     from predictor.data_loader import add_direction
-    from predictor.candle_sync import sync_candles_up_to, check_and_fill_gaps
+    from predictor.candle_sync import sync_candles_up_to
+
+    horizon = max(1, min(3, int(horizon)))
 
     if strategy_name not in STRATEGY_REGISTRY:
         return {"error": f"Unknown strategy: {strategy_name}"}
@@ -848,17 +946,28 @@ async def predict_for_market(
     rows = list(reversed(rows))
 
     # --- Step 2b: Verify last candle aligns with market_ts ---
+    # For horizon H, we can tolerate up to (H-1) missing candles at the end,
+    # because the model predicts H candles ahead of the signal candle.
+    #   H1 → needs exact candle at market_ts  (0 missing allowed)
+    #   H2 → can work with 1 missing candle   (signal shifted back by 1)
+    #   H3 → can work with 1-2 missing candles (signal shifted back by 1-2)
     last_candle_open_us = int(rows[-1][0])
-    if last_candle_open_us != market_ts_us:
+    missing_candles = max(0, int((market_ts_us - last_candle_open_us) / interval_us))
+    shifted = missing_candles > 0
+
+    if missing_candles > 0 and missing_candles >= horizon:
         last_dt = pd.Timestamp(last_candle_open_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
         market_dt = pd.Timestamp(market_ts_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
         diff_min = round((market_ts_us - last_candle_open_us) / 1_000_000 / 60, 1)
         return {
             "error": f"Candle at market timestamp not found. Market ts: {market_dt}, "
                      f"latest candle: {last_dt} ({diff_min} min before). "
-                     f"The exact 5m candle for this market is missing.",
+                     f"Missing {missing_candles} candle(s) — need at most {horizon - 1} "
+                     f"missing for H{horizon}.",
             "market_ts_us": market_ts_us,
             "last_candle_us": last_candle_open_us,
+            "missing_candles": missing_candles,
+            "horizon": horizon,
             **sync_info,
         }
 
@@ -906,9 +1015,9 @@ async def predict_for_market(
     df_predict = df_feat.iloc[[-1]].reset_index(drop=True)
 
     strategy = get_strategy(strategy_name, strategy_params)
-    strategy.fit(df_train, horizon=1)
-    pred_arr = strategy.predict(df_predict, horizon=1)
-    prob_arr = strategy.predict_proba(df_predict, horizon=1)
+    strategy.fit(df_train, horizon=horizon)
+    pred_arr = strategy.predict(df_predict, horizon=horizon)
+    prob_arr = strategy.predict_proba(df_predict, horizon=horizon)
 
     pred = int(pred_arr[0])
     prob = float(prob_arr[0])
@@ -942,8 +1051,8 @@ async def predict_for_market(
         r_bb = float(np.nan_to_num(row.get("bb_pos", 0.5), nan=0.5))
         # Re-predict each context candle to show what backtest would have said
         df_k = df_feat.iloc[[k]].reset_index(drop=True)
-        k_pred = int(strategy.predict(df_k, horizon=1)[0])
-        k_prob = float(strategy.predict_proba(df_k, horizon=1)[0])
+        k_pred = int(strategy.predict(df_k, horizon=horizon)[0])
+        k_prob = float(strategy.predict_proba(df_k, horizon=horizon)[0])
         tail_detail.append({
             "dt": dt_str,
             "rsi": round(r_rsi, 1),
@@ -1002,6 +1111,7 @@ async def predict_for_market(
         "strategy": strategy_name,
         "params": strategy.params,
         "window_size": window_size,
+        "horizon": horizon,
         "candles_used": need,
         "last_candle_ts": last_candle_ts_us,
         "last_candle_dt": last_candle_dt,
@@ -1012,9 +1122,16 @@ async def predict_for_market(
         "market_slug": slug,
         "market_ts": market_ts,
         "prediction_ts": int(prediction_ts),
+        "shifted": shifted,
+        "missing_candles": missing_candles,
         "diag": diag,
         **sync_info,
     }
+    if shifted:
+        ret["shift_note"] = (
+            f"Signal candle shifted back by {missing_candles} "
+            f"({missing_candles * 5} min). Using H{horizon} to compensate."
+        )
 
     # Persist full payload for instant UI analysis later
     try:
@@ -1046,6 +1163,425 @@ async def get_saved_prediction(slug: str) -> Dict[str, Any]:
         return json.loads(row[0])
     except Exception:
         return {"error": "Prediction payload corrupted"}
+
+
+# ==================== PREDICTION TEMPLATES ====================
+
+async def list_pred_templates() -> List[Dict[str, Any]]:
+    rows = await db.fetchall(
+        "SELECT id, name, strategy, params_json, window_size, horizon, active, sort_order "
+        "FROM poly_pred_templates ORDER BY sort_order ASC, id ASC"
+    )
+    out = []
+    for r in rows:
+        tid, name, strategy, params_json, window_size, horizon, active, sort_order = r
+        params = None
+        if params_json:
+            try:
+                params = json.loads(params_json)
+            except Exception:
+                pass
+        out.append({
+            "id": int(tid),
+            "name": name,
+            "strategy": strategy,
+            "params": params,
+            "window_size": int(window_size) if window_size else 1000,
+            "horizon": int(horizon) if horizon else 1,
+            "active": bool(active),
+            "sort_order": int(sort_order) if sort_order else 0,
+        })
+    return out
+
+
+async def create_pred_template(
+    name: str,
+    strategy: str = "rsi_mean_reversion",
+    params: Optional[Dict] = None,
+    window_size: int = 1000,
+    horizon: int = 1,
+) -> Dict[str, Any]:
+    params_json = json.dumps(params, ensure_ascii=False) if params else None
+    horizon = max(1, min(3, int(horizon)))
+    await db.execute(
+        "INSERT INTO poly_pred_templates (name, strategy, params_json, window_size, horizon, active, sort_order) "
+        "VALUES (%s, %s, %s, %s, %s, 1, 0)",
+        (name, strategy, params_json, int(window_size), horizon),
+    )
+    return {"status": "ok"}
+
+
+async def update_pred_template(
+    template_id: int,
+    name: Optional[str] = None,
+    strategy: Optional[str] = None,
+    params: Optional[Dict] = None,
+    window_size: Optional[int] = None,
+    horizon: Optional[int] = None,
+    active: Optional[bool] = None,
+    sort_order: Optional[int] = None,
+) -> Dict[str, Any]:
+    sets = []
+    vals = []
+    if name is not None:
+        sets.append("name=%s"); vals.append(name)
+    if strategy is not None:
+        sets.append("strategy=%s"); vals.append(strategy)
+    if params is not None:
+        sets.append("params_json=%s"); vals.append(json.dumps(params, ensure_ascii=False))
+    if window_size is not None:
+        sets.append("window_size=%s"); vals.append(int(window_size))
+    if horizon is not None:
+        sets.append("horizon=%s"); vals.append(max(1, min(3, int(horizon))))
+    if active is not None:
+        sets.append("active=%s"); vals.append(int(active))
+    if sort_order is not None:
+        sets.append("sort_order=%s"); vals.append(int(sort_order))
+    if not sets:
+        return {"status": "nothing to update"}
+    vals.append(int(template_id))
+    await db.execute(
+        f"UPDATE poly_pred_templates SET {', '.join(sets)} WHERE id=%s",
+        tuple(vals),
+    )
+    return {"status": "ok"}
+
+
+async def delete_pred_template(template_id: int) -> Dict[str, Any]:
+    await db.execute("DELETE FROM poly_pred_templates WHERE id=%s", (int(template_id),))
+    return {"status": "ok"}
+
+
+async def toggle_pred_template(template_id: int) -> Dict[str, Any]:
+    await db.execute(
+        "UPDATE poly_pred_templates SET active = NOT active WHERE id=%s",
+        (int(template_id),),
+    )
+    return {"status": "ok"}
+
+
+# ==================== BATCH / QUANTUM PREDICT ====================
+
+async def batch_predict_for_market(
+    slug: str,
+    quantum: bool = False,
+    table: str = "c_5m",
+) -> Dict[str, Any]:
+    """Run predictions for all active templates on a market.
+    If quantum=True, simulate missing candle as green/red scenarios.
+    Records each run (with timing) to poly_pred_runs.
+    """
+    templates = await list_pred_templates()
+    active = [t for t in templates if t["active"]]
+    if not active:
+        return {"error": "No active prediction templates. Create and enable at least one."}
+
+    batch_id = str(uuid.uuid4())
+    results = []
+
+    _RUN_SQL = """
+        INSERT INTO poly_pred_runs
+          (slug, batch_id, template_id, template_name, strategy, params_json,
+           window_size, horizon, quantum, quantum_scenario,
+           prediction, probability, started_at, finished_at, duration_ms, error, result_json)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """
+
+    for tpl in active:
+        params_json_str = json.dumps(tpl["params"], ensure_ascii=False) if tpl["params"] else None
+        started_at = datetime.utcnow()
+
+        if quantum:
+            qr = await quantum_predict_for_market(
+                slug=slug,
+                strategy_name=tpl["strategy"],
+                strategy_params=tpl["params"],
+                window_size=tpl["window_size"],
+                horizon=tpl["horizon"],
+                table=table,
+            )
+            finished_at = datetime.utcnow()
+            duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+            results.append({
+                "template_id": tpl["id"],
+                "template_name": tpl["name"],
+                "horizon": tpl["horizon"],
+                "quantum": True,
+                "result": qr,
+            })
+            if qr.get("error"):
+                await db.execute(_RUN_SQL, (
+                    slug, batch_id, tpl["id"], tpl["name"], tpl["strategy"], params_json_str,
+                    tpl["window_size"], tpl["horizon"], 1, None,
+                    None, None, started_at, finished_at, duration_ms, qr["error"], None,
+                ))
+            else:
+                for sc_name, sc in (qr.get("scenarios") or {}).items():
+                    await db.execute(_RUN_SQL, (
+                        slug, batch_id, tpl["id"], tpl["name"], tpl["strategy"], params_json_str,
+                        tpl["window_size"], tpl["horizon"], 1, sc_name,
+                        sc.get("prediction"), sc.get("probability"),
+                        started_at, finished_at, duration_ms, None,
+                        json.dumps(sc, ensure_ascii=False),
+                    ))
+        else:
+            r = await predict_for_market(
+                slug=slug,
+                strategy_name=tpl["strategy"],
+                strategy_params=tpl["params"],
+                window_size=tpl["window_size"],
+                horizon=tpl["horizon"],
+                table=table,
+            )
+            finished_at = datetime.utcnow()
+            duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+            results.append({
+                "template_id": tpl["id"],
+                "template_name": tpl["name"],
+                "horizon": tpl["horizon"],
+                "quantum": False,
+                "result": r,
+            })
+            await db.execute(_RUN_SQL, (
+                slug, batch_id, tpl["id"], tpl["name"], tpl["strategy"], params_json_str,
+                tpl["window_size"], tpl["horizon"], 0, None,
+                r.get("prediction") if not r.get("error") else None,
+                r.get("probability") if not r.get("error") else None,
+                started_at, finished_at, duration_ms,
+                r.get("error") or None,
+                json.dumps(r, ensure_ascii=False) if not r.get("error") else None,
+            ))
+
+    # For non-quantum: cache vote summary on poly_markets row
+    if not quantum:
+        up = sum(1 for e in results if e["result"].get("prediction") == "UP")
+        dn = sum(1 for e in results if e["result"].get("prediction") == "DOWN")
+        unk = len(results) - up - dn
+        votes_json = json.dumps({"up": up, "down": dn, "unk": unk,
+                                  "batch_id": batch_id,
+                                  "ts": int(datetime.utcnow().timestamp())},
+                                 ensure_ascii=False)
+        try:
+            await db.execute(
+                "UPDATE poly_markets SET pred_votes=%s WHERE slug=%s",
+                (votes_json, slug),
+            )
+        except Exception:
+            pass  # column may not exist yet — apply SQL migration first
+
+    return {"slug": slug, "quantum": quantum, "batch_id": batch_id, "results": results}
+
+
+async def get_pred_runs_for_market(slug: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Return prediction run history for a market, newest first."""
+    rows = await db.fetchall(
+        """
+        SELECT id, batch_id, template_id, template_name, strategy, params_json,
+               window_size, horizon, quantum, quantum_scenario,
+               prediction, probability, started_at, finished_at, duration_ms,
+               error, result_json
+        FROM poly_pred_runs
+        WHERE slug=%s
+        ORDER BY started_at DESC
+        LIMIT %s
+        """,
+        (slug, int(limit)),
+    )
+    out = []
+    for r in rows:
+        out.append({
+            "id": r[0],
+            "batch_id": r[1],
+            "template_id": r[2],
+            "template_name": r[3],
+            "strategy": r[4],
+            "params": json.loads(r[5]) if r[5] else None,
+            "window_size": r[6],
+            "horizon": r[7],
+            "quantum": bool(r[8]),
+            "quantum_scenario": r[9],
+            "prediction": r[10],
+            "probability": float(r[11]) if r[11] is not None else None,
+            "started_at": r[12].isoformat() if r[12] else None,
+            "finished_at": r[13].isoformat() if r[13] else None,
+            "duration_ms": r[14],
+            "error": r[15],
+            "result": json.loads(r[16]) if r[16] else None,
+        })
+    return out
+
+
+async def quantum_predict_for_market(
+    slug: str,
+    strategy_name: str = "rsi_mean_reversion",
+    strategy_params: Optional[Dict[str, Any]] = None,
+    window_size: int = 1000,
+    horizon: int = 1,
+    table: str = "c_5m",
+) -> Dict[str, Any]:
+    """Quantum predict: simulate two scenarios for the missing candle.
+    Scenario A: next candle is GREEN (close > open, medium size).
+    Scenario B: next candle is RED   (close < open, medium size).
+    Run prediction for each and return both results.
+    """
+    import pandas as pd
+    import numpy as np
+    from predictor.features import add_technical_features
+    from predictor.strategies import get_strategy, STRATEGY_REGISTRY
+    from predictor.data_loader import add_direction
+    from predictor.candle_sync import sync_candles_up_to, check_and_fill_gaps
+
+    if strategy_name not in STRATEGY_REGISTRY:
+        return {"error": f"Unknown strategy: {strategy_name}"}
+
+    horizon = max(1, min(3, int(horizon)))
+
+    m_row = await db.fetchone("SELECT ts FROM poly_markets WHERE slug=%s", (slug,))
+    if not m_row:
+        return {"error": f"Market not found: {slug}"}
+    market_ts = int(m_row[0])
+
+    interval_us = 5 * 60 * 1_000_000
+    interval_s = 300
+    market_ts_us = market_ts * 1_000_000
+
+    # Sync candles up to market_ts (the candle at market_ts might not exist yet)
+    sync_info = {}
+    try:
+        sync_result = await sync_candles_up_to(market_ts, window_candles=window_size + 50, table=table)
+        sync_info["sync"] = sync_result
+    except Exception as e:
+        sync_info["sync_error"] = str(e)
+
+    # Load candles up to market_ts (inclusive, but may not have it)
+    need = window_size
+    rows = await db.fetchall(
+        f"""
+        SELECT open_time, open, high, low, close, volume,
+               close_time, quota_volume, trades, taker_base_volume, taker_quota_volume
+        FROM {table}
+        WHERE open_time <= %s
+        ORDER BY open_time DESC
+        LIMIT %s
+        """,
+        (market_ts_us, need),
+    )
+    if not rows or len(rows) < 2:
+        return {"error": "Not enough candles for quantum predict", **sync_info}
+
+    rows = list(reversed(rows))
+
+    # Quantum predict is ONLY available for markets that come AFTER the current
+    # active (live) market.  For the active market and all past markets every
+    # candle is already present, so regular predict should be used instead.
+    active_ts = current_active_ts()
+    if market_ts <= active_ts:
+        active_dt = pd.Timestamp(active_ts * 1_000_000, unit="us").strftime("%Y-%m-%d %H:%M:%S")
+        market_dt = pd.Timestamp(market_ts_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
+        return {
+            "error": (
+                "Quantum predict is not available for the current or past markets. "
+                "Use it only for future markets (after the active market). "
+                f"Active market: {active_dt}, this market: {market_dt}."
+            ),
+            "market_ts": market_ts,
+            "market_dt": market_dt,
+            "active_ts": active_ts,
+            "active_dt": active_dt,
+        }
+
+    # Synthesize the missing candle at market_ts (it hasn't formed yet)
+    synth_open_us = market_ts_us
+
+    last_close = float(rows[-1][4])
+    # Compute average candle body size from last 20 candles
+    recent = rows[-20:]
+    avg_body = np.mean([abs(float(r[4]) - float(r[1])) for r in recent])
+    if avg_body < 1:
+        avg_body = last_close * 0.001
+    avg_vol = np.mean([float(r[5]) for r in recent])
+
+    scenarios = {}
+    for scenario_name, direction_up in [("green", True), ("red", False)]:
+        synth_open = last_close
+        if direction_up:
+            synth_close = last_close + avg_body
+            synth_high = synth_close + avg_body * 0.3
+            synth_low = synth_open - avg_body * 0.2
+        else:
+            synth_close = last_close - avg_body
+            synth_high = synth_open + avg_body * 0.2
+            synth_low = synth_close - avg_body * 0.3
+
+        synth_row = (
+            synth_open_us,
+            synth_open,
+            synth_high,
+            synth_low,
+            synth_close,
+            avg_vol,
+            (synth_open_us // 1000) + interval_s * 1000 - 1,
+            avg_vol * synth_close,
+            100,
+            avg_vol * 0.5,
+            avg_vol * synth_close * 0.5,
+        )
+
+        scenario_rows = list(rows) + [synth_row]
+        # Keep only the last `need` rows
+        scenario_rows = scenario_rows[-need:]
+
+        df = pd.DataFrame(scenario_rows, columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quota_volume", "trades", "taker_base_volume", "taker_quota_volume"
+        ])
+        for c in ["open", "high", "low", "close", "volume", "quota_volume",
+                   "taker_base_volume", "taker_quota_volume"]:
+            df[c] = df[c].astype(float)
+        df["trades"] = df["trades"].astype(int)
+
+        # Continuity check (skip for quantum — synthetic candle may cause gap)
+        df = add_direction(df)
+        df = df.reset_index(drop=True)
+        df_feat = add_technical_features(df)
+
+        df_train = df_feat.iloc[:-1].reset_index(drop=True)
+        df_predict = df_feat.iloc[[-1]].reset_index(drop=True)
+
+        try:
+            strategy = get_strategy(strategy_name, strategy_params)
+            strategy.fit(df_train, horizon=horizon)
+            pred_arr = strategy.predict(df_predict, horizon=horizon)
+            prob_arr = strategy.predict_proba(df_predict, horizon=horizon)
+
+            pred = int(pred_arr[0])
+            prob = float(prob_arr[0])
+            label = "UP" if pred == 1 else ("DOWN" if pred == 0 else "UNDEFINED")
+        except Exception as e:
+            label = "ERROR"
+            prob = 0.0
+            pred = -1
+
+        scenarios[scenario_name] = {
+            "prediction": label,
+            "probability": round(prob, 4),
+            "strategy": strategy_name,
+            "horizon": horizon,
+            "synth_candle": {
+                "open": round(synth_open, 2),
+                "close": round(synth_close, 2),
+                "high": round(synth_high, 2),
+                "low": round(synth_low, 2),
+                "direction": "UP" if direction_up else "DOWN",
+            },
+        }
+
+    return {
+        "market_slug": slug,
+        "market_ts": market_ts,
+        "scenarios": scenarios,
+        **sync_info,
+    }
 
 
 async def get_prediction_candles(

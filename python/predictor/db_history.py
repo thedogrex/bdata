@@ -408,9 +408,23 @@ async def get_completed_combo_indices(bf_id: int) -> set[str]:
     return result
 
 
-async def get_best_runs(limit: int = 20, horizon: int = 1) -> list[dict]:
+async def get_best_runs(
+    limit: int = 20,
+    horizon: int = 1,
+    signals_min: int | None = None,
+    signals_max: int | None = None,
+) -> list[dict]:
     """Get top N runs sorted by accuracy for a given horizon."""
-    rows = await db.fetchall("""
+    where = ["h.horizon = %s", "h.signals > 0"]
+    params: list = [horizon]
+    if signals_min is not None:
+        where.append("h.signals >= %s")
+        params.append(int(signals_min))
+    if signals_max is not None:
+        where.append("h.signals <= %s")
+        params.append(int(signals_max))
+
+    rows = await db.fetchall(f"""
         SELECT r.id, r.strategy, r.params_json, r.train_start, r.train_end,
                r.test_start, r.test_end, r.window_size,
                h.accuracy_pct, h.signals, h.correct, h.wrong, h.skipped,
@@ -418,10 +432,10 @@ async def get_best_runs(limit: int = 20, horizon: int = 1) -> list[dict]:
                r.total_time_sec, r.created_at
         FROM backtest_runs r
         JOIN backtest_horizons h ON h.run_id = r.id
-        WHERE h.horizon = %s AND h.signals > 0
+        WHERE {" AND ".join(where)}
         ORDER BY h.accuracy_pct DESC
         LIMIT %s
-    """, (horizon, limit))
+    """, tuple(params + [limit]))
 
     results = []
     for r in rows:

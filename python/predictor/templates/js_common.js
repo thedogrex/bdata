@@ -555,7 +555,14 @@ async function clearAllHistory(){if(!confirm('Delete ALL?'))return;await fetch(A
 // ===== BEST =====
 async function loadBest(){
   const horizon=document.getElementById('best-horizon').value||1;const limit=document.getElementById('best-limit').value||20;
-  try{const res=await fetch(API+`/api/best?horizon=${horizon}&limit=${limit}`);const data=await res.json();const el=document.getElementById('best-list');
+  const sMinRaw = document.getElementById('best-signals-min')?.value;
+  const sMaxRaw = document.getElementById('best-signals-max')?.value;
+  const sMin = (sMinRaw !== undefined && sMinRaw !== null && String(sMinRaw).trim() !== '') ? Number(sMinRaw) : null;
+  const sMax = (sMaxRaw !== undefined && sMaxRaw !== null && String(sMaxRaw).trim() !== '') ? Number(sMaxRaw) : null;
+  const qs = new URLSearchParams({horizon: String(horizon), limit: String(limit)});
+  if(sMin !== null && Number.isFinite(sMin)) qs.set('signals_min', String(Math.max(0, Math.floor(sMin))));
+  if(sMax !== null && Number.isFinite(sMax)) qs.set('signals_max', String(Math.max(0, Math.floor(sMax))));
+  try{const res=await fetch(API+`/api/best?${qs.toString()}`);const data=await res.json();const el=document.getElementById('best-list');
     if(!data.length){el.innerHTML='<div class="card p-6 text-center text-slate-400">No results.</div>';return}
     let html='<div class="card p-6"><h2 class="text-lg font-semibold mb-4">Top Runs (H'+horizon+')</h2><table><thead><tr><th>#</th><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Correct</th><th>Wrong</th><th>W/L</th><th>Win</th><th>Params</th></tr></thead><tbody>';
     data.forEach((r,i)=>{const ps=JSON.stringify(r.params||{}).substring(0,60);

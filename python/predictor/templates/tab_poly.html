@@ -54,50 +54,101 @@
           </div>
           <div id="poly-market-detail" class="text-sm text-slate-400"></div>
 
-          <!-- Prediction bar: PREDICT button + gear, grouped -->
+          <!-- Prediction bar: PREDICT + QUANTUM buttons + gear, grouped -->
           <div id="poly-predict-panel" class="mb-3">
             <div class="inline-flex items-center rounded-lg" style="background:#1e293b;border:1px solid #334155;padding:3px 4px;gap:5px">
-              <button id="poly-pred-run-btn" onclick="runPolyPrediction()" class="text-xs font-bold px-3 py-1.5 rounded-md" style="background:linear-gradient(135deg,#6366f1,#a855f7,#ec4899);color:#fff;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px">
+              <button id="poly-pred-run-btn" onclick="runPolyBatchPredict(false)" class="text-xs font-bold px-3 py-1.5 rounded-md" style="background:linear-gradient(135deg,#6366f1,#a855f7,#ec4899);color:#fff;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px">
                 <span style="font-size:14px">✨</span> PREDICT
               </button>
-              <button id="poly-pred-gear-btn" onclick="polyTogglePredSettings()" class="text-slate-400 hover:text-white px-1.5 py-1 rounded" style="font-size:15px;background:transparent;border:none;cursor:pointer" title="Prediction Settings">⚙</button>
+              <button id="poly-pred-quantum-btn" onclick="runPolyBatchPredict(true)" class="text-xs font-bold px-3 py-1.5 rounded-md" style="background:linear-gradient(135deg,#06b6d4,#8b5cf6);color:#fff;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px" title="Quantum: simulate green/red candle scenarios">
+                <span style="font-size:14px">⚛</span> QUANTUM
+              </button>
+              <button id="poly-pred-history-btn" onclick="polyTogglePredHistory()" class="text-slate-400 hover:text-white px-1.5 py-1 rounded" style="font-size:13px;background:transparent;border:none;cursor:pointer" title="Prediction History">🕐</button>
+              <button id="poly-pred-gear-btn" onclick="polyTogglePredSettings()" class="text-slate-400 hover:text-white px-1.5 py-1 rounded" style="font-size:15px;background:transparent;border:none;cursor:pointer" title="Templates & Settings">⚙</button>
             </div>
             <div id="poly-pred-result-inline" class="inline-block ml-3 text-sm align-middle"></div>
-            <!-- Inline prediction details (pushes content down) -->
-            <div id="poly-pred-popup" class="hidden mt-2" style="width:520px;max-width:100%">
+
+            <!-- Templates & Settings popup -->
+            <div id="poly-pred-popup" class="hidden mt-2" style="width:600px;max-width:100%">
               <div class="card p-4" style="background:#0f172a;border:1px solid #334155;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
                 <div class="flex items-center justify-between mb-3">
-                  <h3 class="font-semibold text-sm">Prediction</h3>
-                  <div class="flex items-center gap-2">
-                    <span class="text-xs text-slate-400">Strategy: <span class="text-blue-300 font-mono" id="poly-pred-strategy-name">rsi_mean_reversion</span></span>
-                    <button onclick="polyHidePredDetails()" class="text-slate-400 hover:text-white text-xs px-1">✕</button>
-                  </div>
+                  <h3 class="font-semibold text-sm">Prediction Templates</h3>
+                  <button onclick="polyHidePredDetails()" class="text-slate-400 hover:text-white text-xs px-1">✕</button>
                 </div>
 
-                <div id="poly-pred-settings-section">
-                  <div class="text-xs font-semibold text-slate-200 mb-2">Settings</div>
-                  <div class="grid grid-cols-2 gap-3 mb-2">
+                <!-- Template list -->
+                <div id="poly-tpl-list" class="mb-3 text-xs" style="max-height:220px;overflow-y:auto">
+                  <div class="text-slate-500">Loading templates...</div>
+                </div>
+
+                <!-- Add template form -->
+                <details id="poly-tpl-add-details" class="mb-3">
+                  <summary class="text-blue-400 cursor-pointer text-xs font-semibold">+ Add Template</summary>
+                  <div class="mt-2 p-3 rounded-lg" style="background:#1e293b;border:1px solid #334155">
+                    <div class="grid grid-cols-2 gap-2 mb-2">
+                      <div>
+                        <label class="block text-xs text-slate-400 mb-1">Name</label>
+                        <input id="poly-tpl-name" type="text" class="w-full text-xs" placeholder="My Template">
+                      </div>
+                      <div>
+                        <label class="block text-xs text-slate-400 mb-1">Strategy</label>
+                        <select id="poly-tpl-strategy" class="w-full text-xs" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"></select>
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-3 gap-2 mb-2">
+                      <div>
+                        <label class="block text-xs text-slate-400 mb-1">Window</label>
+                        <input id="poly-tpl-window" type="number" value="1000" min="100" max="10000" class="w-full text-xs">
+                      </div>
+                      <div>
+                        <label class="block text-xs text-slate-400 mb-1">Horizon</label>
+                        <select id="poly-tpl-horizon" class="w-full text-xs" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px">
+                          <option value="1">H1 (1 candle)</option>
+                          <option value="2">H2 (2 candles)</option>
+                          <option value="3">H3 (3 candles)</option>
+                        </select>
+                      </div>
+                      <div class="flex items-end">
+                        <button onclick="polyCreateTemplate()" class="btn btn-primary text-xs w-full">Create</button>
+                      </div>
+                    </div>
                     <div>
-                      <label class="block text-xs text-slate-400 mb-1">Window Size</label>
-                      <input id="poly-pred-window" type="number" value="1000" min="100" max="10000" class="w-full">
-                    </div>
-                    <div class="flex items-end justify-end gap-2">
-                      <button id="poly-pred-save" onclick="savePolyPredictionSettings()" class="btn btn-slate text-xs">Save</button>
-                      <div id="poly-pred-save-msg" class="text-xs text-slate-500"></div>
+                      <label class="block text-xs text-slate-400 mb-1">Params JSON <span class="text-slate-600">(optional)</span></label>
+                      <textarea id="poly-tpl-params" rows="2" class="w-full text-xs font-mono" placeholder='{"rsi_period":14}'></textarea>
                     </div>
                   </div>
-                  <div class="mb-2">
-                    <label class="block text-xs text-slate-400 mb-1">Strategy Settings (JSON)</label>
-                    <textarea id="poly-pred-params" rows="3" class="w-full text-xs font-mono" placeholder='{"rsi_period":14,"rsi_oversold":30,"rsi_overbought":70,"use_bb_confirm":true,"bb_low":0.2,"bb_high":0.8}'></textarea>
-                  </div>
-                </div>
+                </details>
 
-                <div class="my-3" style="border-top:1px solid #334155"></div>
+                <div id="poly-pred-divider" class="my-3" style="border-top:1px solid #334155"></div>
 
-                <div id="poly-pred-analyse-section">
-                  <div class="text-xs font-semibold text-slate-200 mb-2">Analyse</div>
+                <!-- Batch results section -->
+                <div id="poly-pred-analyse-section" class="hidden">
+                  <div class="text-xs font-semibold text-slate-200 mb-2">Results</div>
                   <div id="poly-pred-result" class="text-sm"></div>
                 </div>
+
+                <!-- (Prediction history moved to standalone panel below) -->
+              </div>
+            </div>
+          </div>
+
+          <!-- ====== Standalone Prediction History Panel ====== -->
+          <div id="poly-pred-history-panel" class="hidden mt-3 mb-3">
+            <div class="card p-4" style="background:#0f172a;border:1px solid #334155;box-shadow:0 4px 24px rgba(0,0,0,0.4)">
+              <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                  <span style="font-size:16px">🕐</span>
+                  <h3 class="font-semibold text-sm text-slate-100">Prediction History</h3>
+                  <span id="poly-hist-market-label" class="text-xs text-slate-500 font-mono"></span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button onclick="polyRefreshPredHistory()" class="text-blue-400 text-xs hover:text-blue-300 font-semibold">↺ Refresh</button>
+                  <button onclick="polyClosePredHistoryPanel()" class="text-slate-400 hover:text-white text-xs px-1">✕</button>
+                </div>
+              </div>
+              <!-- Runs list grouped by batch -->
+              <div id="poly-pred-history-content" class="text-xs" style="max-height:400px;overflow-y:auto">
+                <div class="text-slate-500">Loading prediction history...</div>
               </div>
             </div>
           </div>

@@ -508,8 +508,99 @@ function obDrawChart(){
     legendX+=ctx.measureText(name).width+36;
   });
 
+  // --- Prediction markers on Ask Price chart ---
+  const PRED_MARKER_R = 13;
+  const predMarkerHits = []; // [{cx, cy, batch_id, batchData, runs}] for hover
+  const marketStartTsForMarkers = (typeof obSelectedMarket !== 'undefined' && obSelectedMarket && obSelectedMarket.ts)
+    ? obSelectedMarket.ts
+    : null;
+  const markerCutoffTs = (marketStartTsForMarkers !== null) ? (marketStartTsForMarkers + 300) : null;
+  try{
+    const predRuns = (typeof polyPredRunsCache !== 'undefined') ? polyPredRunsCache : [];
+    if(predRuns.length){
+      // Group runs by batch_id, preserving full run list per batch
+      const batches = {};
+      predRuns.forEach(r => {
+        // Ignore failed runs (error present)
+        if(r && r.error) return;
+        if(!r.batch_id) return;
+        if(!batches[r.batch_id]) batches[r.batch_id] = {started_at: r.started_at, quantum: r.quantum, up:0, down:0, unk:0, qCount:0, runs:[]};
+        const b = batches[r.batch_id];
+        b.runs.push(r);
+        if(r.quantum){ b.qCount++; }
+        else if(r.prediction === 'UP') b.up++;
+        else if(r.prediction === 'DOWN') b.down++;
+        else b.unk++;
+      });
+
+      const markerY = totalH - paddingBottom - PRED_MARKER_R - 6;
+      Object.entries(batches).forEach(([bid, b]) => {
+        if(!b.runs || b.runs.length === 0) return;
+        if(!b.started_at) return;
+        const batchTs = Math.floor(new Date(b.started_at + (b.started_at.endsWith('Z') ? '' : 'Z')).getTime() / 1000);
+        if(isNaN(batchTs) || batchTs < tsMin || batchTs > tsMax) return;
+        // Only show predictions made before market start or within 5 minutes after market start
+        if(markerCutoffTs !== null && batchTs > markerCutoffTs) return;
+
+        const mx = tsToX(batchTs);
+        const total = b.up + b.down + b.unk;
+        let icon, iconColor;
+        if(b.up > b.down && b.up > b.unk){
+          icon = '\u25b2'; iconColor = '#22c55e';
+        } else if(b.down > b.up && b.down > b.unk){
+          icon = '\u25bc'; iconColor = '#ef4444';
+        } else if(total === 0 && b.qCount > 0){
+          icon = '\u269b'; iconColor = '#8b5cf6';
+        } else {
+          icon = '?'; iconColor = '#f59e0b';
+        }
+
+        // Vertical dashed line
+        ctx.save();
+        ctx.strokeStyle = iconColor;
+        ctx.globalAlpha = 0.25;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath(); ctx.moveTo(mx, paddingTop); ctx.lineTo(mx, markerY - PRED_MARKER_R); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1.0;
+
+        // Circle border
+        ctx.strokeStyle = iconColor;
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.7;
+        ctx.beginPath(); ctx.arc(mx, markerY, PRED_MARKER_R, 0, Math.PI * 2); ctx.stroke();
+
+        // Circle fill
+        ctx.fillStyle = iconColor;
+        ctx.globalAlpha = 0.18;
+        ctx.beginPath(); ctx.arc(mx, markerY, PRED_MARKER_R, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 1.0;
+
+        // Icon
+        ctx.fillStyle = iconColor;
+        ctx.font = 'bold 13px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(icon, mx, markerY);
+
+        // Count
+        if(total > 1){
+          ctx.font = 'bold 8px sans-serif';
+          ctx.fillStyle = '#cbd5e1';
+          ctx.textBaseline = 'alphabetic';
+          ctx.fillText(String(total), mx + PRED_MARKER_R + 3, markerY + 4);
+        }
+        ctx.textBaseline = 'alphabetic';
+        ctx.restore();
+
+        predMarkerHits.push({cx: mx, cy: markerY, r: PRED_MARKER_R, batch_id: bid, b, iconColor});
+      });
+    }
+  }catch(e){ /* polyPredRunsCache may not exist in non-poly context */ }
+
   // Store chart metadata for hover
-  canvas._obChartMeta = {tsMin,tsMax,tsRange,chartW,chartH,paddingLeft,paddingTop,paddingBottom,paddingRight,totalW,totalH,minPrice,maxPrice,seriesNames,colors,tsToX,priceToY};
+  canvas._obChartMeta = {tsMin,tsMax,tsRange,chartW,chartH,paddingLeft,paddingTop,paddingBottom,paddingRight,totalW,totalH,minPrice,maxPrice,seriesNames,colors,tsToX,priceToY,predMarkerHits};
 
   // Attach hover handler (once)
   if(!canvas._obHoverBound){
@@ -527,13 +618,61 @@ function obChartHover(e){
   if(!meta) return;
 
   const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
   const mx = (e.clientX - rect.left);
   const my = (e.clientY - rect.top);
 
-  // Check if inside chart area
+  const tooltip = document.getElementById('ob-chart-tooltip');
+
+  // --- Check prediction marker hover FIRST ---
+  const hits = meta.predMarkerHits || [];
+  for(const m of hits){
+    const dx = mx - m.cx, dy = my - m.cy;
+    if(Math.sqrt(dx*dx + dy*dy) <= m.r + 4){
+      // Build prediction detail tooltip
+      const dt = m.b.started_at ? m.b.started_at.replace('T',' ').substring(0,19) : '?';
+      const isQ = m.b.qCount > 0 && (m.b.up + m.b.down + m.b.unk) === 0;
+      let html = `<div style="color:${m.iconColor};font-weight:700;font-size:13px">Prediction Batch</div>`;
+      html += `<div style="color:#94a3b8;font-size:10px;margin-bottom:4px">${dt}${isQ ? ' <span style="color:#8b5cf6">⚛ QUANTUM</span>' : ''}</div>`;
+      // Aggregate line
+      if(!isQ){
+        html += `<div style="font-size:11px;margin-bottom:4px">`
+          + (m.b.up ? `<span style="color:#22c55e;font-weight:700">▲ ${m.b.up} UP</span>  ` : '')
+          + (m.b.down ? `<span style="color:#ef4444;font-weight:700">▼ ${m.b.down} DOWN</span>  ` : '')
+          + (m.b.unk ? `<span style="color:#f59e0b">? ${m.b.unk} unknown</span>` : '')
+          + `</div>`;
+      }
+      // Per-template rows
+      html += '<div style="border-top:1px solid #334155;padding-top:4px;display:flex;flex-direction:column;gap:2px">';
+      m.b.runs.forEach(r => {
+        const predColor = r.prediction==='UP' ? '#22c55e' : (r.prediction==='DOWN' ? '#ef4444' : '#f59e0b');
+        const predIcon = r.prediction==='UP' ? '▲' : (r.prediction==='DOWN' ? '▼' : '?');
+        const prob = r.probability !== null && r.probability !== undefined ? Math.round(r.probability*100)+'%' : '';
+        const dur = r.duration_ms ? r.duration_ms+'ms' : '';
+        const scBadge = r.quantum_scenario ? ` <span style="color:#8b5cf6">[${r.quantum_scenario}]</span>` : '';
+        html += `<div style="display:flex;align-items:center;gap:5px;font-size:10px">`;
+        html += `<span style="color:#94a3b8;min-width:70px">${r.template_name||'?'}${scBadge}</span>`;
+        html += `<span style="color:#64748b;min-width:55px">${r.strategy||'—'} H${r.horizon||1}</span>`;
+        html += `<span style="color:${predColor};font-weight:700">${predIcon} ${r.prediction||'ERR'}</span>`;
+        if(prob) html += `<span style="color:#94a3b8">${prob}</span>`;
+        if(dur) html += `<span style="color:#475569">${dur}</span>`;
+        html += `</div>`;
+        if(r.error) html += `<div style="color:#ef4444;font-size:9px;padding-left:4px">${r.error.substring(0,80)}</div>`;
+      });
+      html += '</div>';
+      tooltip.innerHTML = html;
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.clientX + 14) + 'px';
+      tooltip.style.top = (e.clientY - 10) + 'px';
+      const tr = tooltip.getBoundingClientRect();
+      if(tr.right > window.innerWidth) tooltip.style.left = (e.clientX - tr.width - 10) + 'px';
+      if(tr.bottom > window.innerHeight) tooltip.style.top = (e.clientY - tr.height - 10) + 'px';
+      return; // don't show ask tooltip when hovering a prediction marker
+    }
+  }
+
+  // Check if inside chart area for normal hover
   if(mx < meta.paddingLeft || mx > meta.totalW - meta.paddingRight || my < meta.paddingTop || my > meta.totalH - meta.paddingBottom){
-    document.getElementById('ob-chart-tooltip').style.display='none';
+    tooltip.style.display='none';
     return;
   }
 
@@ -550,7 +689,6 @@ function obChartHover(e){
     });
   });
 
-  const tooltip = document.getElementById('ob-chart-tooltip');
   if(!bestSnap || bestDist > meta.tsRange * 0.03){
     tooltip.style.display='none';
     return;
@@ -587,7 +725,6 @@ function obChartHover(e){
   tooltip.style.left=(e.clientX+14)+'px';
   tooltip.style.top=(e.clientY-10)+'px';
 
-  // Keep tooltip on screen
   const tr=tooltip.getBoundingClientRect();
   if(tr.right>window.innerWidth) tooltip.style.left=(e.clientX-tr.width-10)+'px';
   if(tr.bottom>window.innerHeight) tooltip.style.top=(e.clientY-tr.height-10)+'px';

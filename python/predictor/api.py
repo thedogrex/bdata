@@ -98,6 +98,31 @@ class PredictRequest(BaseModel):
     strategy: str = "rsi_mean_reversion"
     params: dict | None = None
     window_size: int = 1000
+    horizon: int = 1
+    table: str = "c_5m"
+
+
+class TemplateRequest(BaseModel):
+    name: str
+    strategy: str = "rsi_mean_reversion"
+    params: dict | None = None
+    window_size: int = 1000
+    horizon: int = 1
+
+
+class TemplateUpdateRequest(BaseModel):
+    name: str | None = None
+    strategy: str | None = None
+    params: dict | None = None
+    window_size: int | None = None
+    horizon: int | None = None
+    active: bool | None = None
+    sort_order: int | None = None
+
+
+class BatchPredictRequest(BaseModel):
+    slug: str
+    quantum: bool = False
     table: str = "c_5m"
 
 
@@ -172,8 +197,65 @@ async def api_poly_predict(req: PredictRequest):
         strategy_name=req.strategy,
         strategy_params=req.params,
         window_size=req.window_size,
+        horizon=req.horizon,
         table=req.table,
     )
+
+
+# ==================== PREDICTION TEMPLATES ====================
+
+@app.get("/api/poly/pred_templates")
+async def api_list_pred_templates():
+    return await poly_service.list_pred_templates()
+
+
+@app.post("/api/poly/pred_templates")
+async def api_create_pred_template(req: TemplateRequest):
+    return await poly_service.create_pred_template(
+        name=req.name,
+        strategy=req.strategy,
+        params=req.params,
+        window_size=req.window_size,
+        horizon=req.horizon,
+    )
+
+
+@app.put("/api/poly/pred_templates/{template_id}")
+async def api_update_pred_template(template_id: int, req: TemplateUpdateRequest):
+    return await poly_service.update_pred_template(
+        template_id=template_id,
+        name=req.name,
+        strategy=req.strategy,
+        params=req.params,
+        window_size=req.window_size,
+        horizon=req.horizon,
+        active=req.active,
+        sort_order=req.sort_order,
+    )
+
+
+@app.delete("/api/poly/pred_templates/{template_id}")
+async def api_delete_pred_template(template_id: int):
+    return await poly_service.delete_pred_template(template_id=template_id)
+
+
+@app.post("/api/poly/pred_templates/{template_id}/toggle")
+async def api_toggle_pred_template(template_id: int):
+    return await poly_service.toggle_pred_template(template_id=template_id)
+
+
+@app.post("/api/poly/batch_predict")
+async def api_poly_batch_predict(req: BatchPredictRequest):
+    return await poly_service.batch_predict_for_market(
+        slug=req.slug,
+        quantum=req.quantum,
+        table=req.table,
+    )
+
+
+@app.get("/api/poly/pred_runs/{slug:path}")
+async def api_get_pred_runs(slug: str, limit: int = 200):
+    return await poly_service.get_pred_runs_for_market(slug=slug, limit=limit)
 
 
 @app.get("/api/poly/settings")
@@ -207,6 +289,12 @@ async def api_candles_sync(target_ts: int = Query(...), window: int = Query(1100
     sync = await sync_candles_up_to(target_ts, window_candles=window)
     fill = await check_and_fill_gaps(target_ts, window_candles=window)
     return {"sync": sync, "gap_fill": fill}
+
+
+@app.get("/api/candles/sync_status")
+async def api_candles_sync_status():
+    from predictor.candle_sync import get_candle_sync_status
+    return get_candle_sync_status()
 
 
 @app.post("/api/poly/sim/trade")
@@ -388,8 +476,13 @@ async def api_delete_bruteforce_group(bf_id: int):
 
 
 @app.get("/api/best")
-async def api_best_runs(limit: int = Query(20), horizon: int = Query(1)):
-    return await get_best_runs(limit, horizon)
+async def api_best_runs(
+    limit: int = Query(20),
+    horizon: int = Query(1),
+    signals_min: int | None = Query(None),
+    signals_max: int | None = Query(None),
+):
+    return await get_best_runs(limit, horizon, signals_min=signals_min, signals_max=signals_max)
 
 
 # ==================== BRUTE FORCE ====================

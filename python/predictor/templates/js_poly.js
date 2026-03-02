@@ -23,6 +23,130 @@ let polyPredRunsCache = [];
 
 const POLY_PRED_SETTINGS_KEY = 'poly_pred_settings_v1';
 
+const POLY_LAST_MARKET_KEY = 'poly_last_selected_market_slug_v1';
+
+function polyMarketsPrevPage(){
+  polyMarketsPage = Math.max(1, polyMarketsPage - 1);
+  loadPolyMarkets();
+}
+
+function polyMarketsNextPage(){
+  polyMarketsPage = polyMarketsPage + 1;
+  loadPolyMarkets();
+}
+
+function renderPolyMarkets(){
+  const el = document.getElementById('poly-markets');
+  if(!el) return;
+  const data = Array.isArray(polyMarketsCache) ? polyMarketsCache : [];
+
+  const prevBtn = document.getElementById('poly-markets-prev');
+  const nextBtn = document.getElementById('poly-markets-next');
+  if(prevBtn) prevBtn.disabled = polyMarketsPage <= 1;
+  if(nextBtn) nextBtn.disabled = data.length < POLY_MARKETS_PER_PAGE;
+
+  const pgEl = document.getElementById('poly-markets-page');
+  if(pgEl) pgEl.textContent = `Page ${polyMarketsPage}`;
+
+  if(!data.length){
+    el.innerHTML = '<div class="text-slate-500 text-xs">No markets.</div>';
+    return;
+  }
+
+  const marketsWithPos = (polyMarketsWithPosCache instanceof Set) ? polyMarketsWithPosCache : new Set();
+  let html = '<table class="w-full"><tbody>';
+  data.forEach(m => {
+    if(!m) return;
+    const dateStr = m.ts ? new Date(m.ts*1000).toLocaleString('ru-RU', {timeZone:'UTC'}) : '';
+    const slugSuffix = (m.slug||'').split('-').slice(-1)[0] || '';
+
+    const status = m.status || (m.closed ? 'done' : 'open');
+    const statusClass = status === 'active' ? 'badge badge-active' : (status === 'done' ? 'badge badge-done' : 'badge');
+
+    const resolved = (m.resolved_outcome||'');
+    const resolvedTri = resolved === 'UP'
+      ? '<span title="resolved: UP" style="margin-left:8px;color:#22c55e;font-weight:800">▲</span>'
+      : (resolved === 'DOWN'
+        ? '<span title="resolved: DOWN" style="margin-left:8px;color:#ef4444;font-weight:800">▼</span>'
+        : '');
+
+    let predBadge = '';
+    if(m.has_pred){
+      let bg = 'rgba(148,163,184,0.14)';
+      let fg = '#e2e8f0';
+      let title = 'Has predictions';
+      if(m.pred_badge === 'green'){
+        bg = 'rgba(34,197,94,0.16)';
+        fg = '#22c55e';
+        title = 'At least one prediction matched resolved outcome';
+      } else if(m.pred_badge === 'red'){
+        bg = 'rgba(239,68,68,0.16)';
+        fg = '#ef4444';
+        title = 'Predictions exist, but none matched resolved outcome';
+      }
+      // For future markets (not resolved), make P gold if there is at least one defined prediction
+      const isResolved = !!(m.resolved_outcome && m.resolved_outcome !== '');
+      if(!isResolved && m.has_pred_defined){
+        fg = '#fbbf24'; // gold
+        title = 'Has defined predictions (future market)';
+      }
+      predBadge = `<span title="${title}" style="margin-left:8px;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:6px;background:${bg};color:${fg};font-weight:900;font-size:11px;border:1px solid rgba(51,65,85,0.8)">P</span>`;
+    }
+
+    const stHtml = `<span class="${statusClass}">${status}</span>${resolvedTri}${predBadge}`;
+    const isActive = (polyActiveTs!==null && (m.ts||0)===polyActiveTs && !m.closed);
+    const dot = isActive ? '<span title="active" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:6px"></span>' : '';
+    const posDot = marketsWithPos.has(m.slug) ? '<span title="has position" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#22c55e;margin-right:6px"></span>' : '';
+    const isSelected = polySelectedMarketSlug === m.slug;
+    let predTint = '';
+    if(m.pred_badge === 'green') predTint = 'style="background:rgba(34,197,94,0.08)"';
+    else if(m.pred_badge === 'red') predTint = 'style="background:rgba(239,68,68,0.08)"';
+    const selectedClass = isSelected ? 'bg-blue-900' : '';
+
+    html += `<tr ${predTint} class="cursor-pointer ${selectedClass}" data-slug="${m.slug}" onclick="selectPolyMarket('${m.slug}')">`
+      + `<td class="text-xs text-slate-400" style="white-space:nowrap">${dot}${posDot}${dateStr} <span class="font-mono text-blue-300">${slugSuffix}</span></td>`
+      + `<td>${stHtml}</td>`
+      + '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+let liveMarketPollInterval = null;
+function startLiveMarketPoll(){
+  stopLiveMarketPoll();
+  liveMarketPollInterval = setInterval(async () => {
+    try{
+      const st = await fetch(API+'/api/poly/status');
+      const s = await st.json();
+      polyActiveTs = s.active_ts || null;
+      if(polyActiveTs === null) return;
+
+      // Fetch first page to likely include the active market (sorted DESC)
+      const res = await fetch(API+`/api/poly/markets?limit=${POLY_MARKETS_PER_PAGE}&offset=0`);
+      const data = await res.json();
+      if(!Array.isArray(data) || !data.length) return;
+      polyMarketsCache = data;
+      renderPolyMarkets();
+
+      const liveMarket = data.find(m => polyActiveTs !== null && (m.ts||0) === polyActiveTs && !m.closed);
+      if(liveMarket){
+        stopLiveMarketPoll();
+        await selectPolyMarket(liveMarket.slug);
+      }
+    }catch(e){
+      // ignore errors, keep polling
+    }
+  }, 5000);
+}
+
+function stopLiveMarketPoll(){
+  if(liveMarketPollInterval){
+    clearInterval(liveMarketPollInterval);
+    liveMarketPollInterval = null;
+  }
+}
+
 // ===== AUTOPREDICT =====
 let autopredictEnabled = false;
 
@@ -271,6 +395,7 @@ function clearPolySelectionComplete(){
   polySelectedOutcomeAssetId=null;
   stopPolyOrderBookUpdates();
   stopPolyCountdown();
+  try{ localStorage.removeItem(POLY_LAST_MARKET_KEY); }catch(e){}
   document.getElementById('poly-market-title').textContent='';
   const emptyEl = document.getElementById('poly-market-empty');
   const secEl = document.getElementById('poly-market-sections');
@@ -377,176 +502,52 @@ async function loadPolyMarkets(){
     }catch(e){polyActiveTs=null;}
 
     const [res, posRes] = await Promise.all([
-      fetch(API+'/api/poly/markets?limit=500'),
+      fetch(API+`/api/poly/markets?limit=${POLY_MARKETS_PER_PAGE}&offset=${(Math.max(1, polyMarketsPage)-1)*POLY_MARKETS_PER_PAGE}`),
       fetch(API+'/api/poly/sim/markets_with_positions')
     ]);
     const data=await res.json();
     const marketsWithPosRaw = await posRes.json();
     const marketsWithPos = new Set(Array.isArray(marketsWithPosRaw) ? marketsWithPosRaw : []);
     if(!Array.isArray(data)||!data.length){
-      el.innerHTML='<div class="text-slate-400">No markets yet.</div>';
-      const pgEl=document.getElementById('poly-markets-page');
-      if(pgEl) pgEl.textContent='';
+      el.textContent='No markets found';
       return;
     }
-
-    polyMarketsCache = data;
+    polyMarketsCache=data;
     polyMarketsWithPosCache = marketsWithPos;
     renderPolyMarkets();
 
-    // Auto-select live market if present; otherwise poll for live market
-    const liveMarket = data.find(m => polyActiveTs !== null && (m.ts||0) === polyActiveTs && !m.closed);
-    if(liveMarket){
-      await selectPolyMarket(liveMarket.slug);
+    // Auto-select last selected market (persisted) if present; otherwise fall back to live market
+    let lastSlug = null;
+    try{ lastSlug = localStorage.getItem(POLY_LAST_MARKET_KEY); }catch(e){ lastSlug = null; }
+    const hasLast = !!(lastSlug && data.find(m => m && m.slug === lastSlug));
+    if(hasLast){
+      await selectPolyMarket(lastSlug);
     } else {
-      startLiveMarketPoll();
+      // Auto-select live market if present; otherwise poll for live market
+      const liveMarket = data.find(m => polyActiveTs !== null && (m.ts||0) === polyActiveTs && !m.closed);
+      if(liveMarket){
+        await selectPolyMarket(liveMarket.slug);
+      } else {
+        startLiveMarketPoll();
+      }
     }
 
     // Apply saved prediction settings whenever the Poly tab is loaded.
     loadPolyPredictionSettings();
-  }catch(e){el.textContent='Error loading markets';}
-}
-
-function renderPolyMarkets(){
-  const el=document.getElementById('poly-markets');
-  const data = Array.isArray(polyMarketsCache) ? polyMarketsCache : [];
-  const marketsWithPos = polyMarketsWithPosCache instanceof Set ? polyMarketsWithPosCache : new Set();
-  if(!el) return;
-  if(!data.length){
-    el.innerHTML='<div class="text-slate-400">No markets yet.</div>';
-    const pgEl=document.getElementById('poly-markets-page');
-    if(pgEl) pgEl.textContent='';
-    return;
+  }catch(e){
+    console.error('loadPolyMarkets error:', e);
+    el.textContent='Error loading markets';
   }
-
-  const total = data.length;
-  const totalPages = Math.max(1, Math.ceil(total / POLY_MARKETS_PER_PAGE));
-  if(polyMarketsPage > totalPages) polyMarketsPage = totalPages;
-  if(polyMarketsPage < 1) polyMarketsPage = 1;
-  const startIdx = (polyMarketsPage - 1) * POLY_MARKETS_PER_PAGE;
-  const endIdx = Math.min(startIdx + POLY_MARKETS_PER_PAGE, total);
-
-  const prevBtn=document.getElementById('poly-markets-prev');
-  const nextBtn=document.getElementById('poly-markets-next');
-  if(prevBtn) prevBtn.disabled = polyMarketsPage <= 1;
-  if(nextBtn) nextBtn.disabled = polyMarketsPage >= totalPages;
-  const pgEl=document.getElementById('poly-markets-page');
-  if(pgEl) pgEl.textContent = `Page ${polyMarketsPage}/${totalPages} (${total})`;
-
-  let html='<table><thead><tr><th>Time</th><th>Status</th></tr></thead><tbody>';
-  data.slice(startIdx, endIdx).forEach(m=>{
-    const d=new Date((m.ts||0)*1000);
-    const dateStr = d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',timeZone:'UTC'}) + ' ' + d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'});
-    const slugSuffix = (m.slug||'').split('-').pop();
-    const status = m.status || (m.closed ? 'ended' : 'open');
-    const statusClass = status === 'ended' ? 'badge badge-queue' : 'badge badge-done';
-    const resolved = (m.resolved_outcome||'');
-    const resolvedTri = resolved === 'UP'
-      ? '<span title="resolved: UP" style="margin-left:8px;color:#22c55e;font-weight:800">▲</span>'
-      : (resolved === 'DOWN'
-        ? '<span title="resolved: DOWN" style="margin-left:8px;color:#ef4444;font-weight:800">▼</span>'
-        : '');
-    // Prediction badge: show 'P' if any prediction exists for this market
-    let predBadge = '';
-    if(m.has_pred){
-      let bg = 'rgba(148,163,184,0.14)';
-      let fg = '#e2e8f0';
-      let title = 'Has predictions';
-      if(m.pred_badge === 'green'){
-        bg = 'rgba(34,197,94,0.16)';
-        fg = '#22c55e';
-        title = 'At least one prediction matched resolved outcome';
-      } else if(m.pred_badge === 'red'){
-        bg = 'rgba(239,68,68,0.16)';
-        fg = '#ef4444';
-        title = 'Predictions exist, but none matched resolved outcome';
-      }
-      predBadge = `<span title="${title}" style="margin-left:8px;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:6px;background:${bg};color:${fg};font-weight:900;font-size:11px;border:1px solid rgba(51,65,85,0.8)">P</span>`;
-    }
-    const stHtml = `<span class="${statusClass}">${status}</span>${resolvedTri}${predBadge}`;
-    const isActive = (polyActiveTs!==null && (m.ts||0)===polyActiveTs && !m.closed);
-    const dot = isActive ? '<span title="active" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:6px"></span>' : '';
-    const posDot = marketsWithPos.has(m.slug) ? '<span title="has position" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#22c55e;margin-right:6px"></span>' : '';
-    const isSelected = polySelectedMarketSlug === m.slug;
-    let predTint = '';
-    if(m.pred_badge === 'green') predTint = 'style="background:rgba(34,197,94,0.08)"';
-    else if(m.pred_badge === 'red') predTint = 'style="background:rgba(239,68,68,0.08)"';
-    const selectedClass = isSelected ? 'bg-blue-900' : '';
-    html+=`<tr ${predTint} class="cursor-pointer ${selectedClass}" onclick="selectPolyMarket('${m.slug}')"><td class="text-xs text-slate-400" style="white-space:nowrap">${dot}${posDot}${dateStr} <span class="font-mono text-blue-300">${slugSuffix}</span></td><td>${stHtml}</td></tr>`;
-  });
-  html+='</tbody></table>';
-  el.innerHTML=html;
-}
-
-function polyMarketsPrevPage(){
-  polyMarketsPage = Math.max(1, polyMarketsPage - 1);
-  loadPolyMarkets();
-}
-
-function polyMarketsNextPage(){
-  polyMarketsPage = polyMarketsPage + 1;
-  loadPolyMarkets();
-}
-
-let liveMarketPollInterval = null;
-function startLiveMarketPoll(){
-  stopLiveMarketPoll();
-  liveMarketPollInterval = setInterval(async () => {
-    try{
-      const st = await fetch(API+'/api/poly/status');
-      const s = await st.json();
-      polyActiveTs = s.active_ts || null;
-      const res = await fetch(API+'/api/poly/markets?limit=500');
-      const data = await res.json();
-      polyMarketsCache = data;
-      renderPolyMarkets();
-      const liveMarket = data.find(m => polyActiveTs !== null && (m.ts||0) === polyActiveTs && !m.closed);
-      if(liveMarket){
-        stopLiveMarketPoll();
-        await selectPolyMarket(liveMarket.slug);
-      }
-    }catch(e){
-      // ignore errors, keep polling
-    }
-  }, 3000);
-  // Show loading bar in empty state
-  const emptyEl = document.getElementById('poly-market-empty');
-  if(emptyEl){
-    emptyEl.innerHTML = `
-      <div class="py-10">
-        <div class="flex flex-col items-center gap-4">
-          <div class="text-3xl" style="color:#60a5fa">←</div>
-          <div class="text-center">
-            <div class="text-base font-semibold text-slate-200">Waiting for live market</div>
-            <div class="text-xs text-slate-400 mb-3">No active market right now. We’ll auto-select when one appears.</div>
-            <div class="w-64 h-2 bg-slate-700 rounded-full overflow-hidden">
-              <div class="h-full bg-blue-500 animate-pulse" style="width:100%;animation:slide 2s linear infinite;"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <style>
-        @keyframes slide {
-          0% { transform: translateX(-100%); }
-          100% { transform: translateX(100%); }
-        }
-      </style>
-    `;
-  }
-}
-function stopLiveMarketPoll(){
-  if(liveMarketPollInterval){ clearInterval(liveMarketPollInterval); liveMarketPollInterval = null; }
 }
 
 async function selectPolyMarket(slug){
   stopLiveMarketPoll(); // Stop auto-polling if user manually selects
   polySelectedMarketSlug = slug;
+  try{ if(slug) localStorage.setItem(POLY_LAST_MARKET_KEY, String(slug)); }catch(e){}
   document.querySelectorAll('#poly-markets tr').forEach(tr=>tr.classList.remove('bg-blue-900'));
   const rows = document.querySelectorAll('#poly-markets tr');
   rows.forEach(tr=>{
-    if(tr.getAttribute('onclick') && tr.getAttribute('onclick').includes(`'${slug}'`)){
-      tr.classList.add('bg-blue-900');
-    }
+    if(tr.getAttribute('data-slug')===slug) tr.classList.add('bg-blue-900');
   });
   await showPolyMarket(slug);
 }

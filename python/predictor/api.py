@@ -150,8 +150,8 @@ async def shutdown_event():
 
 
 @app.get("/api/poly/markets")
-async def api_poly_markets(limit: int = Query(50)):
-    return await poly_service.list_markets(limit=limit)
+async def api_poly_markets(limit: int = Query(50), offset: int = Query(0)):
+    return await poly_service.list_markets(limit=limit, offset=offset)
 
 
 @app.get("/api/poly/status")

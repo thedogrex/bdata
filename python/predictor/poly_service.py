@@ -169,10 +169,10 @@ async def upsert_market(m: MarketData) -> None:
         )
 
 
-async def refresh_tracked_markets() -> List[Dict[str, Any]]:
+async def refresh_tracked_markets(now: Optional[int] = None, count: int = 3) -> List[Dict[str, Any]]:
     client = PolymarketClient()
     rows: List[Dict[str, Any]] = []
-    for ts in _compute_timestamps(count=3):
+    for ts in _compute_timestamps(now=now, count=int(count)):
         slug = _slug_for_ts(ts)
         try:
             m = await asyncio.to_thread(client.fetch_market, slug)
@@ -253,7 +253,7 @@ async def _try_autopredict_after_end(ended_market_ts: int) -> None:
         if not settings.get("autopredict"):
             return
 
-        min_target_ts = int(ended_market_ts) + 300
+        min_target_ts = int(ended_market_ts) + 600
         targets = await db.fetchall(
             """
             SELECT slug, ts
@@ -326,6 +326,19 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     await _take_orderbook_snapshot_for_slug(ended_slug)
                 except Exception:
                     pass
+
+                # After end: ensure upcoming markets exist in DB and prefetch ask history (snapshots)
+                try:
+                    await refresh_tracked_markets(now=int(current_ts), count=4)
+                except Exception:
+                    pass
+                try:
+                    upcoming_ts = _compute_timestamps(now=int(current_ts), count=4)
+                    for ts in upcoming_ts:
+                        asyncio.create_task(_take_orderbook_snapshot_for_slug(_slug_for_ts(int(ts))))
+                except Exception:
+                    pass
+
                 # Backend autopredict: 1 second after end, run for markets at +10 minutes (H2) and next.
                 if ended_ts not in autopredicted_ended_ts:
                     autopredicted_ended_ts.add(ended_ts)
@@ -353,9 +366,9 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     active_markets.append((slug, ts))
                 else:
                     # Only download snapshots shortly before market start
-                    # (skip markets starting in 11+ minutes)
+                    # (skip markets starting in 21+ minutes)
                     seconds_to_start = int(ts) - int(current_time)
-                    if 0 < seconds_to_start <= 10 * 60:
+                    if 0 < seconds_to_start <= 20 * 60:
                         future_markets.append((slug, ts))
             
             # Update active market every 3 seconds
@@ -364,9 +377,9 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     await _take_orderbook_snapshot_for_slug(slug)
                 last_active_update = current_time
             
-            # Update future markets every 10 seconds (next 2 markets)
+            # Update future markets every 10 seconds (next 4 markets)
             if current_time - last_future_update >= 10 and future_markets:
-                for slug, ts in future_markets[:2]:  # Next 2 future markets
+                for slug, ts in future_markets[:4]:  # Next 4 future markets
                     await _take_orderbook_snapshot_for_slug(slug)
                 last_future_update = current_time
 
@@ -448,7 +461,7 @@ async def save_settings(autopredict: bool, strategy: str, params: Optional[dict]
     return await get_settings()
 
 
-async def list_markets(limit: int = 50) -> List[Dict[str, Any]]:
+async def list_markets(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
     current_ts = _get_current_ts()
     rows = await db.fetchall(
         """
@@ -479,8 +492,9 @@ async def list_markets(limit: int = 50) -> List[Dict[str, Any]]:
             pm.resolved_outcome, pm.prediction_outcome, pm.prediction_ts
         ORDER BY pm.ts DESC
         LIMIT %s
+        OFFSET %s
         """,
-        (int(limit),),
+        (int(limit), int(max(0, offset))),
     )
     out: List[Dict[str, Any]] = []
     for r in rows:
@@ -878,7 +892,7 @@ async def predict_for_market(
     from predictor.features import add_technical_features
     from predictor.strategies import get_strategy, STRATEGY_REGISTRY
     from predictor.data_loader import add_direction
-    from predictor.candle_sync import sync_candles_up_to
+    from predictor.candle_sync import sync_candles_up_to, check_and_fill_gaps
 
     horizon = max(1, min(3, int(horizon)))
 
@@ -912,17 +926,20 @@ async def predict_for_market(
     # --- Step 2: Load candles ending at market_ts ---
     need = window_size
 
-    rows = await db.fetchall(
-        f"""
-        SELECT open_time, open, high, low, close, volume,
-               close_time, quota_volume, trades, taker_base_volume, taker_quota_volume
-        FROM {table}
-        WHERE open_time <= %s
-        ORDER BY open_time DESC
-        LIMIT %s
-        """,
-        (market_ts_us, need),
-    )
+    async def _load_rows():
+        return await db.fetchall(
+            f"""
+            SELECT open_time, open, high, low, close, volume,
+                   close_time, quota_volume, trades, taker_base_volume, taker_quota_volume
+            FROM {table}
+            WHERE open_time <= %s
+            ORDER BY open_time DESC
+            LIMIT %s
+            """,
+            (market_ts_us, need),
+        )
+
+    rows = await _load_rows()
 
     if not rows or len(rows) < need:
         have = len(rows) if rows else 0
@@ -951,9 +968,35 @@ async def predict_for_market(
     #   H1 → needs exact candle at market_ts  (0 missing allowed)
     #   H2 → can work with 1 missing candle   (signal shifted back by 1)
     #   H3 → can work with 1-2 missing candles (signal shifted back by 1-2)
-    last_candle_open_us = int(rows[-1][0])
-    missing_candles = max(0, int((market_ts_us - last_candle_open_us) / interval_us))
+    def _compute_missing(_rows):
+        _last_open = int(_rows[-1][0])
+        _missing = max(0, int((market_ts_us - _last_open) / interval_us))
+        return _last_open, _missing
+
+    last_candle_open_us, missing_candles = _compute_missing(rows)
     shifted = missing_candles > 0
+
+    if missing_candles > 0 and missing_candles >= horizon:
+        # Candle might appear a moment later. Retry sync once after 1 second.
+        try:
+            await asyncio.sleep(1)
+            retry_sync = await sync_candles_up_to(market_ts, window_candles=window_size + 50, table=table)
+            sync_info["sync_retry"] = retry_sync
+            if retry_sync.get("downloaded", 0) > 0:
+                try:
+                    sync_info["gap_fill_retry"] = await check_and_fill_gaps(
+                        market_ts, window_candles=window_size, table=table
+                    )
+                except Exception:
+                    pass
+            rows2 = await _load_rows()
+            if rows2 and len(rows2) >= need:
+                rows2 = list(reversed(rows2))
+                last_candle_open_us, missing_candles = _compute_missing(rows2)
+                shifted = missing_candles > 0
+                rows = rows2
+        except Exception as e:
+            sync_info["sync_retry_error"] = str(e)
 
     if missing_candles > 0 and missing_candles >= horizon:
         last_dt = pd.Timestamp(last_candle_open_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")

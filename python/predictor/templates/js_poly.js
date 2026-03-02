@@ -37,10 +37,17 @@ async function loadAutopredictState(){
 }
 
 function polySetDetailTab(tab, isEnded = null){
-  polyDetailTab = (tab === 'history') ? 'history' : 'live';
+  const nowUtc = Math.floor(Date.now() / 1000);
+  const isMarketPast = (isEnded !== null)
+    ? isEnded
+    : (polySelectedMarket && (polySelectedMarket.closed || (polySelectedMarket.ts && (polySelectedMarket.ts + 300) < nowUtc)));
+
+  polyDetailTab = (isMarketPast || tab === 'history') ? 'history' : 'live';
+
   const liveBtn = document.getElementById('poly-detail-tab-live');
   const histBtn = document.getElementById('poly-detail-tab-history');
   if(liveBtn){
+    liveBtn.classList.toggle('hidden', !!isMarketPast);
     liveBtn.classList.toggle('poly-subtab-active', polyDetailTab === 'live');
   }
   if(histBtn){
@@ -48,27 +55,15 @@ function polySetDetailTab(tab, isEnded = null){
   }
 
   const lbl = document.getElementById('poly-tab-content-label');
-  const nowUtc = Math.floor(Date.now() / 1000);
-  const isMarketEnded = (isEnded !== null)
-    ? isEnded
-    : (polySelectedMarket && (polySelectedMarket.closed || (polySelectedMarket.ts && polySelectedMarket.ts <= nowUtc)));
-  if(lbl) lbl.textContent = isMarketEnded ? 'Market Ended' : (polyDetailTab === 'history' ? 'HISTORY' : 'LIVE');
+  if(lbl) lbl.textContent = polyDetailTab === 'history' ? 'HISTORY' : 'LIVE';
 
-  // Hide tab buttons for ended markets
   const tabsDiv = document.getElementById('poly-detail-tabs');
-  if(tabsDiv) tabsDiv.classList.toggle('hidden', !!isMarketEnded);
+  if(tabsDiv) tabsDiv.classList.remove('hidden');
 
   const livePanel = document.getElementById('poly-live-panel');
   const histPanel = document.getElementById('poly-history-panel');
-  if(isMarketEnded){
-    // Force show history panel, hide live panel
-    if(livePanel) livePanel.classList.add('hidden');
-    if(histPanel) histPanel.classList.remove('hidden');
-  } else {
-    // Normal tab switching
-    if(livePanel) livePanel.classList.toggle('hidden', polyDetailTab !== 'live');
-    if(histPanel) histPanel.classList.toggle('hidden', polyDetailTab !== 'history');
-  }
+  if(livePanel) livePanel.classList.toggle('hidden', polyDetailTab !== 'live');
+  if(histPanel) histPanel.classList.toggle('hidden', polyDetailTab !== 'history');
 
   if(polyDetailTab === 'live'){
     if(polySelectedMarket && !polySelectedMarket.closed){
@@ -283,9 +278,13 @@ function updatePolyCountdown(marketTs, intervalSeconds){
       showPolyMarketResolvedOutcome(polySelectedMarket.slug);
     }
   } else {
-    const minutes = Math.floor(remaining / 60);
-    const seconds = remaining % 60;
-    countdownEl.innerHTML = `<span class="text-green-400 font-semibold">${minutes.toString().padStart(2,'0')}:${seconds.toString().padStart(2,'0')}</span>`;
+    const isFuture = marketTs > now;
+    // Subtract 5 minutes for future markets
+    const adjustedRemaining = isFuture ? remaining - 300 : remaining;
+    const minutes = Math.floor(adjustedRemaining / 60);
+    const seconds = adjustedRemaining % 60;
+    const colorClass = isFuture ? 'text-orange-400' : 'text-green-400';
+    countdownEl.innerHTML = `<span class="${colorClass} font-semibold">${minutes.toString().padStart(2,'0')}:${seconds.toString().padStart(2,'0')}</span>`;
   }
 }
 
@@ -518,6 +517,7 @@ async function showPolyMarket(slug){
     const extUrl=`https://polymarket.com/event/${m.slug}`;
     const isActive = (polyActiveTs!==null && m.ts===polyActiveTs && !m.closed);
     const isEnded = m.closed || (m.ts && (m.ts + 300) < Math.floor(Date.now() / 1000));
+    const isFuture = m.ts && (m.ts > Math.floor(Date.now() / 1000));
     let badge = '';
     if(isActive){
       badge = '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:6px"></span><span class="text-red-400 font-semibold">ACTIVE</span>';
@@ -545,7 +545,7 @@ async function showPolyMarket(slug){
     const predResultInline = document.getElementById('poly-pred-result-inline');
     if(predResultInline) predResultInline.innerHTML='';
     loadPolyPredictionSettings();
-    const countdownDisplay = isActive ? '<div class="mb-2 text-xs">Time remaining: <span id="poly-countdown" class="font-mono">--:--</span></div>' : '';
+    const countdownDisplay = (isActive || isFuture) ? `<div class="mb-2 text-xs">${isFuture ? 'Starts in: ' : 'Time remaining: '}<span id="poly-countdown" class="font-mono">--:--</span></div>` : '';
 
     const pred = (m.prediction_outcome||'');
     const predTs = (m.prediction_ts||null);
@@ -568,7 +568,7 @@ async function showPolyMarket(slug){
     polySelectedOutcome = null;
     polySelectedOutcomeAssetId = null;
 
-    if(isActive) startPolyCountdown(m.ts, 300);
+    if(isActive || isFuture) startPolyCountdown(m.ts, 300);
 
     // For ended markets: show only history, no tab buttons
     if(isDone){
@@ -584,8 +584,6 @@ async function showPolyMarket(slug){
       loadSimPositions();
       loadSimTrades();
     }catch(e){/* ignore */}
-    // Update tab visibility based on market ended status
-    updateTabVisibilityForMarket();
   }catch(e){el.textContent='Error loading market';}
 }
 
@@ -594,19 +592,16 @@ function updateTabVisibilityForMarket(){
   const lbl = document.getElementById('poly-tab-content-label');
   const livePanel = document.getElementById('poly-live-panel');
   const histPanel = document.getElementById('poly-history-panel');
+  const liveBtn = document.getElementById('poly-detail-tab-live');
   if(!tabsDiv || !lbl || !livePanel || !histPanel) return;
   const nowUtc = Math.floor(Date.now() / 1000);
-  const isMarketEnded = polySelectedMarket && (polySelectedMarket.closed || (polySelectedMarket.ts && polySelectedMarket.ts <= nowUtc));
-  console.log('[updateTabVisibilityForMarket] polySelectedMarket:', polySelectedMarket?.slug, 'isMarketEnded:', isMarketEnded);
-  tabsDiv.classList.toggle('hidden', !!isMarketEnded);
-  lbl.textContent = isMarketEnded ? 'Market Ended' : (polyDetailTab === 'history' ? 'HISTORY' : 'LIVE');
-  if(isMarketEnded){
-    livePanel.classList.add('hidden');
-    histPanel.classList.remove('hidden');
-  } else {
-    livePanel.classList.toggle('hidden', polyDetailTab !== 'live');
-    histPanel.classList.toggle('hidden', polyDetailTab !== 'history');
-  }
+  const isMarketPast = polySelectedMarket && (polySelectedMarket.closed || (polySelectedMarket.ts && (polySelectedMarket.ts + 300) < nowUtc));
+  if(liveBtn) liveBtn.classList.toggle('hidden', !!isMarketPast);
+  tabsDiv.classList.remove('hidden');
+  if(isMarketPast) polyDetailTab = 'history';
+  lbl.textContent = polyDetailTab === 'history' ? 'HISTORY' : 'LIVE';
+  livePanel.classList.toggle('hidden', polyDetailTab !== 'live');
+  histPanel.classList.toggle('hidden', polyDetailTab !== 'history');
 }
 
 function selectPolyOutcome(assetId, name){

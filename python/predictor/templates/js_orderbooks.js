@@ -298,7 +298,9 @@ async function obLoadHistory(){
   if(pair && (side === 'UP' || side === 'DOWN')){
     outcomes = [side === 'DOWN' ? pair.down : pair.up];
   } else {
-    outcomes = obSelectedMarket.outcomes || [];
+    const allOutcomes = obSelectedMarket.outcomes || [];
+    const matched = allOutcomes.find(o => (o.name||'').toUpperCase().includes(side));
+    outcomes = matched ? [matched] : (allOutcomes.length ? [allOutcomes[0]] : []);
   }
 
   if(!outcomes.length){ listEl.innerHTML='<span class="text-slate-400">No outcomes.</span>'; return; }
@@ -324,32 +326,25 @@ async function obLoadHistory(){
 
     obHistPage = 1;
 
-    if(!allSnapshots.length){
-      listEl.innerHTML='<span class="text-slate-400">No snapshots in this range.</span>';
-      obDrawChart();
-      // Restore view after drawing
-      const chartPanel = document.getElementById('ob-hist-chart-panel');
-      const tablePanel = document.getElementById('ob-hist-table-panel');
-      if(obHistView === 'chart'){
-        chartPanel.classList.remove('hidden');
-      } else {
-        tablePanel.classList.remove('hidden');
-      }
-      return;
-    }
-
-    obRenderHistoryPage();
-
-    // Draw chart
-    obDrawChart();
-    // Restore view after drawing
+    // Show correct panel before drawing to avoid squished canvas
     const chartPanel = document.getElementById('ob-hist-chart-panel');
     const tablePanel = document.getElementById('ob-hist-table-panel');
     if(obHistView === 'chart'){
       chartPanel.classList.remove('hidden');
+      tablePanel.classList.add('hidden');
     } else {
+      chartPanel.classList.add('hidden');
       tablePanel.classList.remove('hidden');
     }
+
+    if(!allSnapshots.length){
+      listEl.innerHTML='<span class="text-slate-400">No snapshots in this range.</span>';
+      obDrawChart();
+      return;
+    }
+
+    obRenderHistoryPage();
+    obDrawChart();
   }catch(e){
     listEl.innerHTML='<span class="text-red-400">Error loading history.</span>';
   }
@@ -361,6 +356,10 @@ function obDrawChart(){
   const canvas = document.getElementById('ob-chart-canvas');
   const container = document.getElementById('ob-chart-container');
   if(!canvas || !container) return;
+  if(!container.clientWidth){
+    requestAnimationFrame(() => obDrawChart());
+    return;
+  }
 
   const seriesNames = Object.keys(obChartData);
   if(!seriesNames.length){

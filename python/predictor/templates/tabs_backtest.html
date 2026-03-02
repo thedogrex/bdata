@@ -140,13 +140,40 @@
   <!-- ============ TAB: BEST ============ -->
   <div id="panel-best" class="hidden">
     <div class="card p-6 mb-4">
-      <div class="flex gap-4 items-end">
+      <div class="flex gap-4 items-end flex-wrap">
         <div><label class="block text-xs text-slate-400 mb-1">Horizon</label><input type="number" id="best-horizon" value="1" min="1" max="5" class="w-32"></div>
         <div><label class="block text-xs text-slate-400 mb-1">Limit</label><input type="number" id="best-limit" value="20" class="w-32"></div>
         <div><label class="block text-xs text-slate-400 mb-1">Signals from</label><input type="number" id="best-signals-min" placeholder="0" class="w-32"></div>
         <div><label class="block text-xs text-slate-400 mb-1">Signals to</label><input type="number" id="best-signals-max" placeholder="∞" class="w-32"></div>
         <button onclick="loadBest()" class="btn btn-amber">Load Best</button>
+        <div style="border-left:1px solid #475569;height:32px;margin:0 4px"></div>
+        <button onclick="bestToggleCompareMode()" id="best-compare-toggle" class="btn btn-slate">Compare Mode</button>
+        <button onclick="bestRunCompare()" id="best-compare-btn" class="btn btn-purple hidden">Compare Selected (<span id="best-compare-count">0</span>)</button>
       </div>
     </div>
     <div id="best-list"></div>
+  </div>
+
+  <!-- ============ TAB: BEST COMPARE ============ -->
+  <div id="panel-best_compare" class="hidden">
+    <div class="card p-6 mb-4">
+      <div class="flex items-center justify-between flex-wrap gap-4">
+        <div class="flex items-center gap-4">
+          <button onclick="switchTab('best')" class="btn btn-slate">&larr; Back to Best Runs</button>
+          <h2 class="text-lg font-semibold">Half-Kelly Strategy Comparison</h2>
+        </div>
+        <div class="flex gap-4 items-end flex-wrap">
+          <div><label class="block text-xs text-slate-400 mb-1">Starting Bank ($)</label><input type="number" id="bc-bank" value="1000" min="1" class="w-32" onchange="bestCompareRecalc()"></div>
+          <div><label class="block text-xs text-slate-400 mb-1">Buy Price (¢)</label><input type="number" id="bc-buy-price" value="52" min="1" max="99" step="0.5" class="w-32" onchange="bestCompareRecalc()" title="Share buy price in cents (win pays $1.00)"></div>
+          <div><label class="block text-xs text-slate-400 mb-1">Max Bet ($)</label><input type="number" id="bc-max-bet" value="500" min="1" class="w-32" onchange="bestCompareRecalc()" title="Maximum stake per signal"></div>
+          <div><label class="block text-xs text-slate-400 mb-1">Fee (%)</label><input type="number" id="bc-fee" value="1.56" min="0" step="0.01" class="w-32" onchange="bestCompareRecalc()" title="Fee charged per bet (percent of stake)"></div>
+          <button onclick="bestCompareRecalc()" class="btn btn-purple">Recalculate</button>
+        </div>
+      </div>
+    </div>
+    <div id="bc-chart" class="card p-6 mb-4" style="min-height:300px"></div>
+    <div id="bc-table" class="card p-6 mb-4"></div>
+    <div id="bc-chart-full" class="card p-6 mb-4" style="min-height:300px"></div>
+    <div id="bc-table-full" class="card p-6 mb-4"></div>
+    <div id="bc-summary" class="card p-6 mb-4"></div>
   </div>

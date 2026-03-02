@@ -189,14 +189,22 @@ function applyPreset(jsonStr){
 }
 
 // ===== TABS =====
-const TABS=['backtest','bruteforce','history','best','poly'];
+const TABS=['backtest','bruteforce','history','best','best_compare','poly'];
 function switchTab(tab){
   TABS.forEach(t=>{
-    document.getElementById('panel-'+t).classList.toggle('hidden',t!==tab);
+    const panel=document.getElementById('panel-'+t);
+    if(panel) panel.classList.toggle('hidden',t!==tab);
     const b=document.getElementById('tab-'+t);
-    if(t===tab){b.classList.add('tab-active');b.classList.remove('text-slate-400')}
-    else{b.classList.remove('tab-active');b.classList.add('text-slate-400')}
+    if(b){
+      if(t===tab){b.classList.add('tab-active');b.classList.remove('text-slate-400')}
+      else{b.classList.remove('tab-active');b.classList.add('text-slate-400')}
+    }
   });
+  // Highlight parent tab for sub-panels
+  if(tab==='best_compare'){
+    const b=document.getElementById('tab-best');
+    if(b){b.classList.add('tab-active');b.classList.remove('text-slate-400')}
+  }
   if(tab==='history')loadHistory();
   if(tab==='best')loadBest();
   if(tab==='bruteforce')loadBfSessions();
@@ -553,6 +561,10 @@ async function deleteBruteforceGroup(bfId){
 async function clearAllHistory(){if(!confirm('Delete ALL?'))return;await fetch(API+'/api/history',{method:'DELETE'});loadHistory()}
 
 // ===== BEST =====
+let bestCompareMode = false;
+let bestCompareSelected = new Set();
+let bestLastData = [];
+
 async function loadBest(){
   const horizon=document.getElementById('best-horizon').value||1;const limit=document.getElementById('best-limit').value||20;
   const sMinRaw = document.getElementById('best-signals-min')?.value;
@@ -562,12 +574,456 @@ async function loadBest(){
   const qs = new URLSearchParams({horizon: String(horizon), limit: String(limit)});
   if(sMin !== null && Number.isFinite(sMin)) qs.set('signals_min', String(Math.max(0, Math.floor(sMin))));
   if(sMax !== null && Number.isFinite(sMax)) qs.set('signals_max', String(Math.max(0, Math.floor(sMax))));
-  try{const res=await fetch(API+`/api/best?${qs.toString()}`);const data=await res.json();const el=document.getElementById('best-list');
+  try{const res=await fetch(API+`/api/best?${qs.toString()}`);const data=await res.json();bestLastData=data;const el=document.getElementById('best-list');
     if(!data.length){el.innerHTML='<div class="card p-6 text-center text-slate-400">No results.</div>';return}
-    let html='<div class="card p-6"><h2 class="text-lg font-semibold mb-4">Top Runs (H'+horizon+')</h2><table><thead><tr><th>#</th><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Correct</th><th>Wrong</th><th>W/L</th><th>Win</th><th>Params</th></tr></thead><tbody>';
-    data.forEach((r,i)=>{const ps=JSON.stringify(r.params||{}).substring(0,60);
-      html+=`<tr class="cursor-pointer" onclick="showDetail(${r.id})"><td>${i+1}</td><td class="font-medium">${r.strategy}</td><td class="${accClass(r.accuracy_pct)} font-bold text-lg">${r.accuracy_pct}%</td><td>${r.signals}</td><td class="text-green-400">${r.correct}</td><td class="text-red-400">${r.wrong}</td><td>${r.max_win_streak}/${r.max_lose_streak}</td><td>${r.window_size}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td></tr>`});
-    html+='</tbody></table></div>';el.innerHTML=html}catch(e){console.error(e)}
+    renderBestList(data, horizon);
+  }catch(e){console.error(e)}
+}
+
+function renderBestList(data, horizon){
+  const el=document.getElementById('best-list');
+  const cmp = bestCompareMode;
+  let html='<div class="card p-6"><h2 class="text-lg font-semibold mb-4">Top Runs (H'+horizon+')</h2><table><thead><tr>';
+  if(cmp) html+='<th style="width:32px"><input type="checkbox" onchange="bestToggleAll(this.checked)" title="Select all"></th>';
+  html+='<th>#</th><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Correct</th><th>Wrong</th><th>W/L</th><th>Win</th><th>Params</th></tr></thead><tbody>';
+  data.forEach((r,i)=>{const ps=JSON.stringify(r.params||{}).substring(0,60);
+    const checked = bestCompareSelected.has(r.id) ? 'checked' : '';
+    const rowClick = cmp ? `bestToggleSelect(${r.id})` : `showDetail(${r.id})`;
+    const selectedBg = (cmp && bestCompareSelected.has(r.id)) ? 'background:rgba(139,92,246,0.12)' : '';
+    html+=`<tr class="cursor-pointer" onclick="${rowClick}" style="${selectedBg}">`;
+    if(cmp) html+=`<td><input type="checkbox" ${checked} onclick="event.stopPropagation();bestToggleSelect(${r.id})" data-best-cb="${r.id}"></td>`;
+    html+=`<td>${i+1}</td><td class="font-medium">${r.strategy}</td><td class="${accClass(r.accuracy_pct)} font-bold text-lg">${r.accuracy_pct}%</td><td>${r.signals}</td><td class="text-green-400">${r.correct}</td><td class="text-red-400">${r.wrong}</td><td>${r.max_win_streak}/${r.max_lose_streak}</td><td>${r.window_size}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td></tr>`});
+  html+='</tbody></table></div>';el.innerHTML=html;
+}
+
+function bestToggleCompareMode(){
+  bestCompareMode = !bestCompareMode;
+  const btn = document.getElementById('best-compare-toggle');
+  const cmpBtn = document.getElementById('best-compare-btn');
+  if(bestCompareMode){
+    btn.classList.remove('btn-slate'); btn.classList.add('btn-purple');
+    btn.textContent = 'Exit Compare';
+    cmpBtn.classList.remove('hidden');
+  } else {
+    btn.classList.remove('btn-purple'); btn.classList.add('btn-slate');
+    btn.textContent = 'Compare Mode';
+    cmpBtn.classList.add('hidden');
+    bestCompareSelected.clear();
+  }
+  bestUpdateCompareCount();
+  if(bestLastData.length){
+    const h = document.getElementById('best-horizon').value||1;
+    renderBestList(bestLastData, h);
+  }
+}
+
+function bestToggleSelect(id){
+  if(bestCompareSelected.has(id)) bestCompareSelected.delete(id);
+  else bestCompareSelected.add(id);
+  bestUpdateCompareCount();
+  // Update checkbox and row style without full re-render
+  const cb = document.querySelector(`input[data-best-cb="${id}"]`);
+  if(cb) cb.checked = bestCompareSelected.has(id);
+  const row = cb ? cb.closest('tr') : null;
+  if(row) row.style.background = bestCompareSelected.has(id) ? 'rgba(139,92,246,0.12)' : '';
+}
+
+function bestToggleAll(checked){
+  if(checked){
+    bestLastData.forEach(r => bestCompareSelected.add(r.id));
+  } else {
+    bestCompareSelected.clear();
+  }
+  bestUpdateCompareCount();
+  document.querySelectorAll('input[data-best-cb]').forEach(cb => {
+    const rid = parseInt(cb.getAttribute('data-best-cb'));
+    cb.checked = bestCompareSelected.has(rid);
+    const row = cb.closest('tr');
+    if(row) row.style.background = cb.checked ? 'rgba(139,92,246,0.12)' : '';
+  });
+}
+
+function bestUpdateCompareCount(){
+  const el = document.getElementById('best-compare-count');
+  if(el) el.textContent = bestCompareSelected.size;
+  const btn = document.getElementById('best-compare-btn');
+  if(btn) btn.disabled = bestCompareSelected.size < 2;
+}
+
+// ===== BEST COMPARE: Half-Kelly Simulation =====
+let bestCompareData = [];
+
+const DEFAULT_BET_FEE_RATE = 0.0156;
+
+const BC_COLORS = [
+  '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16',
+  '#f97316','#6366f1','#14b8a6','#e11d48','#a855f7','#0ea5e9','#eab308','#d946ef',
+  '#22d3ee','#4ade80','#fb923c','#c084fc'
+];
+
+async function bestRunCompare(){
+  if(bestCompareSelected.size < 2){ alert('Select at least 2 runs'); return; }
+  const horizon = parseInt(document.getElementById('best-horizon').value) || 1;
+  const ids = [...bestCompareSelected];
+  try{
+    const res = await fetch(API+'/api/best/compare', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({run_ids: ids, horizon})
+    });
+    bestCompareData = await res.json();
+    switchTab('best_compare');
+    bestCompareRecalc();
+  }catch(e){ console.error(e); alert('Error loading comparison data'); }
+}
+
+function bestCompareRecalc(){
+  if(!bestCompareData.length) return;
+  const startBank = parseFloat(document.getElementById('bc-bank').value) || 1000;
+  const buyPriceCents = parseFloat(document.getElementById('bc-buy-price').value) || 52;
+  const maxBet = parseFloat(document.getElementById('bc-max-bet').value) || 500;
+
+  const feePctEl = document.getElementById('bc-fee');
+  const feePct = feePctEl ? parseFloat(feePctEl.value) : NaN;
+  const betFeeRate = (isFinite(feePct) && feePct >= 0) ? (feePct / 100) : DEFAULT_BET_FEE_RATE;
+
+  // Simulate half-Kelly + full Kelly
+  const simHalf = bestCompareData.map(run => bestSimKelly(run, startBank, buyPriceCents, maxBet, 0.5, betFeeRate));
+  const simFull = bestCompareData.map(run => bestSimKelly(run, startBank, buyPriceCents, maxBet, 1.0, betFeeRate));
+
+  bestRenderCompareChart(simHalf, startBank, 'bc-chart', 'Bank Growth (Half-Kelly)');
+  bestRenderCompareTable(simHalf, startBank, 'bc-table', 'Month-by-Month Bank Progression (Half-Kelly)');
+
+  bestRenderCompareChart(simFull, startBank, 'bc-chart-full', 'Bank Growth (Full Kelly)');
+  bestRenderCompareTable(simFull, startBank, 'bc-table-full', 'Month-by-Month Bank Progression (Full Kelly)');
+
+  // Summary remains half-kelly based (primary view)
+  bestRenderCompareSummary(simHalf, startBank, buyPriceCents, maxBet);
+}
+
+/**
+ * Polymarket economics:
+ *   Buy 1 share at `cost` cents.
+ *   Win  → get 100¢ back → profit = (100 - cost) cents.
+ *   Lose → get   0¢ back → loss   = cost cents.
+ *
+ * Net odds ratio b = profit / loss = (100 - cost) / cost.
+ * Kelly fraction  f* = (b·p − q) / b   where p = accuracy, q = 1−p.
+ * Half-Kelly      f½ = f* / 2.
+ * Breakeven accuracy = cost / 100  (e.g. 52¢ → need >52% to have edge).
+ *
+ * Per signal we wager `stake = bank × f½` dollars.
+ *   Win  → bank += stake × b   (we risked stake, got back stake + stake·b)
+ *   Lose → bank -= stake        (we lost the cost)
+ */
+function bestSimKelly(run, startBank, buyPriceCents, maxBet, kellyScale, betFeeRate){
+  const cost = buyPriceCents / 100;                // e.g. 0.52
+  const profitPerShare = 1.0 - cost;               // e.g. 0.48
+  const b = profitPerShare / cost;                  // net odds ≈ 0.923
+
+  const acc = (run.accuracy_pct || 50) / 100;
+  const kellyFull = (b * acc - (1 - acc)) / b;
+  const kellyApplied = kellyFull * (typeof kellyScale==='number' ? kellyScale : 0.5);
+
+  const monthly = run.monthly || [];
+  const label = `#${run.id} ${run.strategy} (${run.accuracy_pct}%, ${run.signals}sig)`;
+
+  function _calcKellyApplied(p){
+    return (((b * p - (1 - p)) / b) * (typeof kellyScale==='number' ? kellyScale : 0.5));
+  }
+
+  function _simMonth(bank, nSignals, winProb, kh){
+    // Expected value per $1 staked: EV = p*b - (1-p)
+    // We use expected-value update (not a randomized path) to avoid artifacts
+    // like growth in months with low accuracy due to rounding/order.
+    const evPerDollar = (winProb * b) - (1 - winProb);
+
+    let avgStake = 0;
+    let maxStakeUsed = 0;
+    let edgeSignals = 0;
+
+    // If no bet fraction (or no signals), don't bet.
+    // NOTE: kh may be negative; we still simulate betting (and losses) using |kh|.
+    if(!(Math.abs(kh) > 0) || nSignals <= 0){
+      return {bank, avgStake: 0, maxStakeUsed: 0, edgeSignals: 0};
+    }
+
+    for(let j = 0; j < nSignals; j++){
+      // Cap by max bet and current bank.
+      const rawStake = bank * Math.abs(kh);
+      const stake = Math.max(0, Math.min(rawStake, maxBet || rawStake, bank));
+      if(stake <= 0) break;
+
+      bank += stake * evPerDollar;
+      bank -= stake * (typeof betFeeRate === 'number' ? betFeeRate : DEFAULT_BET_FEE_RATE);
+      if(bank < 0.01) bank = 0.01;
+
+      avgStake += stake;
+      if(stake > maxStakeUsed) maxStakeUsed = stake;
+      edgeSignals += 1;
+    }
+
+    avgStake = edgeSignals ? (avgStake / edgeSignals) : 0;
+    return {bank, avgStake, maxStakeUsed, edgeSignals};
+  }
+
+  if(!monthly.length){
+    // If monthly breakdown is missing, fall back to no month-by-month sim.
+    // (We keep bank flat because we can't reliably derive monthly accuracy/signals.)
+    return {run, label, kellyHalf: kellyFull/2, kellyFull, kellyApplied, b, monthEntries: [], finalBank: startBank};
+  }
+
+  const monthEntries = [];
+  let bank = startBank;
+  for(const m of monthly){
+    const mSignals = (m.total || 0);
+    const mAcc = ((m.accuracy || 0) / 100);
+    // Always use per-month accuracy for Kelly sizing, even if signals/month is overridden.
+    // This avoids "49% month but still grows" artifacts.
+    const mK = _calcKellyApplied(mAcc);
+    const res = _simMonth(bank, mSignals, mAcc, mK);
+    bank = res.bank;
+    monthEntries.push({
+      month: m.month || '?',
+      bank: Math.round(bank*100)/100,
+      signals: mSignals,
+      edge_signals: res.edgeSignals,
+      avg_stake: res.avgStake,
+      max_stake: res.maxStakeUsed,
+      accuracy: (m.accuracy||0)
+    });
+  }
+  return {run, label, kellyHalf: kellyFull/2, kellyFull, kellyApplied, b, monthEntries, finalBank: bank};
+}
+
+function bestRenderCompareChart(simResults, startBank, targetElId, title){
+  const el = document.getElementById(targetElId || 'bc-chart');
+  if(!el) return;
+  // Collect all unique months
+  const allMonths = [];
+  const monthSet = new Set();
+  simResults.forEach(s => s.monthEntries.forEach(m => {
+    if(!monthSet.has(m.month)){monthSet.add(m.month); allMonths.push(m.month);}
+  }));
+
+  // Build SVG chart
+  const W = 900, H = 350, pad = {t:30,r:20,b:60,l:80};
+  const plotW = W - pad.l - pad.r;
+  const plotH = H - pad.t - pad.b;
+
+  // Data series: [startBank, month1bank, month2bank, ...]
+  const series = simResults.map(s => {
+    const vals = [startBank];
+    allMonths.forEach(month => {
+      const entry = s.monthEntries.find(e => e.month === month);
+      vals.push(entry ? entry.bank : vals[vals.length-1]);
+    });
+    return vals;
+  });
+
+  const allVals = series.flat();
+  const minV = Math.min(...allVals) * 0.95;
+  const maxV = Math.max(...allVals) * 1.05;
+  const xLabels = ['Start', ...allMonths];
+  const xStep = plotW / Math.max(1, xLabels.length - 1);
+
+  function toX(i){ return pad.l + i * xStep; }
+  function toY(v){ return pad.t + plotH - ((v - minV) / (maxV - minV)) * plotH; }
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;height:auto" xmlns="http://www.w3.org/2000/svg">`;
+  svg += `<rect width="${W}" height="${H}" fill="#0f172a" rx="8"/>`;
+
+  // Grid lines
+  const yTicks = 5;
+  for(let i = 0; i <= yTicks; i++){
+    const v = minV + (maxV - minV) * i / yTicks;
+    const y = toY(v);
+    svg += `<line x1="${pad.l}" y1="${y}" x2="${W-pad.r}" y2="${y}" stroke="#334155" stroke-width="0.5"/>`;
+    svg += `<text x="${pad.l-8}" y="${y+4}" text-anchor="end" fill="#94a3b8" font-size="10">$${Math.round(v)}</text>`;
+  }
+
+  // X labels
+  xLabels.forEach((lbl, i) => {
+    const x = toX(i);
+    svg += `<text x="${x}" y="${H-pad.b+18}" text-anchor="middle" fill="#94a3b8" font-size="10">${lbl}</text>`;
+  });
+
+  // Lines + dots
+  series.forEach((vals, si) => {
+    const color = BC_COLORS[si % BC_COLORS.length];
+    let path = '';
+    vals.forEach((v, i) => {
+      const x = toX(i), y = toY(v);
+      path += (i === 0 ? `M${x},${y}` : ` L${x},${y}`);
+    });
+    svg += `<path d="${path}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round"/>`;
+    vals.forEach((v, i) => {
+      const x = toX(i), y = toY(v);
+      svg += `<circle cx="${x}" cy="${y}" r="3.5" fill="${color}" stroke="#0f172a" stroke-width="1"/>`;
+    });
+  });
+
+  // Start bank reference line
+  const sY = toY(startBank);
+  svg += `<line x1="${pad.l}" y1="${sY}" x2="${W-pad.r}" y2="${sY}" stroke="#f59e0b" stroke-width="1" stroke-dasharray="6,3"/>`;
+  svg += `<text x="${W-pad.r+2}" y="${sY+3}" fill="#f59e0b" font-size="9">start</text>`;
+
+  svg += '</svg>';
+
+  // Legend
+  let legend = '<div class="flex flex-wrap gap-3 mt-3">';
+  simResults.forEach((s, i) => {
+    const color = BC_COLORS[i % BC_COLORS.length];
+    legend += `<span class="flex items-center gap-1 text-xs"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:${color}"></span>${s.label}</span>`;
+  });
+  legend += '</div>';
+
+  el.innerHTML = `<h3 class="font-semibold mb-3">${title || 'Bank Growth'}</h3>${svg}${legend}`;
+}
+
+function bestRenderCompareTable(simResults, startBank, targetElId, title){
+  const el = document.getElementById(targetElId || 'bc-table');
+  if(!el) return;
+  if(!simResults.length){el.innerHTML='';return;}
+
+  const isFull = (targetElId === 'bc-table-full');
+  const kLabel = isFull ? 'K%' : '½K%';
+
+  // Collect all months
+  const allMonths = [];
+  const monthSet = new Set();
+  simResults.forEach(s => s.monthEntries.forEach(m => {
+    if(!monthSet.has(m.month)){monthSet.add(m.month); allMonths.push(m.month);}
+  }));
+
+  let html = `<h3 class="font-semibold mb-3">${title || 'Month-by-Month Bank Progression'}</h3>`;
+  html += `<div style="overflow-x:auto"><table><thead><tr><th>Run</th><th>${kLabel}</th><th>Start</th>`;
+  allMonths.forEach(m => html += `<th>${m}</th>`);
+  html += '<th>Final</th><th>ROI</th></tr></thead><tbody>';
+
+  simResults.forEach((s, i) => {
+    const color = BC_COLORS[i % BC_COLORS.length];
+    const roi = ((s.finalBank - startBank) / startBank * 100).toFixed(1);
+    const roiClass = s.finalBank >= startBank ? 'text-green-400' : 'text-red-400';
+    html += `<tr><td><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};margin-right:6px"></span><span class="text-xs">${s.label}</span></td>`;
+    const kPct = ((isFull ? (s.kellyApplied != null ? s.kellyApplied : s.kellyFull) : s.kellyHalf) * 100);
+    const kClass = kPct >= 0 ? 'text-slate-200' : 'text-red-400';
+    html += `<td class="text-xs font-mono ${kClass}">${kPct.toFixed(2)}%</td>`;
+    html += `<td class="font-mono text-xs">$${startBank.toFixed(0)}</td>`;
+    allMonths.forEach(month => {
+      const entry = s.monthEntries.find(e => e.month === month);
+      if(entry){
+        const bankClass = entry.bank >= startBank ? 'text-green-400' : 'text-red-400';
+        const avgStake = entry.avg_stake ? entry.avg_stake.toFixed(0) : '0';
+        const maxStake = entry.max_stake ? entry.max_stake.toFixed(0) : '0';
+        const edgeSigs = entry.edge_signals != null ? entry.edge_signals : 0;
+        html += `<td class="font-mono text-xs ${bankClass}" title="Signals: ${entry.signals}, Edge signals: ${edgeSigs}, Avg stake: $${avgStake}, Max stake: $${maxStake}">$${entry.bank.toFixed(0)}</td>`;
+      } else {
+        html += '<td class="text-slate-500">—</td>';
+      }
+    });
+    html += `<td class="font-mono font-bold ${roiClass}">$${s.finalBank.toFixed(0)}</td>`;
+    html += `<td class="font-bold ${roiClass}">${roi}%</td>`;
+    html += '</tr>';
+  });
+
+  html += '</tbody></table></div>';
+
+  // Detail table with signals breakdown
+  html += '<details class="mt-4"><summary class="text-xs text-slate-400 cursor-pointer font-semibold">Monthly Signal Details</summary>';
+  html += '<div style="overflow-x:auto" class="mt-2"><table><thead><tr><th>Run</th>';
+  allMonths.forEach(m => html += `<th colspan="2">${m}</th>`);
+  html += '</tr><tr><th></th>';
+  allMonths.forEach(() => html += '<th class="text-xs text-slate-500">Sig</th><th class="text-xs text-slate-500">Acc%</th>');
+  html += '</tr></thead><tbody>';
+
+  simResults.forEach((s, i) => {
+    const color = BC_COLORS[i % BC_COLORS.length];
+    html += `<tr><td><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};margin-right:6px"></span><span class="text-xs">#${s.run.id}</span></td>`;
+    allMonths.forEach(month => {
+      const entry = s.monthEntries.find(e => e.month === month);
+      if(entry){
+        const a = entry.accuracy != null ? entry.accuracy : (entry.wins/Math.max(1,entry.signals)*100);
+        html += `<td class="text-xs font-mono">${entry.signals}</td><td class="text-xs ${accClass(a)}">${a.toFixed(1)}%</td>`;
+      } else {
+        html += '<td>—</td><td>—</td>';
+      }
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div></details>';
+
+  el.innerHTML = html;
+}
+
+function bestRenderCompareSummary(simResults, startBank, buyPriceCents, maxBet){
+  const el = document.getElementById('bc-summary');
+  if(!simResults.length){el.innerHTML='';return;}
+
+  const cost = (buyPriceCents || 52) / 100;
+  const profitCents = 100 - (buyPriceCents || 52);
+  const lossCents = buyPriceCents || 52;
+  const bOdds = profitCents / lossCents;
+  const breakeven = (cost * 100).toFixed(1);
+
+  // Sort by final bank descending
+  const sorted = [...simResults].sort((a,b) => b.finalBank - a.finalBank);
+
+  let html = '<h3 class="font-semibold mb-3">Summary — Ranked by Final Bank</h3>';
+  html += '<table><thead><tr><th>Rank</th><th>Run</th><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Kelly%</th><th>½Kelly%</th><th>Max Lose Streak</th><th>Final Bank</th><th>ROI</th><th>Profit</th></tr></thead><tbody>';
+
+  sorted.forEach((s, i) => {
+    const r = s.run;
+    const roi = ((s.finalBank - startBank) / startBank * 100).toFixed(1);
+    const profit = s.finalBank - startBank;
+    const color = BC_COLORS[simResults.indexOf(s) % BC_COLORS.length];
+    const roiClass = profit >= 0 ? 'text-green-400' : 'text-red-400';
+    const hasEdge = r.accuracy_pct > parseFloat(breakeven);
+    const kFullPct = (s.kellyFull*100);
+    const kHalfPct = (s.kellyHalf*100);
+    const kFullClass = kFullPct >= 0 ? 'text-slate-400' : 'text-red-400';
+    const kHalfClass = kHalfPct >= 0 ? 'text-slate-200' : 'text-red-400';
+    html += `<tr>`;
+    html += `<td class="font-bold">${i+1}</td>`;
+    html += `<td><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};margin-right:6px"></span>#${r.id}</td>`;
+    html += `<td class="font-medium">${r.strategy}</td>`;
+    html += `<td class="${accClass(r.accuracy_pct)} font-bold">${r.accuracy_pct}%${!hasEdge ? ' <span class="text-red-500 text-xs">no edge</span>' : ''}</td>`;
+    html += `<td>${r.signals}</td>`;
+    html += `<td class="font-mono ${kFullClass}">${kFullPct.toFixed(2)}%</td>`;
+    html += `<td class="font-mono ${kHalfClass}">${kHalfPct.toFixed(2)}%</td>`;
+    html += `<td class="text-red-400">${r.max_lose_streak}</td>`;
+    html += `<td class="font-bold font-mono ${roiClass}">$${s.finalBank.toFixed(0)}</td>`;
+    html += `<td class="font-bold ${roiClass}">${roi}%</td>`;
+    html += `<td class="font-mono ${roiClass}">${profit >= 0 ? '+' : ''}$${profit.toFixed(0)}</td>`;
+    html += '</tr>';
+  });
+
+  html += '</tbody></table>';
+
+  // Economics box
+  html += `<div class="mt-4 p-4 rounded-lg text-xs" style="background:#0f172a;border:1px solid #334155">
+    <div class="text-slate-200 font-semibold mb-2">Polymarket Economics (Buy @ ${buyPriceCents||52}¢)</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+      <div class="p-2 rounded" style="background:#1e293b"><span class="text-slate-400">Buy price:</span> <b>${lossCents}¢</b></div>
+      <div class="p-2 rounded" style="background:#1e293b"><span class="text-slate-400">Win profit:</span> <b class="text-green-400">+${profitCents}¢</b></div>
+      <div class="p-2 rounded" style="background:#1e293b"><span class="text-slate-400">Lose loss:</span> <b class="text-red-400">−${lossCents}¢</b></div>
+      <div class="p-2 rounded" style="background:#1e293b"><span class="text-slate-400">Odds (b):</span> <b>${bOdds.toFixed(4)}</b></div>
+      <div class="p-2 rounded" style="background:#1e293b"><span class="text-slate-400">Breakeven:</span> <b class="text-amber-400">${breakeven}%</b></div>
+      <div class="p-2 rounded" style="background:#1e293b"><span class="text-slate-400">Max bet:</span> <b>$${(maxBet||0).toFixed(0)}</b></div>
+    </div>
+    <div class="text-slate-400 leading-relaxed">
+      <b>Half-Kelly Criterion (asymmetric payoff):</b><br>
+      <code>b = (100 − cost) / cost = ${profitCents}/${lossCents} ≈ ${bOdds.toFixed(4)}</code><br>
+      <code>f* = (b·p − q) / b</code> &nbsp; where <code>p</code> = accuracy, <code>q = 1−p</code><br>
+      <code>f½ = f* / 2</code> — we bet this fraction of our current bank per signal.<br><br>
+      <b>On win:</b> bank += stake × b (profit is only ${profitCents}¢ per share, not 1:1).<br>
+      <b>On lose:</b> bank -= stake (we lose our ${lossCents}¢ cost).<br><br>
+      <b>Risk cap:</b> stake per signal is capped by <b>Max bet</b> input.<br>
+      Because bets are always a <b>% of current bank</b>, lose streaks automatically shrink bet size, preventing ruin.<br>
+      Strategies below <b>${breakeven}%</b> accuracy have <b>zero edge</b> at this buy price — Kelly = 0%, no bets placed.
+    </div>
+  </div>`;
+
+  el.innerHTML = html;
 }
 
 // ===== COMPARE DEVELOPMENT POPUP =====

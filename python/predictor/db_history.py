@@ -408,6 +408,58 @@ async def get_completed_combo_indices(bf_id: int) -> set[str]:
     return result
 
 
+async def get_runs_by_ids(run_ids: list[int], horizon: int = 1) -> list[dict]:
+    """Fetch multiple runs by their IDs with full horizon data (including monthly)."""
+    if not run_ids:
+        return []
+    placeholders = ",".join(["%s"] * len(run_ids))
+    rows = await db.fetchall(f"""
+        SELECT r.id, r.strategy, r.params_json, r.train_start, r.train_end,
+               r.test_start, r.test_end, r.window_size,
+               h.accuracy_pct, h.signals, h.correct, h.wrong, h.skipped,
+               h.max_win_streak, h.max_lose_streak,
+               r.total_time_sec, r.created_at,
+               h.monthly_json, h.up_predictions, h.up_correct, h.up_accuracy,
+               h.down_predictions, h.down_correct, h.down_accuracy, h.horizon
+        FROM backtest_runs r
+        JOIN backtest_horizons h ON h.run_id = r.id
+        WHERE r.id IN ({placeholders}) AND h.horizon = %s
+        ORDER BY h.accuracy_pct DESC
+    """, tuple(run_ids) + (horizon,))
+
+    results = []
+    for r in rows:
+        monthly = _safe_json_loads(r[17], [])
+        results.append({
+            "id": r[0],
+            "strategy": r[1],
+            "params": json.loads(r[2]) if r[2] else {},
+            "train_start": r[3],
+            "train_end": r[4],
+            "test_start": r[5],
+            "test_end": r[6],
+            "window_size": r[7],
+            "accuracy_pct": r[8],
+            "signals": r[9],
+            "correct": r[10],
+            "wrong": r[11],
+            "skipped": r[12],
+            "max_win_streak": r[13],
+            "max_lose_streak": r[14],
+            "total_time_sec": r[15],
+            "created_at": str(r[16]) if r[16] else "",
+            "monthly": monthly,
+            "up_predictions": r[18],
+            "up_correct": r[19],
+            "up_accuracy": r[20],
+            "down_predictions": r[21],
+            "down_correct": r[22],
+            "down_accuracy": r[23],
+            "horizon": r[24],
+        })
+    return results
+
+
 async def get_best_runs(
     limit: int = 20,
     horizon: int = 1,

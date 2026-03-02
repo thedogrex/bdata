@@ -20,7 +20,7 @@ from predictor.db_history import (
     save_backtest_run, get_history, get_history_detail,
     delete_run, clear_history,
     get_bruteforce_sessions, get_bruteforce_session_by_id, get_best_runs,
-    delete_bruteforce_group,
+    get_runs_by_ids, delete_bruteforce_group,
 )
 from predictor.bruteforce import run_bruteforce, resume_bruteforce, get_default_grid, build_combos
 from predictor.task_manager import task_mgr
@@ -118,6 +118,11 @@ class TemplateUpdateRequest(BaseModel):
     horizon: int | None = None
     active: bool | None = None
     sort_order: int | None = None
+
+
+class BestCompareRequest(BaseModel):
+    run_ids: list[int]
+    horizon: int = 1
 
 
 class BatchPredictRequest(BaseModel):
@@ -483,6 +488,11 @@ async def api_best_runs(
     signals_max: int | None = Query(None),
 ):
     return await get_best_runs(limit, horizon, signals_min=signals_min, signals_max=signals_max)
+
+
+@app.post("/api/best/compare")
+async def api_best_compare(req: BestCompareRequest):
+    return await get_runs_by_ids(run_ids=req.run_ids, horizon=req.horizon)
 
 
 # ==================== BRUTE FORCE ====================

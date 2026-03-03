@@ -401,51 +401,121 @@ function histHorizonsHtml(run, selectedHorizons){
   return parts.join(' | ');
 }
 
+// ===== BF COMPARE MODE (per-session) =====
+let bfCompareMode = {};       // bfId -> bool
+let bfCompareSelected = {};   // bfId -> Set of run ids
+
+function bfToggleCompareMode(bfId){
+  bfCompareMode[bfId] = !bfCompareMode[bfId];
+  if(!bfCompareMode[bfId]){
+    if(bfCompareSelected[bfId]) bfCompareSelected[bfId].clear();
+  }
+  histRenderBfBody(bfId);
+}
+
+function bfToggleSelect(bfId, runId){
+  if(!bfCompareSelected[bfId]) bfCompareSelected[bfId] = new Set();
+  const sel = bfCompareSelected[bfId];
+  if(sel.has(runId)) sel.delete(runId); else sel.add(runId);
+  // Update checkbox + row highlight without full re-render
+  const cb = document.querySelector(`input[data-bf-id="${bfId}"][data-bf-run="${runId}"]`);
+  if(cb) cb.checked = sel.has(runId);
+  const row = cb ? cb.closest('tr') : null;
+  if(row) row.style.background = sel.has(runId) ? 'rgba(139,92,246,0.12)' : '';
+  // Update counter
+  const countEl = document.getElementById('bf-cmp-count-'+bfId);
+  if(countEl) countEl.textContent = sel.size;
+  const btn = document.getElementById('bf-cmp-btn-'+bfId);
+  if(btn) btn.disabled = sel.size < 2;
+}
+
+function bfToggleAllSelect(bfId, checked){
+  const st = histBfState[bfId];
+  if(!st || !st.runs) return;
+  if(!bfCompareSelected[bfId]) bfCompareSelected[bfId] = new Set();
+  const sel = bfCompareSelected[bfId];
+  if(checked){ st.runs.forEach(r => sel.add(r.id)); } else { st.runs.forEach(r => sel.delete(r.id)); }
+  document.querySelectorAll(`input[data-bf-id="${bfId}"]`).forEach(cb => {
+    const rid = parseInt(cb.getAttribute('data-bf-run'));
+    cb.checked = sel.has(rid);
+    const row = cb.closest('tr');
+    if(row) row.style.background = cb.checked ? 'rgba(139,92,246,0.12)' : '';
+  });
+  const countEl = document.getElementById('bf-cmp-count-'+bfId);
+  if(countEl) countEl.textContent = sel.size;
+  const btn = document.getElementById('bf-cmp-btn-'+bfId);
+  if(btn) btn.disabled = sel.size < 2;
+}
+
+async function bfRunCompare(bfId){
+  const sel = bfCompareSelected[bfId];
+  if(!sel || sel.size < 2){ alert('Select at least 2 runs'); return; }
+  // Derive horizon from the actual loaded runs (not the filter selection)
+  const st = histBfState[bfId];
+  const firstRun = st && st.runs && st.runs.length ? st.runs[0] : null;
+  const horizonKeys = firstRun ? Object.keys(firstRun.horizons || {}).map(Number).filter(n=>n>0).sort((a,b)=>a-b) : [];
+  const horizon = horizonKeys.length ? horizonKeys[0] : 1;
+  const ids = [...sel];
+  try{
+    const res = await fetch(API+'/api/best/compare', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({run_ids: ids, horizon})
+    });
+    bestCompareData = await res.json();
+    _bcSetSource('history');
+    switchTab('best_compare');
+    bestCompareRecalc();
+  }catch(e){ console.error(e); alert('Error loading comparison data'); }
+}
+
 async function histLoadBfRuns(bfId){
-  const st=histBfState[bfId]||{page:1,pageSize:20,win:''};
+  const st=histBfState[bfId]||{page:1,pageSize:20,win:'',total:0};
   histBfState[bfId]=st;
   const minAcc=document.getElementById('hist-min-acc')?.value||'';
-  const selectedHorizons=histGetSelectedHorizons();
-  const fetchLimit=5000;
-  let url=API+`/api/history?limit=${fetchLimit}&bruteforce_id=${bfId}`;
+  const offset=(st.page-1)*st.pageSize;
+  let url=API+`/api/history/bruteforce/${bfId}/runs?offset=${offset}&limit=${st.pageSize}`;
   if(minAcc)url+='&min_accuracy='+minAcc;
+  const win=String(st.win||'').trim();
+  if(win)url+='&window_size='+win;
   try{
     const res=await fetch(url);
     const data=await res.json();
-    let runs=Array.isArray(data)?data:[];
-    const win=String(st.win||'').trim();
-    if(win)runs=runs.filter(r=>String(r.window_size||'')===win);
-    if(minAcc){
-      const ma=Number(minAcc);
-      if(!isNaN(ma))runs=runs.filter(r=>histMaxAccBySelectedHorizons(r, selectedHorizons)>=ma);
-    }
-    st.runs=runs;
-    st.page=Math.max(1,Math.min(st.page, Math.max(1, Math.ceil(runs.length/st.pageSize))));
+    st.runs=Array.isArray(data.runs)?data.runs:[];
+    st.total=data.total||0;
+    st.page=Math.max(1,Math.min(st.page, Math.max(1, Math.ceil(st.total/st.pageSize))));
   }catch(e){
     st.runs=[];
+    st.total=0;
     st.page=1;
   }
 }
 
 function histRenderBfBody(bfId){
-  const st=histBfState[bfId]||{page:1,pageSize:20,win:'',runs:[]};
+  const st=histBfState[bfId]||{page:1,pageSize:20,win:'',runs:[],total:0};
   const selectedHorizons=histGetSelectedHorizons();
-  const total=st.runs?st.runs.length:0;
+  const total=st.total||0;
   const pages=Math.max(1,Math.ceil(total/st.pageSize));
   const page=Math.max(1,Math.min(st.page,pages));
-  const start=(page-1)*st.pageSize;
-  const slice=(st.runs||[]).slice(start,start+st.pageSize);
+  const runs=st.runs||[];
   const body=document.getElementById('hist-bf-body-'+bfId);
   if(!body)return;
 
   const prevDisabled=page<=1?'disabled':'';
   const nextDisabled=page>=pages?'disabled':'';
   const winVal=st.win!=null?String(st.win):'';
+  const cmp = !!bfCompareMode[bfId];
+  const sel = bfCompareSelected[bfId] || new Set();
+  const cmpBtnLabel = cmp ? 'Exit Compare' : 'Compare Mode';
+  const cmpBtnClass = cmp ? 'btn-purple' : 'btn-slate';
   let html=`
     <div class="flex flex-wrap items-end justify-between gap-3 mt-3">
-      <div>
-        <label class="block text-xs text-slate-400 mb-1">Window Size</label>
-        <input type="number" value="${winVal}" placeholder="5000" class="w-32" oninput="histSetBfWin(${bfId},this.value)" />
+      <div class="flex items-end gap-3">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Window Size</label>
+          <input type="number" value="${winVal}" placeholder="5000" class="w-32" oninput="histSetBfWin(${bfId},this.value)" />
+        </div>
+        <button onclick="bfToggleCompareMode(${bfId})" class="btn ${cmpBtnClass} text-xs">${cmpBtnLabel}</button>
+        ${cmp ? `<button id="bf-cmp-btn-${bfId}" onclick="bfRunCompare(${bfId})" class="btn btn-purple text-xs" ${sel.size<2?'disabled':''}>Compare Selected (<span id="bf-cmp-count-${bfId}">${sel.size}</span>)</button>` : ''}
       </div>
       <div class="flex items-center gap-2">
         <button class="btn btn-slate text-xs" ${prevDisabled} onclick="histSetBfPage(${bfId},${page-1})">Prev</button>
@@ -453,13 +523,18 @@ function histRenderBfBody(bfId){
         <button class="btn btn-slate text-xs" ${nextDisabled} onclick="histSetBfPage(${bfId},${page+1})">Next</button>
       </div>
     </div>
-    <table class="mt-2"><thead><tr><th>ID</th><th>Params</th><th>Win</th><th>Horizons</th><th>Time</th><th></th></tr></thead><tbody>
+    <table class="mt-2"><thead><tr>${cmp ? `<th style="width:32px"><input type="checkbox" onchange="bfToggleAllSelect(${bfId},this.checked)" title="Select all"></th>` : ''}<th>ID</th><th>Params</th><th>Win</th><th>Horizons</th><th>Time</th><th></th></tr></thead><tbody>
   `;
 
-  slice.forEach(r=>{
+  runs.forEach(r=>{
     const hs=histHorizonsHtml(r, selectedHorizons);
     const ps=JSON.stringify(r.params||{}).substring(0,80);
-    html+=`<tr class="cursor-pointer hover:bg-slate-700" onclick="event.stopPropagation();showDetail(${r.id})"><td>${r.id}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td><td>${r.window_size||'?'} </td><td>${hs}</td><td>${r.total_time_sec}s</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`;
+    const checked = (cmp && sel.has(r.id)) ? 'checked' : '';
+    const rowClick = cmp ? `event.stopPropagation();bfToggleSelect(${bfId},${r.id})` : `event.stopPropagation();showDetail(${r.id})`;
+    const selectedBg = (cmp && sel.has(r.id)) ? 'background:rgba(139,92,246,0.12)' : '';
+    html+=`<tr class="cursor-pointer hover:bg-slate-700" onclick="${rowClick}" style="${selectedBg}">`;
+    if(cmp) html+=`<td><input type="checkbox" ${checked} onclick="event.stopPropagation();bfToggleSelect(${bfId},${r.id})" data-bf-id="${bfId}" data-bf-run="${r.id}"></td>`;
+    html+=`<td>${r.id}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td><td>${r.window_size||'?'} </td><td>${hs}</td><td>${r.total_time_sec}s</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`;
   });
   html+='</tbody></table>';
   body.innerHTML=html;
@@ -472,9 +547,10 @@ async function histOnToggleBf(bfId, detailsEl){
 }
 
 async function histSetBfPage(bfId, page){
-  const st=histBfState[bfId]||{page:1,pageSize:20,win:''};
+  const st=histBfState[bfId]||{page:1,pageSize:20,win:'',total:0};
   histBfState[bfId]=st;
   st.page=Math.max(1,parseInt(page,10)||1);
+  await histLoadBfRuns(bfId);
   histRenderBfBody(bfId);
 }
 
@@ -494,24 +570,26 @@ async function loadHistory(){
   const limit=document.getElementById('hist-limit')?.value||'50';
   const selectedHorizons=histGetSelectedHorizons();
   const itemLimit=Math.max(1,parseInt(limit,10)||50);
-  const fetchLimit=Math.max(itemLimit*50,200);
-  let url=API+'/api/history?limit='+fetchLimit;
-  if(strategy)url+='&strategy='+strategy;if(minAcc)url+='&min_accuracy='+minAcc;
-  try{const res=await fetch(url);const data=await res.json();const el=document.getElementById('history-list');
-    if(!data.length){el.innerHTML='<div class="card p-6 text-center text-slate-400">No results.</div>';return}
-    const bfGroups={};const standalone=[];
-    data.forEach(r=>{
-      if(r.is_bruteforce && r.bruteforce_id){
-        if(!bfGroups[r.bruteforce_id])bfGroups[r.bruteforce_id]={runs:[],strategy:r.strategy,bf_id:r.bruteforce_id};
-        bfGroups[r.bruteforce_id].runs.push(r);
-      }else{standalone.push(r)}
-    });
-    const bfIds=Object.keys(bfGroups).sort((a,b)=>b-a);
+  try{
+    // Fetch standalone (non-BF) runs and BF session headers in parallel
+    let runUrl=API+'/api/history?limit='+itemLimit+'&exclude_bruteforce=true';
+    if(strategy)runUrl+='&strategy='+strategy;
+    if(minAcc)runUrl+='&min_accuracy='+minAcc;
+    const [runsRes, bfRes] = await Promise.all([
+      fetch(runUrl),
+      fetch(API+'/api/bruteforce/sessions')
+    ]);
+    const allRuns=await runsRes.json();
+    const bfSessions=await bfRes.json();
+    const el=document.getElementById('history-list');
+
+    const standalone=Array.isArray(allRuns)?allRuns:[];
+
+    // Build items list: BF sessions + standalone runs, sorted by date
     const items=[];
-    bfIds.forEach(bfId=>{
-      const g=bfGroups[bfId];
-      const createdAt=Math.max(...g.runs.map(r=>new Date(r.created_at||0).getTime()||0),0);
-      items.push({type:'bf',bfId:Number(bfId),createdAt});
+    (Array.isArray(bfSessions)?bfSessions:[]).forEach(s=>{
+      if(strategy && s.strategy!==strategy) return;
+      items.push({type:'bf',session:s,createdAt:new Date(s.created_at||0).getTime()||0});
     });
     standalone.forEach(r=>{
       items.push({type:'run',run:r,createdAt:new Date(r.created_at||0).getTime()||0});
@@ -519,19 +597,18 @@ async function loadHistory(){
     items.sort((a,b)=>b.createdAt-a.createdAt);
     const limited=items.slice(0,itemLimit);
 
+    if(!limited.length){el.innerHTML='<div class="card p-6 text-center text-slate-400">No results.</div>';return}
+
     let html='<div class="card p-6">';
     limited.filter(x=>x.type==='bf').forEach(it=>{
-      const bfId=it.bfId;
-      const g=bfGroups[String(bfId)];
-      const best=g.runs.reduce((b,r)=>{
-        const acc=histMaxAccBySelectedHorizons(r, selectedHorizons);
-        return acc>b.acc?{acc,r}:b;
-      },{acc:0,r:null});
+      const s=it.session;
+      const bfId=s.id;
+      const bestAcc=s.best_accuracy||0;
       html+=`<details class="mb-3 p-3 rounded-lg" style="background:#0f172a;border:1px solid #334155" ontoggle="histOnToggleBf(${bfId},this)">
         <summary class="cursor-pointer flex items-center justify-between">
-          <span><span class="badge badge-bf">BF#${bfId}</span> <b class="ml-2">${g.strategy}</b> <span class="text-slate-400 text-xs ml-2">${g.runs.length} runs</span></span>
+          <span><span class="badge badge-bf">BF#${bfId}</span> <b class="ml-2">${s.strategy}</b> <span class="text-slate-400 text-xs ml-2">${s.completed||0} runs</span></span>
           <span class="flex items-center gap-3">
-            <span class="${accClass(best.acc)} font-bold">Best: ${best.acc}%</span>
+            <span class="${accClass(bestAcc)} font-bold">Best: ${bestAcc}%</span>
             <button onclick="event.stopPropagation();deleteBruteforceGroup(${bfId})" class="text-red-400 text-xs hover:underline">remove pack</button>
           </span>
         </summary>
@@ -652,6 +729,17 @@ function bestUpdateCompareCount(){
 
 // ===== BEST COMPARE: Half-Kelly Simulation =====
 let bestCompareData = [];
+let bestCompareSource = 'best'; // 'best' or 'history'
+
+function bestCompareGoBack(){
+  switchTab(bestCompareSource === 'history' ? 'history' : 'best');
+}
+
+function _bcSetSource(src){
+  bestCompareSource = src;
+  const btn = document.getElementById('bc-back-btn');
+  if(btn) btn.innerHTML = src === 'history' ? '&larr; Back to History' : '&larr; Back to Best Runs';
+}
 
 const DEFAULT_BET_FEE_RATE = 0.0156;
 
@@ -671,6 +759,7 @@ async function bestRunCompare(){
       body: JSON.stringify({run_ids: ids, horizon})
     });
     bestCompareData = await res.json();
+    _bcSetSource('best');
     switchTab('best_compare');
     bestCompareRecalc();
   }catch(e){ console.error(e); alert('Error loading comparison data'); }
@@ -895,6 +984,17 @@ function bestRenderCompareTable(simResults, startBank, targetElId, title){
     if(!monthSet.has(m.month)){monthSet.add(m.month); allMonths.push(m.month);}
   }));
 
+  // Ensure month columns are chronological so comparisons are against the previous month.
+  // Month format is typically YYYY-MM which is lexicographically sortable.
+  allMonths.sort((a,b)=>{
+    const sa=String(a||'');
+    const sb=String(b||'');
+    const ta=Date.parse(sa+'-01');
+    const tb=Date.parse(sb+'-01');
+    if(!isNaN(ta) && !isNaN(tb)) return ta-tb;
+    return sa.localeCompare(sb);
+  });
+
   let html = `<h3 class="font-semibold mb-3">${title || 'Month-by-Month Bank Progression'}</h3>`;
   html += `<div style="overflow-x:auto"><table><thead><tr><th>Run</th><th>${kLabel}</th><th>Start</th>`;
   allMonths.forEach(m => html += `<th>${m}</th>`);
@@ -909,6 +1009,7 @@ function bestRenderCompareTable(simResults, startBank, targetElId, title){
     const kClass = kPct >= 0 ? 'text-slate-200' : 'text-red-400';
     html += `<td class="text-xs font-mono ${kClass}">${kPct.toFixed(2)}%</td>`;
     html += `<td class="font-mono text-xs">$${startBank.toFixed(0)}</td>`;
+    let prevBank = startBank;
     allMonths.forEach(month => {
       const entry = s.monthEntries.find(e => e.month === month);
       if(entry){
@@ -916,7 +1017,10 @@ function bestRenderCompareTable(simResults, startBank, targetElId, title){
         const avgStake = entry.avg_stake ? entry.avg_stake.toFixed(0) : '0';
         const maxStake = entry.max_stake ? entry.max_stake.toFixed(0) : '0';
         const edgeSigs = entry.edge_signals != null ? entry.edge_signals : 0;
-        html += `<td class="font-mono text-xs ${bankClass}" title="Signals: ${entry.signals}, Edge signals: ${edgeSigs}, Avg stake: $${avgStake}, Max stake: $${maxStake}">$${entry.bank.toFixed(0)}</td>`;
+        // Highlight negative profit months (bank decreased from previous month)
+        const bgStyle = (entry.bank < prevBank) ? 'background:rgba(239,68,68,0.12)' : '';
+        html += `<td class="font-mono text-xs ${bankClass}" style="${bgStyle}" title="Signals: ${entry.signals}, Edge signals: ${edgeSigs}, Avg stake: $${avgStake}, Max stake: $${maxStake}">$${entry.bank.toFixed(0)}</td>`;
+        prevBank = entry.bank;
       } else {
         html += '<td class="text-slate-500">—</td>';
       }

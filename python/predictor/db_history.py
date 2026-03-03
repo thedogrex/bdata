@@ -87,93 +87,191 @@ async def save_backtest_run(result: dict) -> int:
 
 async def get_history(limit: int = 100, strategy: Optional[str] = None,
                       min_accuracy: Optional[float] = None,
-                      bruteforce_id: Optional[int] = None) -> list[dict]:
-    """Load backtest history from MySQL."""
-    where = "1=1"
-    params = []
+                      bruteforce_id: Optional[int] = None,
+                      exclude_bruteforce: bool = False) -> list[dict]:
+    """Load backtest history from MySQL.
+
+    Uses a single JOIN query instead of N+1 to fetch run + horizon summary.
+    Excludes heavy blobs (monthly/daily/confidence) — use get_history_detail for those.
+    """
+    where = ["1=1"]
+    params: list = []
     if strategy:
-        where += " AND r.strategy = %s"
+        where.append("r.strategy = %s")
         params.append(strategy)
     if bruteforce_id is not None:
-        where += " AND r.bruteforce_id = %s"
+        where.append("r.bruteforce_id = %s")
         params.append(bruteforce_id)
+    if exclude_bruteforce:
+        where.append("(r.is_bruteforce = 0 OR r.is_bruteforce IS NULL)")
+    if min_accuracy is not None:
+        where.append("h.accuracy_pct >= %s")
+        params.append(float(min_accuracy))
+
+    where_sql = " AND ".join(where)
 
     query = f"""
         SELECT r.id, r.strategy, r.params_json, r.train_start, r.train_end,
                r.test_start, r.test_end, r.tbl, r.window_size,
                r.train_candles, r.test_candles, r.total_time_sec,
-               r.is_bruteforce, r.bruteforce_id, r.created_at
+               r.is_bruteforce, r.bruteforce_id, r.created_at,
+               h.horizon, h.accuracy_pct, h.signals, h.correct, h.wrong,
+               h.max_win_streak, h.max_lose_streak
         FROM backtest_runs r
-        WHERE {where}
-        ORDER BY r.created_at DESC
-        LIMIT {limit}
+        LEFT JOIN backtest_horizons h ON h.run_id = r.id
+        WHERE {where_sql}
+        ORDER BY r.created_at DESC, r.id DESC, h.horizon ASC
+        LIMIT %s
     """
-    rows = await db.fetchall(query, params if params else None)
-    results = []
+    params.append(int(limit) * 5)  # up to 5 horizon rows per run
+    rows = await db.fetchall(query, params)
+
+    runs_map: dict = {}
+    run_order: list = []
     for row in rows:
         run_id = row[0]
-        run = {
-            "id": run_id,
-            "strategy": row[1],
-            "params": _safe_json_loads(row[2], {}),
-            "train_start": row[3],
-            "train_end": row[4],
-            "test_start": row[5],
-            "test_end": row[6],
-            "train_period": f"{row[3]} -> {row[4]}",
-            "test_period": f"{row[5]} -> {row[6]}",
-            "table": row[7],
-            "window_size": row[8],
-            "train_candles": row[9],
-            "test_candles": row[10],
-            "total_time_sec": row[11],
-            "is_bruteforce": bool(row[12]),
-            "bruteforce_id": row[13],
-            "created_at": str(row[14]) if row[14] else "",
-            "horizons": {},
-        }
-
-        h_rows = await db.fetchall(
-            "SELECT * FROM backtest_horizons WHERE run_id = %s ORDER BY horizon", (run_id,)
-        )
-        for hr in h_rows:
-            run["horizons"][str(hr[2])] = {
-                "accuracy": hr[3],
-                "accuracy_pct": hr[4],
-                "total_candles": hr[5],
-                "signals": hr[6],
-                "skipped": hr[7],
-                "correct": hr[8],
-                "wrong": hr[9],
-                "up_predictions": hr[10],
-                "up_correct": hr[11],
-                "up_accuracy": hr[12],
-                "down_predictions": hr[13],
-                "down_correct": hr[14],
-                "down_accuracy": hr[15],
+        if run_id not in runs_map:
+            runs_map[run_id] = {
+                "id": run_id,
+                "strategy": row[1],
+                "params": _safe_json_loads(row[2], {}),
+                "train_start": row[3],
+                "train_end": row[4],
+                "test_start": row[5],
+                "test_end": row[6],
+                "train_period": f"{row[3]} -> {row[4]}",
+                "test_period": f"{row[5]} -> {row[6]}",
+                "table": row[7],
+                "window_size": row[8],
+                "train_candles": row[9],
+                "test_candles": row[10],
+                "total_time_sec": row[11],
+                "is_bruteforce": bool(row[12]),
+                "bruteforce_id": row[13],
+                "created_at": str(row[14]) if row[14] else "",
+                "horizons": {},
+            }
+            run_order.append(run_id)
+        if row[15] is not None:  # horizon column
+            runs_map[run_id]["horizons"][str(row[15])] = {
+                "accuracy_pct": row[16],
+                "signals": row[17],
+                "correct": row[18],
+                "wrong": row[19],
                 "streaks": {
-                    "max_win_streak": hr[16],
-                    "max_lose_streak": hr[17],
+                    "max_win_streak": row[20],
+                    "max_lose_streak": row[21],
                 },
-                "fit_time_sec": hr[18],
-                "predict_time_sec": hr[19],
-                "monthly": _safe_json_loads(hr[20], []),
-                "daily": _safe_json_loads(hr[21], []),
-                "confidence_distribution": _safe_json_loads(hr[22], {}),
             }
 
-        # Apply min_accuracy filter after loading horizons
-        if min_accuracy is not None:
-            dominated = True
-            for h_data in run["horizons"].values():
-                if h_data.get("accuracy_pct", 0) >= min_accuracy:
-                    dominated = False
-                    break
-            if dominated and run["horizons"]:
-                continue
-
-        results.append(run)
+    results = []
+    for run_id in run_order:
+        if len(results) >= limit:
+            break
+        results.append(runs_map[run_id])
     return results
+
+
+async def get_bf_runs_paginated(
+    bruteforce_id: int,
+    offset: int = 0,
+    limit: int = 20,
+    min_accuracy: Optional[float] = None,
+    window_size: Optional[int] = None,
+) -> dict:
+    """Server-side paginated BF runs with total count. Returns {runs, total}."""
+    where = ["r.bruteforce_id = %s"]
+    params: list = [bruteforce_id]
+    if min_accuracy is not None:
+        where.append("h.accuracy_pct >= %s")
+        params.append(float(min_accuracy))
+    if window_size is not None:
+        where.append("r.window_size = %s")
+        params.append(int(window_size))
+    where_sql = " AND ".join(where)
+
+    # Count distinct runs matching filters
+    count_q = f"""
+        SELECT COUNT(DISTINCT r.id)
+        FROM backtest_runs r
+        LEFT JOIN backtest_horizons h ON h.run_id = r.id
+        WHERE {where_sql}
+    """
+    count_row = await db.fetchone(count_q, params)
+    total = int(count_row[0]) if count_row else 0
+
+    # Fetch paginated run IDs first
+    ids_q = f"""
+        SELECT DISTINCT r.id
+        FROM backtest_runs r
+        LEFT JOIN backtest_horizons h ON h.run_id = r.id
+        WHERE {where_sql}
+        ORDER BY r.id DESC
+        LIMIT %s OFFSET %s
+    """
+    id_params = list(params) + [int(limit), int(offset)]
+    id_rows = await db.fetchall(ids_q, id_params)
+    run_ids = [r[0] for r in id_rows]
+
+    if not run_ids:
+        return {"runs": [], "total": total}
+
+    # Fetch full data for those run IDs (with horizon summary, no heavy blobs)
+    placeholders = ",".join(["%s"] * len(run_ids))
+    data_q = f"""
+        SELECT r.id, r.strategy, r.params_json, r.train_start, r.train_end,
+               r.test_start, r.test_end, r.tbl, r.window_size,
+               r.train_candles, r.test_candles, r.total_time_sec,
+               r.is_bruteforce, r.bruteforce_id, r.created_at,
+               h.horizon, h.accuracy_pct, h.signals, h.correct, h.wrong,
+               h.max_win_streak, h.max_lose_streak
+        FROM backtest_runs r
+        LEFT JOIN backtest_horizons h ON h.run_id = r.id
+        WHERE r.id IN ({placeholders})
+        ORDER BY r.id DESC, h.horizon ASC
+    """
+    rows = await db.fetchall(data_q, tuple(run_ids))
+
+    runs_map: dict = {}
+    run_order: list = []
+    for row in rows:
+        run_id = row[0]
+        if run_id not in runs_map:
+            runs_map[run_id] = {
+                "id": run_id,
+                "strategy": row[1],
+                "params": _safe_json_loads(row[2], {}),
+                "train_start": row[3],
+                "train_end": row[4],
+                "test_start": row[5],
+                "test_end": row[6],
+                "train_period": f"{row[3]} -> {row[4]}",
+                "test_period": f"{row[5]} -> {row[6]}",
+                "table": row[7],
+                "window_size": row[8],
+                "train_candles": row[9],
+                "test_candles": row[10],
+                "total_time_sec": row[11],
+                "is_bruteforce": bool(row[12]),
+                "bruteforce_id": row[13],
+                "created_at": str(row[14]) if row[14] else "",
+                "horizons": {},
+            }
+            run_order.append(run_id)
+        if row[15] is not None:
+            runs_map[run_id]["horizons"][str(row[15])] = {
+                "accuracy_pct": row[16],
+                "signals": row[17],
+                "correct": row[18],
+                "wrong": row[19],
+                "streaks": {
+                    "max_win_streak": row[20],
+                    "max_lose_streak": row[21],
+                },
+            }
+
+    runs = [runs_map[rid] for rid in run_order]
+    return {"runs": runs, "total": total}
 
 
 async def get_history_detail(run_id: int) -> Optional[dict]:

@@ -642,6 +642,50 @@ async def api_predictions_analytics(
     )
 
 
+@app.get("/api/analytics/ask_prices")
+async def api_ask_price_analysis(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    hour_from: int | None = Query(None),
+    hour_to: int | None = Query(None),
+    window_sec: int = Query(10),
+):
+    return await poly_service.get_ask_price_analysis(
+        date_from=date_from,
+        date_to=date_to,
+        hour_from=hour_from,
+        hour_to=hour_to,
+        window_sec=window_sec,
+    )
+
+
+@app.get("/api/analytics/kelly_sim")
+async def api_kelly_sim(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    hour_from: int | None = Query(None),
+    hour_to: int | None = Query(None),
+    start_bank: float = Query(100.0),
+    max_bet: float | None = Query(None),
+    fee_rate: float = Query(0.0156),
+    max_price_cents: float = Query(51.0),
+    hk_pct: float = Query(0.017),
+    fk_pct: float = Query(0.0334),
+):
+    return await poly_service.get_kelly_simulation(
+        date_from=date_from,
+        date_to=date_to,
+        hour_from=hour_from,
+        hour_to=hour_to,
+        start_bank=start_bank,
+        max_bet=max_bet,
+        fee_rate=fee_rate,
+        max_price_cents=max_price_cents,
+        hk_pct=hk_pct,
+        fk_pct=fk_pct,
+    )
+
+
 # ==================== ADMIN PANEL ====================
 
 _TEMPLATE_DIR = pathlib.Path(__file__).parent / "templates"

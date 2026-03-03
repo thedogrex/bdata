@@ -14,6 +14,14 @@
           <input type="date" id="an-date-to" class="w-40" oninput="analyticsLoad()">
         </div>
         <div>
+          <label class="block text-xs text-slate-400 mb-1">Quick</label>
+          <div class="flex gap-2">
+            <button onclick="analyticsSetLastDays(1)" class="btn btn-slate text-xs">1 day</button>
+            <button onclick="analyticsSetLastDays(7)" class="btn btn-slate text-xs">7 days</button>
+            <button onclick="analyticsSetLastDays(14)" class="btn btn-slate text-xs">14 days</button>
+          </div>
+        </div>
+        <div>
           <label class="block text-xs text-slate-400 mb-1">Hour From (UTC)</label>
           <select id="an-hour-from" class="w-28" onchange="analyticsLoad()">
             <option value="">Any</option>
@@ -41,4 +49,68 @@
 
     <!-- Per-hour breakdown -->
     <div id="an-per-hour" class="card p-6 mb-4"></div>
+
+    <!-- Ask Price Analysis -->
+    <div class="card p-6 mb-4">
+      <div class="flex flex-wrap items-end gap-4">
+        <h3 class="font-semibold text-base flex-1">Ask Price Analysis</h3>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Window (seconds)</label>
+          <input type="number" id="an-ask-window" value="10" min="1" max="120" class="w-24" oninput="analyticsAskLoad()">
+        </div>
+        <button onclick="analyticsAskLoad()" class="btn btn-purple text-xs">Refresh</button>
+      </div>
+      <p class="text-xs text-slate-500 mt-1 mb-4">Wait N seconds after each prediction completes, then take the first orderbook snapshot at/after that time.</p>
+    </div>
+
+    <!-- Ask summary cards -->
+    <div id="an-ask-summary" class="grid gap-4 mb-4" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))"></div>
+
+    <!-- Ask bucket cards (51c / 52c / 53c) -->
+    <div id="an-ask-buckets" class="grid gap-4 mb-4" style="grid-template-columns:repeat(3,1fr)"></div>
+
+    <!-- Ask price histogram -->
+    <div id="an-ask-hist" class="card p-6 mb-4"></div>
+
+    <!-- Ask per-day breakdown -->
+    <div id="an-ask-perday" class="card p-6 mb-4"></div>
+
+    <!-- ── Kelly Simulation ─────────────────────────────────────────────── -->
+    <div class="card p-6 mb-4">
+      <div class="flex flex-wrap items-end gap-4">
+        <h3 class="font-semibold text-base flex-1">Kelly Strategy Simulation</h3>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Start Bank ($)</label>
+          <input type="number" id="an-kelly-bank" value="100" min="1" step="10" class="w-28">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Max Bet ($, blank = none)</label>
+          <input type="number" id="an-kelly-maxbet" placeholder="none" min="0" step="1" class="w-28">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Max Buy Price (¢)</label>
+          <input type="number" id="an-kelly-maxprice" value="51" min="40" max="60" step="0.5" class="w-24">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">½ Kelly % (bank)</label>
+          <input type="number" id="an-kelly-hkpct" value="1.70" min="0" max="100" step="0.01" class="w-24">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Full Kelly % (bank)</label>
+          <input type="number" id="an-kelly-fkpct" value="3.34" min="0" max="100" step="0.01" class="w-24">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Fee Rate (%)</label>
+          <input type="number" id="an-kelly-fee" value="1.56" min="0" max="10" step="0.01" class="w-24">
+        </div>
+        <button onclick="analyticsKellyLoad()" class="btn btn-purple text-xs">Run Simulation</button>
+      </div>
+      <p class="text-xs text-slate-500 mt-1">Uses real orderbook depth to simulate order fills at actual ask prices. Only resolved markets included. Kelly fraction is computed from the model probability and the best available ask price.</p>
+    </div>
+
+    <!-- Kelly summary cards -->
+    <div id="an-kelly-summary" class="grid gap-4 mb-4" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))"></div>
+
+    <!-- Kelly strategy comparison + per-day table -->
+    <div id="an-kelly-table" class="card p-6 mb-4"></div>
   </div>

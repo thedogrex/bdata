@@ -166,6 +166,8 @@
           <div><label class="block text-xs text-slate-400 mb-1">Starting Bank ($)</label><input type="number" id="bc-bank" value="1000" min="1" class="w-32" onchange="bestCompareRecalc()"></div>
           <div><label class="block text-xs text-slate-400 mb-1">Buy Price (¢)</label><input type="number" id="bc-buy-price" value="52" min="1" max="99" step="0.5" class="w-32" onchange="bestCompareRecalc()" title="Share buy price in cents (win pays $1.00)"></div>
           <div><label class="block text-xs text-slate-400 mb-1">Max Bet ($)</label><input type="number" id="bc-max-bet" value="500" min="1" class="w-32" onchange="bestCompareRecalc()" title="Maximum stake per signal"></div>
+          <div><label class="block text-xs text-slate-400 mb-1">½ Kelly % (bank)</label><input type="number" id="bc-hkpct" value="1.70" min="0" step="0.01" class="w-32" onchange="bestCompareRecalc()" title="Percent of current bank to stake per signal"></div>
+          <div><label class="block text-xs text-slate-400 mb-1">Full Kelly % (bank)</label><input type="number" id="bc-fkpct" value="3.34" min="0" step="0.01" class="w-32" onchange="bestCompareRecalc()" title="Percent of current bank to stake per signal"></div>
           <div><label class="block text-xs text-slate-400 mb-1">Fee (%)</label><input type="number" id="bc-fee" value="1.56" min="0" step="0.01" class="w-32" onchange="bestCompareRecalc()" title="Fee charged per bet (percent of stake)"></div>
           <button onclick="bestCompareRecalc()" class="btn btn-purple">Recalculate</button>
         </div>

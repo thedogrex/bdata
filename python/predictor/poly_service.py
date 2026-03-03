@@ -1972,3 +1972,483 @@ async def get_predictions_analytics(
         "per_hour":     per_hour,
         "per_template": per_template,
     }
+
+
+async def get_ask_price_analysis(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    hour_from: Optional[int] = None,
+    hour_to: Optional[int] = None,
+    window_sec: int = 10,
+) -> Dict[str, Any]:
+    """For each prediction, wait window_sec seconds after finished_at and then find the
+    FIRST orderbook snapshot at/after that time. Parse asks_json to compute available amounts per price
+    level. Returns summary stats, cumulative amount buckets, a depth table, and per-day.
+    """
+    pred_where = [
+        "pr.prediction IN ('UP','DOWN')",
+        "pr.quantum = 0",
+        "pr.error IS NULL",
+        "pr.finished_at IS NOT NULL",
+        "pr.started_at < FROM_UNIXTIME(pm.ts)",
+    ]
+    pred_params: list = []
+
+    if date_from:
+        pred_where.append("DATE(pr.finished_at) >= %s")
+        pred_params.append(date_from)
+    if date_to:
+        pred_where.append("DATE(pr.finished_at) <= %s")
+        pred_params.append(date_to)
+    if hour_from is not None:
+        pred_where.append("HOUR(pr.finished_at) >= %s")
+        pred_params.append(int(hour_from))
+    if hour_to is not None:
+        pred_where.append("HOUR(pr.finished_at) <= %s")
+        pred_params.append(int(hour_to))
+
+    where_sql = " AND ".join(pred_where)
+    ws = int(window_sec)
+
+    def _f(v, digits=2):
+        return round(float(v), digits) if v is not None else None
+
+    # ── Step 1: count total predictions matching filters ─────────────────────
+    total_q = f"""
+        SELECT COUNT(DISTINCT pr.id)
+        FROM poly_pred_runs pr
+        JOIN poly_markets pm ON pm.slug = pr.slug
+        WHERE {where_sql}
+    """
+    total_row = await db.fetchone(total_q, pred_params or None)
+    total_preds = int(total_row[0] or 0) if total_row else 0
+
+    # ── Step 2: fetch first snapshot (asks_json) per prediction ──────────────
+    # Join to the earliest snapshot within the window so we get price+size detail.
+    snap_q = f"""
+        SELECT pr.id, obs.asks_json, obs.best_ask_cents, DATE(pr.finished_at) AS day
+        FROM poly_pred_runs pr
+        JOIN poly_markets pm ON pm.slug = pr.slug
+        JOIN poly_outcomes po
+            ON  po.slug = pr.slug
+            AND (
+                (pr.prediction = 'UP'   AND (UPPER(po.name) LIKE '%%UP%%'   OR UPPER(po.name) LIKE '%%YES%%'))
+             OR (pr.prediction = 'DOWN' AND (UPPER(po.name) LIKE '%%DOWN%%' OR UPPER(po.name) LIKE '%%NO%%'))
+            )
+        JOIN (
+            SELECT pr2.id AS pred_id, pr2.slug AS slug, po2.asset_id AS asset_id, MIN(obs2.ts) AS first_ts
+            FROM poly_pred_runs pr2
+            JOIN poly_outcomes po2
+                ON  po2.slug = pr2.slug
+                AND (
+                    (pr2.prediction = 'UP'   AND (UPPER(po2.name) LIKE '%%UP%%'   OR UPPER(po2.name) LIKE '%%YES%%'))
+                 OR (pr2.prediction = 'DOWN' AND (UPPER(po2.name) LIKE '%%DOWN%%' OR UPPER(po2.name) LIKE '%%NO%%'))
+                )
+            JOIN poly_orderbook_snapshots obs2
+                ON  obs2.slug = pr2.slug
+                AND obs2.asset_id = po2.asset_id
+                AND obs2.ts   >= UNIX_TIMESTAMP(pr2.finished_at) + {ws}
+                AND obs2.asks_json IS NOT NULL
+            GROUP BY pr2.id, pr2.slug, po2.asset_id
+        ) fs ON fs.pred_id = pr.id
+        JOIN poly_orderbook_snapshots obs
+            ON  obs.slug = fs.slug
+            AND obs.asset_id = fs.asset_id
+            AND obs.ts   = fs.first_ts
+        WHERE {where_sql}
+        LIMIT 20000
+    """
+    snap_rows = await db.fetchall(snap_q, pred_params or None)
+
+    # ── Step 3: process asks_json in Python ───────────────────────────────────
+    THRESHOLDS = [51.0, 52.0, 53.0]
+    # depth_buckets: price_bucket -> list of sizes at exactly that level
+    from collections import defaultdict
+    depth_totals: dict = defaultdict(list)   # bucket -> [cumulative_size_per_pred]
+
+    preds_with_snap = 0
+    min_asks: list = []
+    cumul: dict = {t: [] for t in THRESHOLDS}   # threshold -> [cumul_size]
+
+    per_day_raw: dict = defaultdict(lambda: {
+        "preds": 0,
+        "asks": [],
+        **{f"cumul_{int(t)}": [] for t in THRESHOLDS},
+    })
+
+    for row in snap_rows:
+        pred_id, asks_json_str, best_ask_cents, day = row
+        day_str = str(day)
+
+        try:
+            asks = json.loads(asks_json_str) if asks_json_str else []
+        except Exception:
+            asks = []
+
+        if not asks:
+            continue
+
+        # Normalise: ensure price is float cents
+        levels: list[tuple[float, float]] = []
+        for a in asks:
+            try:
+                p = float(a.get("price") or 0)
+                s = float(a.get("size") or 0)
+                if p > 0 and s > 0:
+                    levels.append((p, s))
+            except (TypeError, ValueError):
+                continue
+
+        if not levels:
+            continue
+
+        preds_with_snap += 1
+        best_ask = min(p for p, _ in levels)
+        min_asks.append(best_ask)
+
+        # Cumulative sizes at each threshold
+        for t in THRESHOLDS:
+            total_size = sum(s for p, s in levels if p <= t)
+            cumul[t].append(total_size)
+
+        # Depth table: cumulative size at each 0.5c bucket (44–62c)
+        bucket_range = [round(44.0 + i * 0.5, 1) for i in range(37)]  # 44.0 .. 62.0
+        for b in bucket_range:
+            c_size = sum(s for p, s in levels if p <= b)
+            if c_size > 0:
+                depth_totals[b].append(c_size)
+
+        # Per-day
+        d = per_day_raw[day_str]
+        d["preds"] += 1
+        d["asks"].append(best_ask)
+        for t in THRESHOLDS:
+            total_size = sum(s for p, s in levels if p <= t)
+            d[f"cumul_{int(t)}"].append(total_size)
+
+    # ── Step 4: aggregate ─────────────────────────────────────────────────────
+    coverage_pct = round(preds_with_snap / total_preds * 100, 1) if total_preds > 0 else 0
+    avg_min_ask  = _f(sum(min_asks) / len(min_asks)) if min_asks else None
+    overall_min  = _f(min(min_asks)) if min_asks else None
+
+    def _agg_cumul(threshold):
+        vals = [v for v in cumul[threshold] if v > 0]
+        cnt  = len(vals)
+        avg  = _f(sum(vals) / cnt, 1) if cnt > 0 else None
+        pct  = round(cnt / preds_with_snap * 100, 1) if preds_with_snap > 0 else 0
+        avg_ask_vals = [a for a, c in zip(min_asks, cumul[threshold]) if a <= threshold]
+        avg_ask = _f(sum(avg_ask_vals) / len(avg_ask_vals)) if avg_ask_vals else None
+        return {"cnt": cnt, "pct": pct, "avg_amount": avg, "avg_ask": avg_ask}
+
+    buckets = {str(int(t)): _agg_cumul(t) for t in THRESHOLDS}
+
+    # Depth table: for each 0.5c bucket, how many predictions had liquidity + avg cumulative amount
+    depth = []
+    for b in sorted(depth_totals.keys()):
+        vals = depth_totals[b]
+        depth.append({
+            "price":      b,
+            "count":      len(vals),
+            "pct":        round(len(vals) / preds_with_snap * 100, 1) if preds_with_snap > 0 else 0,
+            "avg_cumul":  _f(sum(vals) / len(vals), 1),
+        })
+
+    # Per-day summary
+    per_day = []
+    for day_str in sorted(per_day_raw.keys()):
+        d = per_day_raw[day_str]
+        n = d["preds"]
+        asks_list = d["asks"]
+        entry = {
+            "day":     day_str,
+            "preds":   n,
+            "avg_ask": _f(sum(asks_list) / len(asks_list)) if asks_list else None,
+        }
+        for t in THRESHOLDS:
+            vals = [v for v in d[f"cumul_{int(t)}"] if v > 0]
+            entry[f"cnt_le{int(t)}"]    = len(vals)
+            entry[f"avg_amt_le{int(t)}"] = _f(sum(vals) / len(vals), 1) if vals else None
+        per_day.append(entry)
+
+    return {
+        "window_sec":      ws,
+        "summary": {
+            "total_preds":     total_preds,
+            "preds_with_snap": preds_with_snap,
+            "coverage_pct":    coverage_pct,
+            "avg_min_ask":     avg_min_ask,
+            "overall_min_ask": overall_min,
+        },
+        "buckets":  buckets,   # {"51": {cnt, pct, avg_amount, avg_ask}, "52": ..., "53": ...}
+        "depth":    depth,     # [{price, count, pct, avg_cumul}, ...]
+        "per_day":  per_day,
+    }
+
+
+async def get_kelly_simulation(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    hour_from: Optional[int] = None,
+    hour_to: Optional[int] = None,
+    start_bank: float = 100.0,
+    max_bet: Optional[float] = None,
+    fee_rate: float = 0.0156,
+    max_price_cents: float = 51.0,
+    hk_pct: float = 0.017,
+    fk_pct: float = 0.0334,
+) -> Dict[str, Any]:
+    """Simulate Half-Kelly and Full-Kelly strategies using real orderbook depth.
+
+    For each resolved prediction the first snapshot at/after finished_at is used.
+    The order book is walked in price order; only levels ≤ max_price_cents are used.
+    If no such level exists the trade is skipped.  On win, shares pay $1 each; on
+    loss the cost is lost.  Returns per-trade detail rows for a full audit table.
+    """
+    pred_where = [
+        "pr.prediction IN ('UP','DOWN')",
+        "pr.quantum = 0",
+        "pr.error IS NULL",
+        "pr.finished_at IS NOT NULL",
+        "pr.probability IS NOT NULL",
+        "pm.resolved_outcome IS NOT NULL",
+        "pm.resolved_outcome IN ('UP','DOWN')",
+        "pr.started_at < FROM_UNIXTIME(pm.ts)",
+    ]
+    pred_params: list = []
+
+    if date_from:
+        pred_where.append("DATE(pr.finished_at) >= %s")
+        pred_params.append(date_from)
+    if date_to:
+        pred_where.append("DATE(pr.finished_at) <= %s")
+        pred_params.append(date_to)
+    if hour_from is not None:
+        pred_where.append("HOUR(pr.finished_at) >= %s")
+        pred_params.append(int(hour_from))
+    if hour_to is not None:
+        pred_where.append("HOUR(pr.finished_at) <= %s")
+        pred_params.append(int(hour_to))
+
+    where_sql = " AND ".join(pred_where)
+    mpc = float(max_price_cents)
+    fr  = float(fee_rate)
+    hkf = float(hk_pct)
+    fkf = float(fk_pct)
+
+    sim_q = f"""
+        SELECT
+            pr.id,
+            pr.slug,
+            pr.prediction,
+            pr.probability,
+            pm.resolved_outcome,
+            obs.asks_json,
+            pr.finished_at,
+            obs.ts AS applied_ts
+        FROM poly_pred_runs pr
+        JOIN poly_markets pm ON pm.slug = pr.slug
+        JOIN (
+            SELECT pr2.id AS pred_id, po2.asset_id AS asset_id, MIN(obs2.ts) AS first_ts
+            FROM poly_pred_runs pr2
+            JOIN poly_outcomes po2
+                ON  po2.slug = pr2.slug
+                AND (
+                    (pr2.prediction = 'UP'   AND (UPPER(po2.name) LIKE '%%UP%%'   OR UPPER(po2.name) LIKE '%%YES%%'))
+                 OR (pr2.prediction = 'DOWN' AND (UPPER(po2.name) LIKE '%%DOWN%%' OR UPPER(po2.name) LIKE '%%NO%%'))
+                )
+            JOIN poly_orderbook_snapshots obs2
+                ON  obs2.slug     = pr2.slug
+                AND obs2.asset_id = po2.asset_id
+                AND obs2.ts       >= UNIX_TIMESTAMP(pr2.finished_at)
+                AND obs2.asks_json IS NOT NULL
+            GROUP BY pr2.id, po2.asset_id
+        ) fs ON fs.pred_id = pr.id
+        JOIN poly_orderbook_snapshots obs
+            ON  obs.slug     = pr.slug
+            AND obs.asset_id = fs.asset_id
+            AND obs.ts       = fs.first_ts
+            AND obs.asks_json IS NOT NULL
+        WHERE {where_sql}
+        ORDER BY pr.finished_at ASC
+        LIMIT 20000
+    """
+    rows = await db.fetchall(sim_q, pred_params or None)
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _fill_book(levels: list, budget: float):
+        """Walk sorted ask levels (already filtered by max_price) and fill.
+        Returns (shares, dollars_spent, weighted_avg_fill_cents)."""
+        remaining = budget
+        total_shares = 0.0
+        total_spent  = 0.0
+        for price_c, size in levels:
+            if remaining < 1e-6:
+                break
+            cost_per_share = price_c / 100.0
+            if cost_per_share <= 0:
+                continue
+            shares_here = min(float(size), remaining / cost_per_share)
+            cost_here   = shares_here * cost_per_share
+            total_shares += shares_here
+            total_spent  += cost_here
+            remaining    -= cost_here
+        avg_fill = (total_spent / total_shares * 100.0) if total_shares > 0 else 0.0
+        return total_shares, total_spent, avg_fill
+
+    def _kelly_frac(prob: float, ask_c: float) -> float:
+        if ask_c <= 0 or ask_c >= 100:
+            return 0.0
+        f = (100.0 * prob - ask_c) / (100.0 - ask_c)
+        return max(f, 0.0)
+
+    # ── simulation state ──────────────────────────────────────────────────────
+    bank_hk = float(start_bank)
+    bank_fk = float(start_bank)
+    trades_detail: list = []
+    total_resolved = len(rows)
+    skipped_price = 0
+
+    for row in rows:
+        pred_id, slug, prediction, probability, resolved_outcome, asks_json_str, finished_at, applied_ts = row
+        day_str = str(finished_at)[:10] if finished_at else ""
+        time_str = str(finished_at)[11:19] if finished_at and len(str(finished_at)) >= 19 else ""
+        applied_time_utc = datetime.utcfromtimestamp(int(applied_ts)).strftime("%Y-%m-%d %H:%M:%S") if applied_ts is not None else ""
+
+        try:
+            prob = float(probability)
+        except (TypeError, ValueError):
+            prob = 0.5  # fallback – should not happen given SQL filter
+
+        try:
+            asks_raw = json.loads(asks_json_str) if asks_json_str else []
+        except Exception:
+            asks_raw = []
+
+        # Parse and filter levels to max_price_cents
+        levels = []
+        for a in asks_raw:
+            try:
+                p = float(a.get("price") or 0)
+                s = float(a.get("size")  or 0)
+                if p > 0 and s > 0 and p <= mpc:
+                    levels.append((p, s))
+            except (TypeError, ValueError):
+                continue
+        levels.sort(key=lambda x: x[0])
+
+        if not levels:
+            skipped_price += 1
+            trade_row: Dict[str, Any] = {
+                "date":        day_str,
+                "time":        time_str,
+                "applied_time": applied_time_utc,
+                "slug":        slug,
+                "pred":        prediction,
+                "outcome":     resolved_outcome,
+                "correct":     (prediction == resolved_outcome),
+                "best_ask":    None,
+                "skipped":     True,
+                "skip_reason": f"ask > {mpc}c",
+                "hk_bet":      0.0,
+                "hk_shares":   0.0,
+                "hk_fill":     0.0,
+                "hk_fee":      0.0,
+                "hk_profit":   0.0,
+                "hk_bank":     round(bank_hk, 2),
+                "fk_bet":      0.0,
+                "fk_shares":   0.0,
+                "fk_fill":     0.0,
+                "fk_fee":      0.0,
+                "fk_profit":   0.0,
+                "fk_bank":     round(bank_fk, 2),
+            }
+            trades_detail.append(trade_row)
+            continue
+
+        best_ask_c = levels[0][0]
+
+        # Fixed bet sizing (percent of current bank)
+        fk = fkf
+        hk = hkf
+
+        is_correct = (prediction == resolved_outcome)
+
+        trade_row: Dict[str, Any] = {
+            "date":       day_str,
+            "time":       time_str,
+            "applied_time": applied_time_utc,
+            "slug":       slug,
+            "pred":       prediction,
+            "outcome":    resolved_outcome,
+            "correct":    is_correct,
+            "best_ask":   round(best_ask_c, 2),
+            "skipped":    False,
+            "skip_reason": None,
+        }
+
+        for label, frac, bank in [("hk", hk, bank_hk), ("fk", fk, bank_fk)]:
+            raw_bet = frac * bank
+            bet = min(raw_bet, float(max_bet)) if max_bet is not None else raw_bet
+            bet = max(bet, 0.0)
+
+            if bet < 1e-6:
+                trade_row[f"{label}_bet"]    = 0.0
+                trade_row[f"{label}_shares"] = 0.0
+                trade_row[f"{label}_fill"]   = 0.0
+                trade_row[f"{label}_fee"]    = 0.0
+                trade_row[f"{label}_profit"] = 0.0
+                trade_row[f"{label}_bank"]   = round(bank, 2)
+                continue
+
+            shares, spent, avg_fill_c = _fill_book(levels, bet)
+            fee = spent * fr
+
+            if is_correct:
+                profit = shares - spent - fee
+            else:
+                profit = -spent - fee
+
+            trade_row[f"{label}_bet"]    = round(spent, 2)
+            trade_row[f"{label}_shares"] = round(shares, 2)
+            trade_row[f"{label}_fill"]   = round(avg_fill_c, 2)
+            trade_row[f"{label}_fee"]    = round(fee, 2)
+            trade_row[f"{label}_profit"] = round(profit, 2)
+
+            if label == "hk":
+                bank_hk = max(bank_hk + profit, 0.0)
+                trade_row["hk_bank"] = round(bank_hk, 2)
+            else:
+                bank_fk = max(bank_fk + profit, 0.0)
+                trade_row["fk_bank"] = round(bank_fk, 2)
+
+        trades_detail.append(trade_row)
+
+    total_trades = len(trades_detail)
+    total_wins   = sum(1 for t in trades_detail if t["correct"])
+
+    def _pct(v, total):
+        return round(v / total * 100, 1) if total > 0 else 0
+
+    return {
+        "start_bank":      start_bank,
+        "max_bet":         max_bet,
+        "fee_rate":        fr,
+        "max_price_cents": mpc,
+        "hk_pct":          hkf,
+        "fk_pct":          fkf,
+        "total_resolved":  total_resolved,
+        "total_trades":    total_trades,
+        "total_wins":      total_wins,
+        "win_pct":         _pct(total_wins, total_trades),
+        "skipped_price":   skipped_price,
+        "half_kelly": {
+            "end_bank": round(bank_hk, 2),
+            "roi_pct":  round((bank_hk - start_bank) / start_bank * 100, 2) if start_bank > 0 else 0,
+        },
+        "full_kelly": {
+            "end_bank": round(bank_fk, 2),
+            "roi_pct":  round((bank_fk - start_bank) / start_bank * 100, 2) if start_bank > 0 else 0,
+        },
+        "trades": trades_detail,
+    }

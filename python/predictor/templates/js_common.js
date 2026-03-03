@@ -770,14 +770,18 @@ function bestCompareRecalc(){
   const startBank = parseFloat(document.getElementById('bc-bank').value) || 1000;
   const buyPriceCents = parseFloat(document.getElementById('bc-buy-price').value) || 52;
   const maxBet = parseFloat(document.getElementById('bc-max-bet').value) || 500;
+  const hkPctEl = document.getElementById('bc-hkpct');
+  const fkPctEl = document.getElementById('bc-fkpct');
+  const hkPct = hkPctEl ? (parseFloat(hkPctEl.value) / 100) : 0.017;
+  const fkPct = fkPctEl ? (parseFloat(fkPctEl.value) / 100) : 0.0334;
 
   const feePctEl = document.getElementById('bc-fee');
   const feePct = feePctEl ? parseFloat(feePctEl.value) : NaN;
   const betFeeRate = (isFinite(feePct) && feePct >= 0) ? (feePct / 100) : DEFAULT_BET_FEE_RATE;
 
-  // Simulate half-Kelly + full Kelly
-  const simHalf = bestCompareData.map(run => bestSimKelly(run, startBank, buyPriceCents, maxBet, 0.5, betFeeRate));
-  const simFull = bestCompareData.map(run => bestSimKelly(run, startBank, buyPriceCents, maxBet, 1.0, betFeeRate));
+  // Simulate half Kelly + full Kelly using fixed % of bank per signal
+  const simHalf = bestCompareData.map(run => bestSimKelly(run, startBank, buyPriceCents, maxBet, hkPct, betFeeRate));
+  const simFull = bestCompareData.map(run => bestSimKelly(run, startBank, buyPriceCents, maxBet, fkPct, betFeeRate));
 
   bestRenderCompareChart(simHalf, startBank, 'bc-chart', 'Bank Growth (Half-Kelly)');
   bestRenderCompareTable(simHalf, startBank, 'bc-table', 'Month-by-Month Bank Progression (Half-Kelly)');
@@ -804,20 +808,27 @@ function bestCompareRecalc(){
  *   Win  → bank += stake × b   (we risked stake, got back stake + stake·b)
  *   Lose → bank -= stake        (we lost the cost)
  */
-function bestSimKelly(run, startBank, buyPriceCents, maxBet, kellyScale, betFeeRate){
+function bestSimKelly(run, startBank, buyPriceCents, maxBet, betPct, betFeeRate){
   const cost = buyPriceCents / 100;                // e.g. 0.52
   const profitPerShare = 1.0 - cost;               // e.g. 0.48
   const b = profitPerShare / cost;                  // net odds ≈ 0.923
 
   const acc = (run.accuracy_pct || 50) / 100;
   const kellyFull = (b * acc - (1 - acc)) / b;
-  const kellyApplied = kellyFull * (typeof kellyScale==='number' ? kellyScale : 0.5);
+  const kellyApplied = (typeof betPct === 'number' ? betPct : 0.017);
 
-  const monthly = run.monthly || [];
+  const monthly = (run.monthly || []).slice().sort((a,b)=>{
+    const sa=String((a&&a.month)!=null?a.month:'');
+    const sb=String((b&&b.month)!=null?b.month:'');
+    const ta=Date.parse(sa+'-01');
+    const tb=Date.parse(sb+'-01');
+    if(!isNaN(ta) && !isNaN(tb)) return ta-tb;
+    return sa.localeCompare(sb);
+  });
   const label = `#${run.id} ${run.strategy} (${run.accuracy_pct}%, ${run.signals}sig)`;
 
-  function _calcKellyApplied(p){
-    return (((b * p - (1 - p)) / b) * (typeof kellyScale==='number' ? kellyScale : 0.5));
+  function _calcKellyApplied(){
+    return (typeof betPct === 'number' ? betPct : 0.017);
   }
 
   function _simMonth(bank, nSignals, winProb, kh){
@@ -1155,6 +1166,24 @@ function analyticsClearFilters(){
   analyticsLoad();
 }
 
+function analyticsSetLastDays(days){
+  const d = new Date();
+  const to = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const from = new Date(to);
+  from.setDate(from.getDate() - Math.max(1, parseInt(days||1,10)) + 1);
+  const fmt = (x)=>{
+    const y=x.getFullYear();
+    const m=String(x.getMonth()+1).padStart(2,'0');
+    const dd=String(x.getDate()).padStart(2,'0');
+    return `${y}-${m}-${dd}`;
+  };
+  const fromEl=document.getElementById('an-date-from');
+  const toEl=document.getElementById('an-date-to');
+  if(fromEl) fromEl.value = fmt(from);
+  if(toEl) toEl.value = fmt(to);
+  analyticsLoad();
+}
+
 async function analyticsLoad(){
   const dateFrom = document.getElementById('an-date-from')?.value || '';
   const dateTo   = document.getElementById('an-date-to')?.value   || '';
@@ -1177,6 +1206,309 @@ async function analyticsLoad(){
     analyticsRenderPerDay(data.per_day);
     analyticsRenderPerHour(data.per_hour);
   }catch(e){ console.error('Analytics error',e); }
+  analyticsAskLoad();
+}
+
+async function analyticsAskLoad(){
+  const dateFrom = document.getElementById('an-date-from')?.value || '';
+  const dateTo   = document.getElementById('an-date-to')?.value   || '';
+  const hourFrom = document.getElementById('an-hour-from')?.value ?? '';
+  const hourTo   = document.getElementById('an-hour-to')?.value   ?? '';
+  const windowSec = parseInt(document.getElementById('an-ask-window')?.value || '10', 10) || 10;
+
+  let url = API+'/api/analytics/ask_prices?window_sec='+windowSec;
+  if(dateFrom) url += '&date_from='+encodeURIComponent(dateFrom);
+  if(dateTo)   url += '&date_to='+encodeURIComponent(dateTo);
+  if(hourFrom!=='') url += '&hour_from='+encodeURIComponent(hourFrom);
+  if(hourTo!=='')   url += '&hour_to='+encodeURIComponent(hourTo);
+
+  // Show loading state
+  ['an-ask-summary','an-ask-buckets','an-ask-hist','an-ask-perday'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el && !el.innerHTML) el.innerHTML='<div class="text-slate-500 text-xs">Loading…</div>';
+  });
+
+  try{
+    const res = await fetch(url);
+    const data = await res.json();
+    analyticsRenderAskSummary(data.summary, data.window_sec);
+    analyticsRenderAskBuckets(data.buckets, data.summary);
+    analyticsRenderAskDepth(data.depth);
+    analyticsRenderAskPerDay(data.per_day);
+  }catch(e){ console.error('Ask analysis error',e); }
+}
+
+function analyticsRenderAskSummary(s, windowSec){
+  const el=document.getElementById('an-ask-summary');
+  if(!el||!s) return;
+  const na = v => v!=null ? v+'¢' : '—';
+  const covColor = s.coverage_pct>=80?'#22c55e':s.coverage_pct>=50?'#eab308':'#ef4444';
+  const cards=[
+    {label:'Predictions Analyzed', value:s.total_preds,       sub:'UP/DOWN before market start',           color:'#8b5cf6'},
+    {label:'With Snapshot',        value:s.preds_with_snap,   sub:`orderbook found within ${windowSec}s`,  color:'#3b82f6'},
+    {label:'Coverage',             value:s.coverage_pct+'%',  sub:'% of predictions with data',            color:covColor},
+    {label:'Avg Best Ask',         value:na(s.avg_min_ask),   sub:'best (lowest) ask per prediction',      color:'#06b6d4'},
+    {label:'Lowest Ask Seen',      value:na(s.overall_min_ask),sub:'cheapest ever available',              color:'#10b981'},
+  ];
+  el.innerHTML = cards.map(c=>`<div class="card p-5" style="border-left:3px solid ${c.color}">
+    <div class="text-xs text-slate-400 mb-1">${c.label}</div>
+    <div class="text-2xl font-bold" style="color:${c.color}">${c.value}</div>
+    <div class="text-xs text-slate-500 mt-1">${c.sub}</div>
+  </div>`).join('');
+}
+
+function analyticsRenderAskBuckets(buckets, summary){
+  const el=document.getElementById('an-ask-buckets');
+  if(!el||!buckets) return;
+  const defs=[
+    {key:'51', label:'Ask ≤ 51¢', color:'#22c55e'},
+    {key:'52', label:'Ask ≤ 52¢', color:'#eab308'},
+    {key:'53', label:'Ask ≤ 53¢', color:'#f97316'},
+  ];
+  el.innerHTML = defs.map(def=>{
+    const b = buckets[def.key] || {};
+    const pct = b.pct || 0;
+    const cnt = b.cnt || 0;
+    const avgAsk = b.avg_ask != null ? b.avg_ask+'¢' : '—';
+    const avgAmt = b.avg_amount != null ? b.avg_amount : '—';
+    return `<div class="card p-5" style="border-left:3px solid ${def.color}">
+      <div class="text-xs text-slate-400 mb-2 font-semibold">${def.label}</div>
+      <div class="text-2xl font-bold" style="color:${def.color}">${pct}%</div>
+      <div class="text-xs text-slate-300 mt-1">${cnt} predictions</div>
+      <div class="mt-3">
+        <div class="w-full bg-slate-700 rounded-full" style="height:4px">
+          <div style="width:${Math.min(pct,100)}%;height:4px;background:${def.color};border-radius:9999px"></div>
+        </div>
+      </div>
+      <div class="text-xs text-slate-400 mt-2">Avg ask: <span class="font-mono" style="color:${def.color}">${avgAsk}</span></div>
+      <div class="text-xs text-slate-400 mt-1">Avg available qty: <span class="font-mono font-bold" style="color:${def.color}">${avgAmt}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function analyticsRenderAskDepth(rows){
+  const el=document.getElementById('an-ask-hist');
+  if(!el) return;
+  if(!rows||!rows.length){el.innerHTML='<div class="text-slate-500 text-xs">No depth data</div>';return;}
+
+  // Keep chart/table readable: hide very high price levels
+  rows = rows.filter(r => {
+    if(!(r && typeof r.price === 'number')) return false;
+    // Only integer-cent levels, and only the range you care about
+    if(r.price < 48 || r.price > 55) return false;
+    return Math.abs(r.price - Math.round(r.price)) < 1e-9;
+  });
+  if(!rows.length){el.innerHTML='<div class="text-slate-500 text-xs">No depth data</div>';return;}
+
+  // Bar chart by avg_cumul amount
+  const maxAmt = Math.max(...rows.map(r=>r.avg_cumul||0), 1);
+  let html=`<h3 class="font-semibold mb-1">Orderbook Depth — Avg Cumulative Amount Available</h3>`;
+  html+=`<p class="text-xs text-slate-500 mb-3">At each price (¢), the average total quantity available at that price or cheaper in the first snapshot after prediction.</p>`;
+  html+=`<div class="flex items-end gap-px mb-2" style="height:90px">`;
+  rows.forEach(r=>{
+    const barPct = Math.round((r.avg_cumul||0)/maxAmt*100);
+    const color = r.price<=51?'#22c55e':r.price<=52?'#eab308':r.price<=53?'#f97316':'#64748b';
+    html+=`<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%"
+         title="≤${r.price}¢: ${r.avg_cumul} avg qty (${r.pct}% of preds have any)">
+      <div style="width:100%;background:${color};height:${barPct}%;min-height:${r.avg_cumul?2:0}px;border-radius:2px 2px 0 0"></div>
+      <div class="text-slate-500" style="font-size:9px;margin-top:2px;writing-mode:vertical-rl;transform:rotate(180deg)">${r.price}</div>
+    </div>`;
+  });
+  html+=`</div>`;
+
+  // Table
+  html+=`<div style="overflow-x:auto" class="mt-3"><table>
+    <thead><tr>
+      <th>Price ≤ (¢)</th>
+      <th>Preds with liq.</th>
+      <th>% of preds</th>
+      <th>Avg cumul. qty</th>
+    </tr></thead><tbody>`;
+  rows.forEach(r=>{
+    const color = r.price<=51?'text-green-400':r.price<=52?'text-yellow-400':r.price<=53?'text-orange-400':'text-slate-300';
+    html+=`<tr>
+      <td class="font-mono text-xs font-bold ${color}">${r.price}¢</td>
+      <td class="font-mono text-xs">${r.count}</td>
+      <td class="font-mono text-xs">${r.pct}%</td>
+      <td class="font-mono text-xs font-bold ${color}">${r.avg_cumul}</td>
+    </tr>`;
+  });
+  html+=`</tbody></table></div>`;
+  el.innerHTML=html;
+}
+
+function analyticsRenderAskPerDay(rows){
+  const el=document.getElementById('an-ask-perday');
+  if(!el) return;
+  if(!rows||!rows.length){el.innerHTML='';return;}
+  let html=`<h3 class="font-semibold mb-3">By Day — Ask Price &amp; Available Quantity</h3><div style="overflow-x:auto"><table>
+    <thead><tr>
+      <th>Date</th><th>Preds</th><th>Avg Ask</th>
+      <th>≤51¢ cnt</th><th>≤51¢ avg qty</th>
+      <th>≤52¢ cnt</th><th>≤52¢ avg qty</th>
+      <th>≤53¢ cnt</th><th>≤53¢ avg qty</th>
+    </tr></thead><tbody>`;
+  rows.forEach(r=>{
+    const pct51=r.preds>0?Math.round((r.cnt_le51||0)/r.preds*100):0;
+    const pct52=r.preds>0?Math.round((r.cnt_le52||0)/r.preds*100):0;
+    const pct53=r.preds>0?Math.round((r.cnt_le53||0)/r.preds*100):0;
+    const amt = (v,cls) => v!=null?`<span class="font-bold ${cls}">${v}</span>`:'—';
+    html+=`<tr>
+      <td class="font-mono text-xs">${r.day}</td>
+      <td class="font-mono text-xs">${r.preds}</td>
+      <td class="font-mono text-xs">${r.avg_ask!=null?r.avg_ask+'¢':'—'}</td>
+      <td class="font-mono text-xs text-green-400">${r.cnt_le51||0} <span class="text-slate-500">(${pct51}%)</span></td>
+      <td class="font-mono text-xs">${amt(r.avg_amt_le51,'text-green-400')}</td>
+      <td class="font-mono text-xs text-yellow-400">${r.cnt_le52||0} <span class="text-slate-500">(${pct52}%)</span></td>
+      <td class="font-mono text-xs">${amt(r.avg_amt_le52,'text-yellow-400')}</td>
+      <td class="font-mono text-xs text-orange-400">${r.cnt_le53||0} <span class="text-slate-500">(${pct53}%)</span></td>
+      <td class="font-mono text-xs">${amt(r.avg_amt_le53,'text-orange-400')}</td>
+    </tr>`;
+  });
+  html+='</tbody></table></div>';
+  el.innerHTML=html;
+}
+
+async function analyticsKellyLoad(){
+  const dateFrom  = document.getElementById('an-date-from')?.value  || '';
+  const dateTo    = document.getElementById('an-date-to')?.value    || '';
+  const hourFrom  = document.getElementById('an-hour-from')?.value  ?? '';
+  const hourTo    = document.getElementById('an-hour-to')?.value    ?? '';
+  const startBank = parseFloat(document.getElementById('an-kelly-bank')?.value  || '100') || 100;
+  const maxBetRaw = document.getElementById('an-kelly-maxbet')?.value?.trim();
+  const maxBet    = maxBetRaw ? parseFloat(maxBetRaw) : null;
+  const feePctRaw = document.getElementById('an-kelly-fee')?.value?.trim();
+  const feeRate   = feePctRaw !== '' && feePctRaw != null ? (parseFloat(feePctRaw) / 100) : 0.0156;
+  const maxPrice  = parseFloat(document.getElementById('an-kelly-maxprice')?.value || '51') || 51;
+  const hkPctRaw  = document.getElementById('an-kelly-hkpct')?.value?.trim();
+  const fkPctRaw  = document.getElementById('an-kelly-fkpct')?.value?.trim();
+  const hkPct     = hkPctRaw !== '' && hkPctRaw != null ? (parseFloat(hkPctRaw) / 100) : 0.017;
+  const fkPct     = fkPctRaw !== '' && fkPctRaw != null ? (parseFloat(fkPctRaw) / 100) : 0.0334;
+
+  const ps = [`start_bank=${startBank}`, `fee_rate=${feeRate}`, `max_price_cents=${maxPrice}`, `hk_pct=${hkPct}`, `fk_pct=${fkPct}`];
+  if(dateFrom) ps.push('date_from='+encodeURIComponent(dateFrom));
+  if(dateTo)   ps.push('date_to='+encodeURIComponent(dateTo));
+  if(hourFrom !== '') ps.push('hour_from='+hourFrom);
+  if(hourTo   !== '') ps.push('hour_to='+hourTo);
+  if(maxBet != null)  ps.push('max_bet='+maxBet);
+  const url = API+'/api/analytics/kelly_sim?'+ps.join('&');
+
+  ['an-kelly-summary','an-kelly-table'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.innerHTML='<div class="text-slate-500 text-xs">Loading…</div>';
+  });
+
+  try{
+    const res = await fetch(url);
+    const data = await res.json();
+    analyticsKellyRenderSummary(data);
+    analyticsKellyRenderTable(data);
+  }catch(e){ console.error('Kelly sim error',e); }
+}
+
+function analyticsKellyRenderSummary(d){
+  const el = document.getElementById('an-kelly-summary');
+  if(!el) return;
+  const hk = d.half_kelly || {};
+  const fk = d.full_kelly || {};
+  const roi = (v, sb) => {
+    if(v==null) return '—';
+    const pct = ((v - sb) / sb * 100).toFixed(2);
+    const cls = v >= sb ? 'text-green-400' : 'text-red-400';
+    return `<span class="${cls}">${pct}%</span>`;
+  };
+  const $b = (v) => v!=null ? `$${v.toFixed(2)}` : '—';
+  const maxB = d.max_bet != null ? `$${d.max_bet}` : 'none';
+  const mpc  = d.max_price_cents != null ? d.max_price_cents+'¢' : '—';
+  const feeStr = d.fee_rate!=null ? (d.fee_rate*100).toFixed(2)+'%' : '—';
+  const hkPctStr = d.hk_pct!=null ? (d.hk_pct*100).toFixed(2)+'%' : '—';
+  const fkPctStr = d.fk_pct!=null ? (d.fk_pct*100).toFixed(2)+'%' : '—';
+  const skipTotal = d.skipped_price||0;
+  const skipSub = `ask > ${mpc}: ${skipTotal}`;
+  const cards = [
+    {label:'Settings',          value:`${mpc} max`,                 sub:`bank: $${d.start_bank} · ½K: ${hkPctStr} · FK: ${fkPctStr} · cap: ${maxB} · fee: ${feeStr}`, color:'#64748b'},
+    {label:'Resolved w/ Snap',  value:d.total_resolved||0,          sub:`predictions with orderbook data`,          color:'#8b5cf6'},
+    {label:'Trades Executed',   value:d.total_trades,               sub:`${d.total_wins} wins · ${d.win_pct}% acc`, color:'#06b6d4'},
+    {label:'Skipped',           value:skipTotal,                    sub:skipSub,                                    color:'#475569'},
+    {label:'½ Kelly End',       value:$b(hk.end_bank),              sub:roi(hk.end_bank, d.start_bank)+' ROI',      color: (hk.end_bank||0)>=d.start_bank?'#22c55e':'#ef4444'},
+    {label:'Full Kelly End',    value:$b(fk.end_bank),              sub:roi(fk.end_bank, d.start_bank)+' ROI',      color: (fk.end_bank||0)>=d.start_bank?'#3b82f6':'#ef4444'},
+  ];
+  el.innerHTML = cards.map(c=>`<div class="card p-5" style="border-left:3px solid ${c.color}">
+    <div class="text-xs text-slate-400 mb-1">${c.label}</div>
+    <div class="text-2xl font-bold" style="color:${c.color}">${c.value}</div>
+    <div class="text-xs text-slate-500 mt-1">${c.sub}</div>
+  </div>`).join('');
+}
+
+function analyticsKellyRenderTable(d){
+  const el = document.getElementById('an-kelly-table');
+  if(!el) return;
+  const trades = d.trades || [];
+
+  if(!trades.length){
+    el.innerHTML='<div class="text-slate-500 text-xs">No trades — no resolved predictions with ask ≤ '+
+      (d.max_price_cents||51)+'¢ found for the selected filters.</div>';
+    return;
+  }
+
+  const $  = (v,dp) => v!=null ? v.toFixed(dp??2) : '—';
+  const profitTd = (v) => {
+    if(v==null) return '<td class="font-mono text-xs text-slate-500">—</td>';
+    const cls = v>=0?'text-green-400':'text-red-400';
+    const sign = v>=0?'+':'';
+    return `<td class="font-mono text-xs ${cls}">${sign}$${v.toFixed(2)}</td>`;
+  };
+  const bankTd = (v, sb) => {
+    if(v==null) return '<td class="font-mono text-xs text-slate-500">—</td>';
+    const cls = v>=sb?'text-green-400':'text-red-400';
+    return `<td class="font-mono text-xs font-bold ${cls}">$${v.toFixed(2)}</td>`;
+  };
+  const sb = d.start_bank || 100;
+
+  let html = `<h3 class="font-semibold mb-3">All Simulated Trades (${trades.length})</h3>
+  <div style="overflow-x:auto"><table style="white-space:nowrap">
+    <thead><tr>
+      <th>#</th><th>Date</th><th>Pred Time UTC</th><th>Market</th><th>Pred</th><th>Actual</th><th>✓</th>
+      <th>Skip Reason</th>
+      <th>Ask ¢</th>
+      <th>½K Bet $</th><th>½K Shares</th><th>½K Fill ¢</th><th>½K Fee $</th><th>½K P&L</th><th>½K Bank</th>
+      <th>FK Bet $</th><th>FK Shares</th><th>FK Fill ¢</th><th>FK Fee $</th><th>FK P&L</th><th>FK Bank</th>
+    </tr></thead><tbody>`;
+
+  trades.forEach((t,i) => {
+    const okCls = t.correct ? 'text-green-400' : 'text-red-400';
+    const okTxt = t.correct ? '✓' : '✗';
+    const skipped = !!t.skipped;
+    const rowCls = skipped ? 'opacity:0.7' : '';
+    const reason = skipped ? (t.skip_reason||'skipped') : '';
+    const askTxt = (t.best_ask==null) ? '—' : `${$(t.best_ask,2)}¢`;
+    html+=`<tr>
+      <td class="font-mono text-xs text-slate-500" style="${rowCls}">${i+1}</td>
+      <td class="font-mono text-xs">${t.date}</td>
+      <td class="font-mono text-xs">${t.time||'—'}</td>
+      <td class="font-mono text-xs text-slate-300">${t.slug||'—'}</td>
+      <td class="font-mono text-xs">${t.pred}</td>
+      <td class="font-mono text-xs">${t.outcome}</td>
+      <td class="font-mono text-xs font-bold ${okCls}">${okTxt}</td>
+      <td class="text-xs text-slate-500">${reason}</td>
+      <td class="font-mono text-xs">${askTxt}</td>
+      <td class="font-mono text-xs">$${$(t.hk_bet)}</td>
+      <td class="font-mono text-xs">${$(t.hk_shares)}</td>
+      <td class="font-mono text-xs">${$(t.hk_fill,2)}¢</td>
+      <td class="font-mono text-xs text-orange-400">$${$(t.hk_fee)}</td>
+      ${profitTd(t.hk_profit)}
+      ${bankTd(t.hk_bank, sb)}
+      <td class="font-mono text-xs">$${$(t.fk_bet)}</td>
+      <td class="font-mono text-xs">${$(t.fk_shares)}</td>
+      <td class="font-mono text-xs">${$(t.fk_fill,2)}¢</td>
+      <td class="font-mono text-xs text-orange-400">$${$(t.fk_fee)}</td>
+      ${profitTd(t.fk_profit)}
+      ${bankTd(t.fk_bank, sb)}
+    </tr>`;
+  });
+
+  html+='</tbody></table></div>';
+  el.innerHTML = html;
 }
 
 function _anAccBadge(pct){

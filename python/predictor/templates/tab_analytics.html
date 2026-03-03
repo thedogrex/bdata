@@ -1,0 +1,44 @@
+  <!-- ============ TAB: ANALYTICS ============ -->
+  <div id="panel-analytics" class="hidden">
+    <div class="card p-6 mb-4">
+      <h2 class="text-lg font-semibold mb-4">Prediction Analytics</h2>
+
+      <!-- Filters -->
+      <div class="flex flex-wrap gap-4 items-end">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Date From</label>
+          <input type="date" id="an-date-from" class="w-40" oninput="analyticsLoad()">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Date To</label>
+          <input type="date" id="an-date-to" class="w-40" oninput="analyticsLoad()">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Hour From (UTC)</label>
+          <select id="an-hour-from" class="w-28" onchange="analyticsLoad()">
+            <option value="">Any</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Hour To (UTC)</label>
+          <select id="an-hour-to" class="w-28" onchange="analyticsLoad()">
+            <option value="">Any</option>
+          </select>
+        </div>
+        <button onclick="analyticsClearFilters()" class="btn btn-slate text-xs">Clear Filters</button>
+        <button onclick="analyticsLoad()" class="btn btn-purple text-xs">Refresh</button>
+      </div>
+    </div>
+
+    <!-- Summary cards -->
+    <div id="an-summary" class="grid grid-cols-2 gap-4 mb-4" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))"></div>
+
+    <!-- Per-template breakdown -->
+    <div id="an-templates" class="card p-6 mb-4"></div>
+
+    <!-- Per-day breakdown -->
+    <div id="an-per-day" class="card p-6 mb-4"></div>
+
+    <!-- Per-hour breakdown -->
+    <div id="an-per-hour" class="card p-6 mb-4"></div>
+  </div>

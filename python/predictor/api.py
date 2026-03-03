@@ -625,6 +625,23 @@ async def api_clear_queue():
     return {"cleared": count}
 
 
+# ==================== ANALYTICS ====================
+
+@app.get("/api/analytics/predictions")
+async def api_predictions_analytics(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    hour_from: int | None = Query(None),
+    hour_to: int | None = Query(None),
+):
+    return await poly_service.get_predictions_analytics(
+        date_from=date_from,
+        date_to=date_to,
+        hour_from=hour_from,
+        hour_to=hour_to,
+    )
+
+
 # ==================== ADMIN PANEL ====================
 
 _TEMPLATE_DIR = pathlib.Path(__file__).parent / "templates"
@@ -644,6 +661,7 @@ def _build_admin_html() -> str:
         "{{TAB_BEST}}": "",      # included in tabs_backtest.html
         "{{TAB_POLY}}": _load_template("tab_poly.html"),
         "{{TAB_ORDERBOOKS}}": _load_template("tab_orderbooks.html"),
+        "{{TAB_ANALYTICS}}": _load_template("tab_analytics.html"),
         "{{JS_COMMON}}": _load_template("js_common.js"),
         "{{JS_POLY}}": _load_template("js_poly.js"),
         "{{JS_ORDERBOOKS}}": _load_template("js_orderbooks.js"),

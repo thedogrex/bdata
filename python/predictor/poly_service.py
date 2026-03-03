@@ -1809,3 +1809,166 @@ async def get_latest_orderbook(slug: str, asset_id: str) -> Optional[Dict[str, A
         "bids": [],             # Always empty
         "asks": asks,
     }
+
+
+async def get_predictions_analytics(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    hour_from: Optional[int] = None,
+    hour_to: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Return prediction analytics with optional date and hour-of-day filters.
+
+    Filters apply to pr.started_at (when the prediction was made).
+    Only counts non-quantum, non-error, UP/DOWN predictions made before the market start.
+    """
+    where = [
+        "pr.prediction IN ('UP','DOWN')",
+        "pr.quantum = 0",
+        "pr.error IS NULL",
+        "pr.started_at < FROM_UNIXTIME(pm.ts)",
+    ]
+    params: list = []
+
+    if date_from:
+        where.append("DATE(pr.started_at) >= %s")
+        params.append(date_from)
+    if date_to:
+        where.append("DATE(pr.started_at) <= %s")
+        params.append(date_to)
+    if hour_from is not None:
+        where.append("HOUR(pr.started_at) >= %s")
+        params.append(int(hour_from))
+    if hour_to is not None:
+        where.append("HOUR(pr.started_at) <= %s")
+        params.append(int(hour_to))
+
+    where_sql = " AND ".join(where)
+
+    # ── Overall summary ──────────────────────────────────────────────────────
+    summary_q = f"""
+        SELECT
+            COUNT(*)                                                      AS total_predictions,
+            COUNT(DISTINCT pm.slug)                                       AS total_markets,
+            COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL THEN 1 ELSE 0 END), 0) AS resolved_count,
+            COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL
+                      AND pr.prediction = pm.resolved_outcome THEN 1 ELSE 0 END), 0) AS correct_count,
+            COUNT(DISTINCT DATE(pr.started_at))                          AS active_days,
+            COUNT(DISTINCT HOUR(pr.started_at))                          AS active_hours
+        FROM poly_pred_runs pr
+        JOIN poly_markets pm ON pm.slug = pr.slug
+        WHERE {where_sql}
+    """
+    row = await db.fetchone(summary_q, params or None)
+    total_predictions = int(row[0]) if row else 0
+    total_markets     = int(row[1]) if row else 0
+    resolved_count    = int(row[2] or 0) if row else 0
+    correct_count     = int(row[3] or 0) if row else 0
+    active_days       = int(row[4]) if row else 0
+    active_hours      = int(row[5]) if row else 0
+
+    correct_pct = round(correct_count / resolved_count * 100, 1) if resolved_count > 0 else None
+    avg_per_day  = round(total_predictions / active_days, 1)  if active_days  > 0 else 0
+    avg_per_hour = round(total_predictions / active_hours, 1) if active_hours > 0 else 0
+
+    # ── Per-day breakdown ────────────────────────────────────────────────────
+    day_q = f"""
+        SELECT
+            DATE(pr.started_at)                                           AS day,
+            COUNT(*)                                                      AS predictions,
+            COUNT(DISTINCT pm.slug)                                       AS markets,
+            COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL THEN 1 ELSE 0 END), 0) AS resolved,
+            COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL
+                      AND pr.prediction = pm.resolved_outcome THEN 1 ELSE 0 END), 0) AS correct
+        FROM poly_pred_runs pr
+        JOIN poly_markets pm ON pm.slug = pr.slug
+        WHERE {where_sql}
+        GROUP BY DATE(pr.started_at)
+        ORDER BY day ASC
+    """
+    day_rows = await db.fetchall(day_q, params or None)
+    per_day = []
+    for r in day_rows:
+        res = int(r[3] or 0)
+        cor = int(r[4] or 0)
+        per_day.append({
+            "day":         str(r[0]),
+            "predictions": int(r[1]),
+            "markets":     int(r[2]),
+            "resolved":    res,
+            "correct":     cor,
+            "correct_pct": round(cor / res * 100, 1) if res > 0 else None,
+        })
+
+    # ── Per-hour breakdown ───────────────────────────────────────────────────
+    hour_q = f"""
+        SELECT
+            HOUR(pr.started_at)                                           AS hr,
+            COUNT(*)                                                      AS predictions,
+            COUNT(DISTINCT pm.slug)                                       AS markets,
+            COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL THEN 1 ELSE 0 END), 0) AS resolved,
+            COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL
+                      AND pr.prediction = pm.resolved_outcome THEN 1 ELSE 0 END), 0) AS correct
+        FROM poly_pred_runs pr
+        JOIN poly_markets pm ON pm.slug = pr.slug
+        WHERE {where_sql}
+        GROUP BY HOUR(pr.started_at)
+        ORDER BY hr ASC
+    """
+    hour_rows = await db.fetchall(hour_q, params or None)
+    per_hour = []
+    for r in hour_rows:
+        res = int(r[3] or 0)
+        cor = int(r[4] or 0)
+        per_hour.append({
+            "hour":        int(r[0]),
+            "predictions": int(r[1]),
+            "markets":     int(r[2]),
+            "resolved":    res,
+            "correct":     cor,
+            "correct_pct": round(cor / res * 100, 1) if res > 0 else None,
+        })
+
+    # ── Per-template breakdown ────────────────────────────────────────────────
+    tpl_q = f"""
+        SELECT
+            pr.template_name,
+            COUNT(*)                                                      AS predictions,
+            COUNT(DISTINCT pm.slug)                                       AS markets,
+            COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL THEN 1 ELSE 0 END), 0) AS resolved,
+            COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL
+                      AND pr.prediction = pm.resolved_outcome THEN 1 ELSE 0 END), 0) AS correct
+        FROM poly_pred_runs pr
+        JOIN poly_markets pm ON pm.slug = pr.slug
+        WHERE {where_sql}
+        GROUP BY pr.template_name
+        ORDER BY predictions DESC
+    """
+    tpl_rows = await db.fetchall(tpl_q, params or None)
+    per_template = []
+    for r in tpl_rows:
+        res = int(r[3] or 0)
+        cor = int(r[4] or 0)
+        per_template.append({
+            "template":    r[0] or "—",
+            "predictions": int(r[1]),
+            "markets":     int(r[2]),
+            "resolved":    res,
+            "correct":     cor,
+            "correct_pct": round(cor / res * 100, 1) if res > 0 else None,
+        })
+
+    return {
+        "summary": {
+            "total_predictions": total_predictions,
+            "total_markets":     total_markets,
+            "resolved_count":    resolved_count,
+            "correct_count":     correct_count,
+            "correct_pct":       correct_pct,
+            "avg_per_day":       avg_per_day,
+            "avg_per_hour":      avg_per_hour,
+        },
+        "per_day":      per_day,
+        "per_hour":     per_hour,
+        "per_template": per_template,
+    }

@@ -6,6 +6,7 @@
 <title>Candy MARK — Admin Panel</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
+  html{overflow-y:scroll;scrollbar-gutter:stable;}
   body{background:#0f172a;color:#e2e8f0;font-family:'Inter',system-ui,sans-serif}
   .card{background:#1e293b;border:1px solid #334155;border-radius:12px}
   .btn{padding:6px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;color:#fff;transition:background .15s}
@@ -96,6 +97,7 @@
     <button onclick="switchTab('history')" id="tab-history" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">History</button>
     <button onclick="switchTab('best')" id="tab-best" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Best Runs</button>
     <button onclick="switchTab('poly')" id="tab-poly" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Polymarket</button>
+    <button onclick="switchTab('analytics');analyticsLoad()" id="tab-analytics" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Analytics</button>
   </div>
 
   {{TAB_BACKTEST}}
@@ -104,6 +106,7 @@
   {{TAB_HISTORY}}
   {{TAB_BEST}}
   {{TAB_POLY}}
+  {{TAB_ANALYTICS}}
 
   <!-- Compare Development Dialog -->
   <div id="compare-dev-popup" class="hidden absolute bg-slate-800 border border-slate-600 rounded-md p-2 shadow-lg z-50" style="min-width:120px;">

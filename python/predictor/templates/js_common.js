@@ -189,7 +189,7 @@ function applyPreset(jsonStr){
 }
 
 // ===== TABS =====
-const TABS=['backtest','bruteforce','history','best','best_compare','poly'];
+const TABS=['backtest','bruteforce','history','best','best_compare','poly','analytics'];
 function switchTab(tab){
   TABS.forEach(t=>{
     const panel=document.getElementById('panel-'+t);
@@ -1128,6 +1128,164 @@ function bestRenderCompareSummary(simResults, startBank, buyPriceCents, maxBet){
   </div>`;
 
   el.innerHTML = html;
+}
+
+// ===== ANALYTICS =====
+(function _initAnalyticsHours(){
+  const hours = Array.from({length:24},(_,i)=>i);
+  ['an-hour-from','an-hour-to'].forEach(id=>{
+    const sel = document.getElementById(id);
+    if(!sel) return;
+    hours.forEach(h=>{
+      const opt = document.createElement('option');
+      opt.value = h;
+      opt.textContent = String(h).padStart(2,'0')+':00';
+      sel.appendChild(opt);
+    });
+  });
+})();
+
+function analyticsClearFilters(){
+  ['an-date-from','an-date-to'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  ['an-hour-from','an-hour-to'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  analyticsLoad();
+}
+
+async function analyticsLoad(){
+  const dateFrom = document.getElementById('an-date-from')?.value || '';
+  const dateTo   = document.getElementById('an-date-to')?.value   || '';
+  const hourFrom = document.getElementById('an-hour-from')?.value ?? '';
+  const hourTo   = document.getElementById('an-hour-to')?.value   ?? '';
+
+  let url = API+'/api/analytics/predictions';
+  const ps=[];
+  if(dateFrom) ps.push('date_from='+encodeURIComponent(dateFrom));
+  if(dateTo)   ps.push('date_to='+encodeURIComponent(dateTo));
+  if(hourFrom!=='') ps.push('hour_from='+encodeURIComponent(hourFrom));
+  if(hourTo!=='')   ps.push('hour_to='+encodeURIComponent(hourTo));
+  if(ps.length) url+='?'+ps.join('&');
+
+  try{
+    const res = await fetch(url);
+    const data = await res.json();
+    analyticsRenderSummary(data.summary);
+    analyticsRenderTemplates(data.per_template);
+    analyticsRenderPerDay(data.per_day);
+    analyticsRenderPerHour(data.per_hour);
+  }catch(e){ console.error('Analytics error',e); }
+}
+
+function _anAccBadge(pct){
+  if(pct===null||pct===undefined) return '<span class="text-slate-500 text-xs">n/a</span>';
+  const cls = pct>=55?'text-green-400':pct>=50?'text-yellow-400':'text-red-400';
+  return `<span class="font-bold ${cls}">${pct}%</span>`;
+}
+
+function analyticsRenderSummary(s){
+  const el=document.getElementById('an-summary');
+  if(!el||!s) return;
+  const cards=[
+    {label:'Predicted Markets',    value: s.total_markets,     sub:'UP or DOWN before market start'},
+    {label:'Total Predictions',    value: s.total_predictions,  sub:'individual template runs'},
+    {label:'Correct Predictions',  value: s.correct_count !== undefined ? `${s.correct_count} / ${s.resolved_count}` : '—', sub:'of resolved markets'},
+    {label:'Accuracy',             value: s.correct_pct!==null&&s.correct_pct!==undefined ? s.correct_pct+'%' : '—', sub:'% correct on resolved', accent: s.correct_pct!=null?(s.correct_pct>=55?'green':s.correct_pct>=50?'yellow':'red'):null},
+    {label:'Avg / Day',            value: s.avg_per_day,       sub:'predictions per active day'},
+    {label:'Avg / Hour',           value: s.avg_per_hour,      sub:'predictions per active hour'},
+  ];
+  const accentColor={'green':'#22c55e','yellow':'#eab308','red':'#ef4444'};
+  el.innerHTML = cards.map(c=>{
+    const color = c.accent ? accentColor[c.accent] : '#8b5cf6';
+    return `<div class="card p-5" style="border-left:3px solid ${color}">
+      <div class="text-xs text-slate-400 mb-1">${c.label}</div>
+      <div class="text-2xl font-bold" style="color:${color}">${c.value}</div>
+      <div class="text-xs text-slate-500 mt-1">${c.sub}</div>
+    </div>`;
+  }).join('');
+}
+
+function analyticsRenderTemplates(rows){
+  const el=document.getElementById('an-templates');
+  if(!el) return;
+  if(!rows||!rows.length){el.innerHTML='<div class="text-slate-400 text-sm">No data</div>';return;}
+  let html=`<h3 class="font-semibold mb-3">By Template</h3><div style="overflow-x:auto"><table>
+    <thead><tr><th>Template</th><th>Predictions</th><th>Markets</th><th>Resolved</th><th>Correct</th><th>Accuracy</th></tr></thead><tbody>`;
+  rows.forEach(r=>{
+    html+=`<tr>
+      <td class="font-medium text-xs">${r.template}</td>
+      <td class="font-mono text-xs">${r.predictions}</td>
+      <td class="font-mono text-xs">${r.markets}</td>
+      <td class="font-mono text-xs">${r.resolved}</td>
+      <td class="font-mono text-xs">${r.correct}</td>
+      <td>${_anAccBadge(r.correct_pct)}</td>
+    </tr>`;
+  });
+  html+='</tbody></table></div>';
+  el.innerHTML=html;
+}
+
+function analyticsRenderPerDay(rows){
+  const el=document.getElementById('an-per-day');
+  if(!el) return;
+  if(!rows||!rows.length){el.innerHTML='';return;}
+  let html=`<h3 class="font-semibold mb-3">By Day</h3><div style="overflow-x:auto"><table>
+    <thead><tr><th>Date</th><th>Predictions</th><th>Markets</th><th>Resolved</th><th>Correct</th><th>Accuracy</th></tr></thead><tbody>`;
+  rows.forEach(r=>{
+    html+=`<tr>
+      <td class="font-mono text-xs">${r.day}</td>
+      <td class="font-mono text-xs">${r.predictions}</td>
+      <td class="font-mono text-xs">${r.markets}</td>
+      <td class="font-mono text-xs">${r.resolved}</td>
+      <td class="font-mono text-xs">${r.correct}</td>
+      <td>${_anAccBadge(r.correct_pct)}</td>
+    </tr>`;
+  });
+  html+='</tbody></table></div>';
+  el.innerHTML=html;
+}
+
+function analyticsRenderPerHour(rows){
+  const el=document.getElementById('an-per-hour');
+  if(!el) return;
+  if(!rows||!rows.length){el.innerHTML='';return;}
+
+  // Bar chart for predictions per hour
+  const maxPred = Math.max(...rows.map(r=>r.predictions),1);
+  let html=`<h3 class="font-semibold mb-3">By Hour (UTC)</h3>`;
+
+  // Mini bar chart
+  html+=`<div class="flex items-end gap-1 mb-4" style="height:80px">`;
+  for(let h=0;h<24;h++){
+    const r=rows.find(x=>x.hour===h);
+    const pct=r?Math.round(r.predictions/maxPred*100):0;
+    const acc=r?.correct_pct;
+    const barColor=acc!=null?(acc>=55?'#22c55e':acc>=50?'#eab308':'#ef4444'):'#334155';
+    const title=r?`${String(h).padStart(2,'0')}:00 — ${r.predictions} preds, ${acc!=null?acc+'%':'n/a'} acc`:`${String(h).padStart(2,'0')}:00 — no data`;
+    html+=`<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${title}">
+      <div style="width:100%;background:${barColor};height:${pct}%;min-height:${r?2:0}px;border-radius:2px 2px 0 0"></div>
+      <div class="text-slate-500" style="font-size:9px;margin-top:2px">${h}</div>
+    </div>`;
+  }
+  html+=`</div>`;
+
+  // Table
+  html+=`<div style="overflow-x:auto"><table>
+    <thead><tr><th>Hour (UTC)</th><th>Predictions</th><th>Markets</th><th>Resolved</th><th>Correct</th><th>Accuracy</th></tr></thead><tbody>`;
+  rows.forEach(r=>{
+    html+=`<tr>
+      <td class="font-mono text-xs">${String(r.hour).padStart(2,'0')}:00</td>
+      <td class="font-mono text-xs">${r.predictions}</td>
+      <td class="font-mono text-xs">${r.markets}</td>
+      <td class="font-mono text-xs">${r.resolved}</td>
+      <td class="font-mono text-xs">${r.correct}</td>
+      <td>${_anAccBadge(r.correct_pct)}</td>
+    </tr>`;
+  });
+  html+='</tbody></table></div>';
+  el.innerHTML=html;
 }
 
 // ===== COMPARE DEVELOPMENT POPUP =====

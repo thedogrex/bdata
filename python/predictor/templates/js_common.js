@@ -1369,6 +1369,20 @@ function analyticsRenderAskPerDay(rows){
   el.innerHTML=html;
 }
 
+async function analyticsOpenPolyMarket(slug){
+  if(!slug) return;
+  try{
+    switchTab('poly');
+    if(typeof selectPolyMarket === 'function'){
+      await selectPolyMarket(String(slug));
+    } else if(typeof showPolyMarket === 'function'){
+      await showPolyMarket(String(slug));
+    }
+  }catch(e){
+    console.error('analyticsOpenPolyMarket error:', e);
+  }
+}
+
 async function analyticsKellyLoad(){
   const dateFrom  = document.getElementById('an-date-from')?.value  || '';
   const dateTo    = document.getElementById('an-date-to')?.value    || '';
@@ -1452,8 +1466,9 @@ function analyticsKellyRenderTable(d){
   }
 
   const $  = (v,dp) => v!=null ? v.toFixed(dp??2) : '—';
-  const profitTd = (v) => {
+  const profitTd = (v, skipped) => {
     if(v==null) return '<td class="font-mono text-xs text-slate-500">—</td>';
+    if(skipped) return `<td class="font-mono text-xs text-slate-400">${v>=0?'+':''}$${v.toFixed(2)}</td>`;
     const cls = v>=0?'text-green-400':'text-red-400';
     const sign = v>=0?'+':'';
     return `<td class="font-mono text-xs ${cls}">${sign}$${v.toFixed(2)}</td>`;
@@ -1468,11 +1483,10 @@ function analyticsKellyRenderTable(d){
   let html = `<h3 class="font-semibold mb-3">All Simulated Trades (${trades.length})</h3>
   <div style="overflow-x:auto"><table style="white-space:nowrap">
     <thead><tr>
-      <th>#</th><th>Date</th><th>Pred Time UTC</th><th>Market</th><th>Pred</th><th>Actual</th><th>✓</th>
-      <th>Skip Reason</th>
+      <th>#</th><th>Date</th><th>Pr Time</th><th>Market</th><th>Pred</th><th>✓</th>
       <th>Ask ¢</th>
-      <th>½K Bet $</th><th>½K Shares</th><th>½K Fill ¢</th><th>½K Fee $</th><th>½K P&L</th><th>½K Bank</th>
-      <th>FK Bet $</th><th>FK Shares</th><th>FK Fill ¢</th><th>FK Fee $</th><th>FK P&L</th><th>FK Bank</th>
+      <th>½K Bet $</th><th>½K Fill ¢</th><th>½K P&L</th><th>½K Bank</th>
+      <th>FK Bet $</th><th>FK Fill ¢</th><th>FK P&L</th><th>FK Bank</th>
     </tr></thead><tbody>`;
 
   trades.forEach((t,i) => {
@@ -1482,28 +1496,28 @@ function analyticsKellyRenderTable(d){
     const rowCls = skipped ? 'opacity:0.7' : '';
     const reason = skipped ? (t.skip_reason||'skipped') : '';
     const askTxt = (t.best_ask==null) ? '—' : `${$(t.best_ask,2)}¢`;
+    const slugEsc = String(t.slug||'').replace(/'/g,"\\'");
+    const slugHtml = (t.slug||'—')==='—'
+      ? '—'
+      : `<a href="#" class="${skipped ? 'text-slate-400 hover:underline' : 'text-blue-400 hover:underline'}" onclick="analyticsOpenPolyMarket('${slugEsc}');return false;">${t.slug}</a>`;
     html+=`<tr>
-      <td class="font-mono text-xs text-slate-500" style="${rowCls}">${i+1}</td>
-      <td class="font-mono text-xs">${t.date}</td>
-      <td class="font-mono text-xs">${t.time||'—'}</td>
-      <td class="font-mono text-xs text-slate-300">${t.slug||'—'}</td>
-      <td class="font-mono text-xs">${t.pred}</td>
-      <td class="font-mono text-xs">${t.outcome}</td>
-      <td class="font-mono text-xs font-bold ${okCls}">${okTxt}</td>
-      <td class="text-xs text-slate-500">${reason}</td>
-      <td class="font-mono text-xs">${askTxt}</td>
-      <td class="font-mono text-xs">$${$(t.hk_bet)}</td>
-      <td class="font-mono text-xs">${$(t.hk_shares)}</td>
-      <td class="font-mono text-xs">${$(t.hk_fill,2)}¢</td>
-      <td class="font-mono text-xs text-orange-400">$${$(t.hk_fee)}</td>
-      ${profitTd(t.hk_profit)}
-      ${bankTd(t.hk_bank, sb)}
-      <td class="font-mono text-xs">$${$(t.fk_bet)}</td>
-      <td class="font-mono text-xs">${$(t.fk_shares)}</td>
-      <td class="font-mono text-xs">${$(t.fk_fill,2)}¢</td>
-      <td class="font-mono text-xs text-orange-400">$${$(t.fk_fee)}</td>
-      ${profitTd(t.fk_profit)}
-      ${bankTd(t.fk_bank, sb)}
+      <td class="font-mono text-xs ${skipped ? 'text-slate-400' : 'text-slate-500'}" style="${rowCls}">${i+1}</td>
+      <td class="font-mono text-xs ${skipped ? 'text-slate-400 italic' : ''}">${skipped ? reason : t.date}</td>
+      <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${t.time ? t.time.slice(0,5) : '—'}</td>
+      <td class="font-mono text-xs ${skipped ? 'text-slate-400' : 'text-slate-300'}">${slugHtml}</td>
+      <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${t.pred}</td>
+      <td class="font-mono text-xs font-bold ${skipped ? 'text-slate-400' : okCls}">${okTxt}</td>
+      <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${askTxt}</td>
+      <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${skipped ? '—' : `$${$(t.hk_bet)}`}</td>
+      <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${skipped ? '—' : `${$(t.hk_fill,2)}¢`}</td>
+      ${skipped ? '<td class="font-mono text-xs text-slate-400">—</td>' : profitTd(t.hk_profit, false)}
+      <td class="font-mono text-xs font-bold ${skipped ? 'text-slate-400' : (t.hk_profit >= 0 ? 'text-green-400' : 'text-red-400')}" style="background:#1e293b">${skipped ? '—' : `$${(t.hk_bank||0).toFixed(2)}`}</td>
+      <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${skipped ? '—' : `$${$(t.fk_bet)}`}</td>
+      <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${skipped ? '—' : `${$(t.fk_fill,2)}¢`}</td>
+      ${skipped ? '<td class="font-mono text-xs text-slate-400">—</td>' : profitTd(t.fk_profit, false)}
+      <td class="font-mono text-xs font-bold ${skipped ? 'text-slate-400' : (t.correct ? 'text-green-400' : 'text-red-400')}" style="background:#1e293b">
+        ${skipped ? '—' : `$${$(t.fk_bank)} ${t.correct ? '▲' : '▼'}`}
+      </td>
     </tr>`;
   });
 

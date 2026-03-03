@@ -525,18 +525,15 @@ async function loadPolyMarkets(){
     polyMarketsWithPosCache = marketsWithPos;
     renderPolyMarkets();
 
-    // Auto-select last selected market (persisted) if present; otherwise fall back to live market
-    let lastSlug = null;
-    try{ lastSlug = localStorage.getItem(POLY_LAST_MARKET_KEY); }catch(e){ lastSlug = null; }
-    const hasLast = !!(lastSlug && data.find(m => m && m.slug === lastSlug));
-    if(hasLast){
-      await selectPolyMarket(lastSlug);
-    } else {
-      // Auto-select live market if present; otherwise poll for live market
-      const liveMarket = data.find(m => polyActiveTs !== null && (m.ts||0) === polyActiveTs && !m.closed);
-      if(liveMarket){
-        await selectPolyMarket(liveMarket.slug);
+    // Only restore last selected market if none is currently selected
+    if(!polySelectedMarketSlug){
+      let lastSlug = null;
+      try{ lastSlug = localStorage.getItem(POLY_LAST_MARKET_KEY); }catch(e){ lastSlug = null; }
+      const hasLast = !!(lastSlug && data.find(m => m && m.slug === lastSlug));
+      if(hasLast){
+        await selectPolyMarket(lastSlug);
       } else {
+        // No auto-selection; wait for user to click a market
         startLiveMarketPoll();
       }
     }

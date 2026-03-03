@@ -1511,7 +1511,9 @@ function analyticsKellyRenderTable(d){
       <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${skipped ? '—' : `$${$(t.hk_bet)}`}</td>
       <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${skipped ? '—' : `${$(t.hk_fill,2)}¢`}</td>
       ${skipped ? '<td class="font-mono text-xs text-slate-400">—</td>' : profitTd(t.hk_profit, false)}
-      <td class="font-mono text-xs font-bold ${skipped ? 'text-slate-400' : (t.hk_profit >= 0 ? 'text-green-400' : 'text-red-400')}" style="background:#1e293b">${skipped ? '—' : `$${(t.hk_bank||0).toFixed(2)}`}</td>
+      <td class="font-mono text-xs font-bold ${skipped ? 'text-slate-400' : (t.hk_profit >= 0 ? 'text-green-400' : 'text-red-400')}" style="background:#1e293b">
+        ${skipped ? '—' : `$${(t.hk_bank||0).toFixed(2)} ${t.hk_profit >= 0 ? '▲' : '▼'}`}
+      </td>
       <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${skipped ? '—' : `$${$(t.fk_bet)}`}</td>
       <td class="font-mono text-xs ${skipped ? 'text-slate-400' : ''}">${skipped ? '—' : `${$(t.fk_fill,2)}¢`}</td>
       ${skipped ? '<td class="font-mono text-xs text-slate-400">—</td>' : profitTd(t.fk_profit, false)}

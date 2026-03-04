@@ -378,19 +378,29 @@ function renderWallet(data){
     const content = obj ? JSON.stringify(obj, null, 2) : '{}';
     return `<div class="mb-2"><div class="text-slate-400 text-[11px]">${title}</div><pre class="text-[11px] font-mono whitespace-pre-wrap">${content}</pre></div>`;
   };
-  balEl.innerHTML = friendlyBalance + balanceBlock('Collateral (USDC)', balance.collateral) + balanceBlock('Conditional Tokens', balance.conditional);
+  balEl.innerHTML = friendlyBalance || '<div class="text-slate-500 text-xs">No balance data.</div>';
 
   if(!positions.length){
     posEl.innerHTML = '<div class="text-slate-500 text-xs">No open positions</div>';
   } else {
     let html = '<div class="space-y-2">';
     positions.forEach(p=>{
+      const resolved = (p.resolved_outcome||'').toUpperCase();
+      const side = (p.outcome_side||'').toUpperCase();
+      let badge = '';
+      if(resolved && side){
+        if(resolved === side){
+          badge = `<span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-green-900 text-green-300">WIN</span>`;
+        } else {
+          badge = `<span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-900 text-red-300">LOST</span>`;
+        }
+      }
       html += `<div class="p-2 rounded" style="background:#0f172a;border:1px solid #334155">
         <div class="flex items-center justify-between">
-          <div class="text-xs font-semibold">${p.slug}</div>
-          <div class="text-[11px] text-slate-500">${p.outcome_side || ''}</div>
+          <div class="text-xs font-semibold">${p.slug}${badge}</div>
+          <div class="text-[11px] text-slate-500">${side}</div>
         </div>
-        <div class="text-[11px] text-slate-400">asset: ${p.asset_id}</div>
+        <div class="text-[11px] text-slate-400">${side}</div>
         <div class="grid grid-cols-3 gap-2 text-[11px] mt-1">
           <div>shares: <b>${(p.shares||0).toFixed(4)}</b></div>
           <div>avg: <b>${(p.avg_price||0).toFixed(4)}</b></div>
@@ -407,6 +417,11 @@ function renderWallet(data){
   } else {
     let html = '<div class="space-y-2">';
     orders.forEach(o=>{
+      const fullId = o.clob_order_id || '';
+      const shortId = fullId ? fullId.slice(0, 8) : '-';
+      const idHtml = fullId
+        ? `<span class="flex items-center gap-1"><b>${shortId}</b><button onclick="navigator.clipboard.writeText('${fullId}')" title="Copy full ID" style="background:none;border:none;color:#60a5fa;cursor:pointer;padding:0;font-size:12px;line-height:1">📋</button></span>`
+        : '-';
       html += `<div class="p-2 rounded" style="background:#0f172a;border:1px solid #334155">
         <div class="flex items-center justify-between">
           <div class="text-xs font-semibold">${o.side} ${o.outcome_side || ''}</div>
@@ -416,7 +431,7 @@ function renderWallet(data){
         <div class="grid grid-cols-3 gap-2 text-[11px] mt-1">
           <div>price: <b>${(o.price||0).toFixed(4)}</b></div>
           <div>amt: <b>${(o.amount||0).toFixed(2)}</b></div>
-          <div>id: <b>${o.clob_order_id || '-'}</b></div>
+          <div>id: ${idHtml}</div>
         </div>
       </div>`;
     });

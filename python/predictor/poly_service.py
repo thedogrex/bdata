@@ -3,13 +3,14 @@ import json
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from db import DbProvider
-from predictor.poly_client import PolymarketClient, MarketData
+
 import app.config as config
+from predictor.poly_client import PolymarketClient, MarketData
 
 
 db = DbProvider()
@@ -254,15 +255,18 @@ async def _try_autopredict_after_end(ended_market_ts: int) -> None:
             return
 
         min_target_ts = int(ended_market_ts) + 600
+        max_target_ts = min_target_ts + 100
+
+        print(f'min predict stamp: {min_target_ts} max: {max_target_ts}')
         targets = await db.fetchall(
             """
             SELECT slug, ts
             FROM poly_markets
-            WHERE closed=0 AND ts >= %s
+            WHERE closed=0 AND ts >= %s AND ts <= %s
             ORDER BY ts ASC
             LIMIT 1
             """,
-            (int(min_target_ts),),
+            (int(min_target_ts), int(max_target_ts)),
         )
 
         # If we don't yet have the upcoming market, refresh and retry once.
@@ -275,11 +279,11 @@ async def _try_autopredict_after_end(ended_market_ts: int) -> None:
                 """
                 SELECT slug, ts
                 FROM poly_markets
-                WHERE closed=0 AND ts >= %s
+                WHERE closed=0 AND ts >= %s AND ts <= %s
                 ORDER BY ts ASC
                 LIMIT 1
                 """,
-                (int(min_target_ts),),
+                (int(min_target_ts), int(max_target_ts)),
             )
 
         for slug, _ts in targets:
@@ -1264,7 +1268,78 @@ async def predict_for_market(
     except Exception:
         pass
 
+    # Backend auto-trade (optional): if confirmation is disabled, place order immediately.
+    try:
+        if not bool(getattr(config, "NEED_CONFIRMATION", True)):
+            asyncio.create_task(_auto_trade_after_prediction(slug=slug, prediction=label))
+    except Exception:
+        pass
+
     return ret
+
+
+async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
+    try:
+        pred = str(prediction or "").upper()
+        emulate_down = bool(getattr(config, "EMULATE_DOWN", False))
+        if pred == "UNDEFINED" and emulate_down:
+            pred = "DOWN"
+        if pred not in ("UP", "DOWN"):
+            return
+
+        # Trade only future markets
+        m_row = await db.fetchone("SELECT ts, closed FROM poly_markets WHERE slug=%s", (slug,))
+        if not m_row:
+            return
+        market_ts = int(m_row[0]) if m_row[0] is not None else 0
+        closed = int(m_row[1]) if len(m_row) > 1 and m_row[1] is not None else 0
+        if closed:
+            return
+        now_utc = int(time.time())
+        if not (market_ts and now_utc < market_ts):
+            return
+
+        # Resolve outcome asset_id for side
+        o_rows = await db.fetchall("SELECT asset_id, name FROM poly_outcomes WHERE slug=%s", (slug,))
+        if not o_rows:
+            return
+        up_id = None
+        down_id = None
+        for asset_id, name in o_rows:
+            n = str(name or "").upper()
+            if "UP" in n and not up_id:
+                up_id = str(asset_id)
+            if "DOWN" in n and not down_id:
+                down_id = str(asset_id)
+        # Fallback to first two
+        if (not up_id or not down_id) and len(o_rows) >= 2:
+            up_id = up_id or str(o_rows[0][0])
+            down_id = down_id or str(o_rows[1][0])
+
+        asset_id = down_id if pred == "DOWN" else up_id
+        if not asset_id:
+            return
+
+        # Import here to avoid circular imports
+        from predictor import live_trading
+
+        await live_trading.buy_after_prediction(
+            slug=slug,
+            asset_id=str(asset_id),
+            outcome_side=pred,
+            prediction_direction=pred,
+            amount_usd=0.0,
+            snapshot_price=0.0,
+            price_threshold=0.52,
+            bank_usd=None,
+            bank_pct=0.05,
+            min_buy_usd=3.0,
+            max_buy_usd=20.0,
+            batch_id=None,
+            template_id=None,
+        )
+    except Exception:
+        return
 
 
 async def get_saved_prediction(slug: str) -> Dict[str, Any]:

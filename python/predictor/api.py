@@ -192,6 +192,7 @@ async def api_poly_status():
     return {
         "active_ts": poly_service.current_active_ts(),
         "emulate_down": bool(getattr(config, "EMULATE_DOWN", False)),
+        "need_confirmation": bool(getattr(config, "NEED_CONFIRMATION", True)),
     }
 
 
@@ -224,6 +225,36 @@ async def api_poly_orderbook_analysis(slug: str, asset_id: str, minutes: int = Q
 @app.get("/api/poly/orderbook/{slug}/{asset_id}/latest")
 async def api_poly_orderbook_latest(slug: str, asset_id: str):
     return await poly_service.get_latest_orderbook(slug=slug, asset_id=asset_id)
+
+
+@app.get("/api/poly/live/quote")
+async def api_poly_live_quote(slug: str = Query(""), asset_id: str = Query("")):
+    """Return refreshed best ask for an outcome token.
+
+    Used by frontend confirmation popup so it displays the same (refreshed) price
+    the backend will attempt to use when placing a live order.
+    """
+    if not slug or not asset_id:
+        return JSONResponse(status_code=400, content={"error": "slug and asset_id are required"})
+    try:
+        # Re-fetch market for debug parity (non-fatal)
+        try:
+            live_trading.trading_client.fetch_market(slug)
+        except Exception:
+            pass
+
+        ask = live_trading.trading_client.get_best_ask(asset_id)
+        if ask is None:
+            return {"slug": slug, "asset_id": asset_id, "best_ask": None, "best_ask_cents": None}
+        ask_f = float(ask)
+        return {
+            "slug": slug,
+            "asset_id": asset_id,
+            "best_ask": ask_f,
+            "best_ask_cents": int(round(ask_f * 100.0)),
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/api/poly/predict")

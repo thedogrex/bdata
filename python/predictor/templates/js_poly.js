@@ -8,6 +8,8 @@ let polyCountdownInterval=null;
 let polySelectedSide=null;
 let polySelectedPriceCents=null;
 
+let polyLastBestAskCents = {UP: null, DOWN: null};
+
 // Autopredict guards
 let polyLastActiveTs = null;
 let polyAutopredictLastTriggeredForEndedTs = null;
@@ -81,6 +83,7 @@ let polyPredUpdatesPollTimer = null;
 let polyPredUpdatesInFlight = false;
 
 let polyEmulateDown = false;
+let polyNeedConfirmation = true;
 
 function polyGetPredUpdatesCursor(){
   try{
@@ -147,7 +150,7 @@ async function polyPollPredUpdates(){
 
       console.log('[pred_updates] new prediction', u, {rawPred, pred, emulate_down: polyEmulateDown});
       try{ if(!polySelectedMarketSlug || polySelectedMarketSlug !== slug){ await selectPolyMarket(slug); } }catch(e){}
-      await polyPlaceLiveOrderAfterPrediction(slug, pred, null, true);
+      await polyPlaceLiveOrderAfterPrediction(slug, pred, null, !!polyNeedConfirmation);
       break;
     }
   }catch(e){
@@ -413,11 +416,41 @@ async function polyPlaceLiveOrderAfterPrediction(slug, prediction, batch_id, req
     const o = (outcome_side === 'DOWN') ? pair.down : pair.up;
     if(!o || !o.asset_id) return {success:false, error:'Outcome asset_id not found'};
 
-    // Use latest best ask from UI cached selection if available
-    const snapCents = (polySelectedPriceCents !== null && Number.isFinite(Number(polySelectedPriceCents)))
+    // Use last synchronized best ask (prefer backend refreshed quote for confirm display)
+    let snapCents = (polySelectedPriceCents !== null && Number.isFinite(Number(polySelectedPriceCents)))
       ? Number(polySelectedPriceCents)
       : null;
+    if(snapCents === null){
+      const cached = polyLastBestAskCents ? polyLastBestAskCents[outcome_side] : null;
+      if(cached !== null && cached !== undefined && Number.isFinite(Number(cached))){
+        snapCents = Number(cached);
+      }
+    }
+
+    // For confirmation popup: re-fetch quote so displayed snapshot matches backend execution
+    if(requireConfirm){
+      try{
+        const qRes = await fetch(API + `/api/poly/live/quote?slug=${encodeURIComponent(String(slug))}&asset_id=${encodeURIComponent(String(o.asset_id))}`);
+        if(qRes.ok){
+          const q = await qRes.json();
+          const qC = (q && q.best_ask_cents !== undefined && q.best_ask_cents !== null) ? Number(q.best_ask_cents) : null;
+          if(qC !== null && Number.isFinite(qC)){
+            snapCents = qC;
+            // keep cache fresh for later
+            try{ if(polyLastBestAskCents) polyLastBestAskCents[outcome_side] = qC; }catch(e){}
+          }
+        } else {
+          console.warn('[live_buy] quote fetch failed', qRes.status);
+        }
+      }catch(e){
+        console.warn('[live_buy] quote fetch exception', e);
+      }
+    }
+
     const snapshot_price = snapCents !== null ? (snapCents/100.0) : price_threshold;
+    if(snapCents === null){
+      console.warn('[live_buy] snapshot_price_cents missing; falling back to threshold', {slug, outcome_side, polySelectedPriceCents, polyLastBestAskCents});
+    }
 
     if(requireConfirm){
       const sizing = await polyComputeOrderAmountUsd(s);
@@ -441,28 +474,34 @@ async function polyPlaceLiveOrderAfterPrediction(slug, prediction, batch_id, req
       return {success:true, pending:true};
     }
 
+    const payload = {
+      slug,
+      asset_id: o.asset_id,
+      outcome_side,
+      prediction_direction: outcome_side,
+      amount_usd: 0.0,
+      snapshot_price,
+      price_threshold,
+      bank_pct: s.bank_pct,
+      min_buy_usd: s.min_buy_usd,
+      max_buy_usd: s.max_buy_usd,
+      batch_id: batch_id || null,
+    };
+    console.log('[live_buy] request payload', payload);
+    console.log('[live_buy] sending POST to', API + '/api/poly/live/buy');
     const res = await fetch(API + '/api/poly/live/buy', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        slug,
-        asset_id: o.asset_id,
-        outcome_side,
-        prediction_direction: outcome_side,
-        amount_usd: 0.0,
-        snapshot_price,
-        price_threshold,
-        bank_pct: s.bank_pct,
-        min_buy_usd: s.min_buy_usd,
-        max_buy_usd: s.max_buy_usd,
-        batch_id: batch_id || null,
-      })
+      body: JSON.stringify(payload),
     });
+    console.log('[live_buy] response status', res.status, res.statusText);
     const data = await res.json();
+    console.log('[live_buy] response body', data);
     // refresh live panels
     try{ loadLiveOrders(); loadLivePositions(); }catch(e){}
     return data;
   }catch(e){
+    console.error('[live_buy] exception', e);
     return {success:false, error: (e && e.message) ? e.message : String(e||'failed')};
   }
 }
@@ -542,7 +581,7 @@ function polyMarketsNextPage(){
   loadPolyMarkets();
 }
 
-function renderPolyMarkets(){
+async function renderPolyMarkets(){
   const el = document.getElementById('poly-markets');
   if(!el) return;
   const data = Array.isArray(polyMarketsCache) ? polyMarketsCache : [];
@@ -559,6 +598,20 @@ function renderPolyMarkets(){
     el.innerHTML = '<div class="text-slate-500 text-xs">No markets.</div>';
     return;
   }
+
+  // Fetch orders for this page to detect successful buys
+  let ordersBySlug = {};
+  try{
+    const slugs = data.map(m=>m.slug).filter(Boolean);
+    if(slugs.length){
+      const res = await fetch(API + '/api/poly/live/orders?limit=500');
+      if(res.ok){
+        const allOrders = await res.json();
+        const matched = (Array.isArray(allOrders) ? allOrders : []).filter(o => o && o.slug && o.clob_status && (o.clob_status.toLowerCase() === 'matched' || o.clob_status.toLowerCase() === 'filled'));
+        matched.forEach(o => { ordersBySlug[o.slug] = true; });
+      }
+    }
+  }catch(e){/* ignore */}
 
   const marketsWithPos = (polyMarketsWithPosCache instanceof Set) ? polyMarketsWithPosCache : new Set();
   let html = '<table class="w-full"><tbody>';
@@ -619,8 +672,13 @@ function renderPolyMarkets(){
     else if(m.pred_badge === 'red') predTint = 'style="background:rgba(239,68,68,0.08)"';
     const selectedClass = isSelected ? 'bg-blue-900' : '';
 
+    const hasSuccessfulBuy = !!ordersBySlug[m.slug];
+    const buyIndicator = hasSuccessfulBuy
+      ? '<span title="has successful buy order" style="display:inline-block;width:6px;height:6px;background:#fbbf24;border:1px solid rgba(251,191,36,0.5);margin-right:6px;vertical-align:middle"></span>'
+      : '';
+
     html += `<tr ${predTint} class="cursor-pointer ${selectedClass}" data-slug="${m.slug}" onclick="selectPolyMarket('${m.slug}')">`
-      + `<td class="text-xs text-slate-400" style="white-space:nowrap">${dot}${posDot}${dateStr} <span class="font-mono text-blue-300">${slugSuffix}</span></td>`
+      + `<td class="text-xs text-slate-400" style="white-space:nowrap">${dot}${posDot}${buyIndicator}${dateStr} <span class="font-mono text-blue-300">${slugSuffix}</span></td>`
       + `<td>${stHtml}</td>`
       + '</tr>';
   });
@@ -897,7 +955,7 @@ async function polyAutopredictRunForSlug(slug, marketTs){
             // Ensure selected market context (for outcome mapping)
             try{ if(!polySelectedMarketSlug || polySelectedMarketSlug !== slug){ await selectPolyMarket(slug); } }catch(e){}
             console.log('[auto-trade] open confirm modal', {slug, summary, bid});
-            await polyPlaceLiveOrderAfterPrediction(slug, summary, bid, true);
+            await polyPlaceLiveOrderAfterPrediction(slug, summary, bid, !!polyNeedConfirmation);
           } else {
             console.log('[auto-trade] skip: duplicate batch_id', {slug, summary, bid});
           }
@@ -1103,6 +1161,7 @@ async function loadPolyMarkets(){
       const s=await st.json();
       polyActiveTs = s.active_ts||null;
       polyEmulateDown = !!s.emulate_down;
+      polyNeedConfirmation = (s.need_confirmation === undefined || s.need_confirmation === null) ? true : !!s.need_confirmation;
       if(polyLastActiveTs !== null && polyActiveTs !== null && polyActiveTs !== polyLastActiveTs){
         try{ await polyAutopredictTrigger(polyLastActiveTs); }catch(e){}
       }
@@ -1155,7 +1214,7 @@ async function loadPolyMarkets(){
           polyLastConfirmPromptKey = promptKey;
 
           try{ if(!polySelectedMarketSlug || polySelectedMarketSlug !== m.slug){ await selectPolyMarket(m.slug); } }catch(e){}
-          await polyPlaceLiveOrderAfterPrediction(m.slug, pred, null, true);
+          await polyPlaceLiveOrderAfterPrediction(m.slug, pred, null, !!polyNeedConfirmation);
           break;
         }
       }
@@ -1724,6 +1783,15 @@ async function updatePolyOrderBooks(){
       fetch(API+`/api/poly/orderbook/${encodeURIComponent(polySelectedMarket.slug)}/${encodeURIComponent(pair.down.asset_id)}/latest`)
     ]);
     const [upData, downData] = await Promise.all([upRes.json(), downRes.json()]);
+
+    // Cache best ask cents for snapshot-price usage (auto-trade path may not click a row)
+    try{
+      const upAsk = (upData && upData.best_ask_cents !== undefined && upData.best_ask_cents !== null) ? Number(upData.best_ask_cents) : null;
+      const dnAsk = (downData && downData.best_ask_cents !== undefined && downData.best_ask_cents !== null) ? Number(downData.best_ask_cents) : null;
+      polyLastBestAskCents.UP = (upAsk !== null && Number.isFinite(upAsk)) ? upAsk : null;
+      polyLastBestAskCents.DOWN = (dnAsk !== null && Number.isFinite(dnAsk)) ? dnAsk : null;
+    }catch(e){}
+
     document.getElementById('poly-orderbook-up').innerHTML = upData ? renderAsks(upData, pair.up.name) : '<span class="text-slate-400">No data.</span>';
     document.getElementById('poly-orderbook-down').innerHTML = downData ? renderAsks(downData, pair.down.name) : '<span class="text-slate-400">No data.</span>';
     const now = new Date().toLocaleTimeString('ru-RU',{timeZone:'UTC'});

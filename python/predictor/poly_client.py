@@ -294,7 +294,10 @@ class PolymarketClient:
             signed = self._clob().create_order(
                 OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
             )
+            logger.debug("Signed order created: %s", signed)
+            logger.debug("Posting signed order to CLOB (GTC)...")
             resp = self._clob().post_order(signed, OrderType.GTC)
+            logger.debug("Raw CLOB post_order response: %s", resp)
             logger.info("<<< BUY LIMIT response: %s", json.dumps(resp, default=str))
             return resp
         except Exception as e:
@@ -422,7 +425,22 @@ class PolymarketClient:
         try:
             price = self._clob().get_price(token_id, side="BUY")
             logger.debug("Best ask (BUY price) %s = %s", token_id[:16], price)
-            return float(price) if price else None
+            if price is None:
+                return None
+
+            # SDKs / wrappers may return:
+            # - a raw numeric/string price
+            # - a dict like {'price': '0.5009', ...}
+            # - an object with a .price attribute
+            if isinstance(price, dict):
+                v = price.get("price")
+                return float(v) if v is not None else None
+
+            v = getattr(price, "price", None)
+            if v is not None:
+                return float(v)
+
+            return float(price)
         except Exception as e:
             logger.error("get_best_ask failed: %s", e)
             return None

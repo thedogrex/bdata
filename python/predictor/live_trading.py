@@ -45,6 +45,24 @@ def _extract_collateral_balance_usd(balance_allowance: Any) -> Optional[float]:
         coll = balance_allowance.get("collateral")
         if not coll:
             return None
+        def _norm_usdc(x: Any) -> Optional[float]:
+            try:
+                # Strings like '37926149' or ints >= 1e6 are base units (USDC 6 decimals)
+                if isinstance(x, str):
+                    sx = x.strip()
+                    if sx.isdigit():
+                        iv = int(sx)
+                        return float(iv) / 1e6 if abs(iv) >= 1_000_000 else float(iv)
+                    fv = float(sx)
+                    return fv
+                if isinstance(x, int):
+                    return float(x) / 1e6 if abs(x) >= 1_000_000 else float(x)
+                if isinstance(x, float):
+                    return float(x)
+            except Exception:
+                return None
+            return None
+
         if isinstance(coll, dict):
             # Common patterns across SDK versions
             for k in (
@@ -58,7 +76,9 @@ def _extract_collateral_balance_usd(balance_allowance: Any) -> Optional[float]:
             ):
                 if k in coll:
                     try:
-                        return float(coll[k])
+                        v = _norm_usdc(coll[k])
+                        if v is not None:
+                            return v
                     except Exception:
                         pass
             # sometimes nested
@@ -66,12 +86,16 @@ def _extract_collateral_balance_usd(balance_allowance: Any) -> Optional[float]:
                 v = coll.get(nest)
                 if isinstance(v, (int, float, str)):
                     try:
-                        return float(v)
+                        nv = _norm_usdc(v)
+                        if nv is not None:
+                            return nv
                     except Exception:
                         pass
         # fallback: if collateral itself is numeric
         if isinstance(coll, (int, float, str)):
-            return float(coll)
+            nv = _norm_usdc(coll)
+            if nv is not None:
+                return nv
     except Exception:
         return None
     return None
@@ -285,22 +309,60 @@ async def buy_after_prediction(
             float(bank_usd or 0.0), float(bank_pct), float(min_buy_usd), float(max_buy_usd)
         )
 
+    # Refresh market + best ask right before placing order (do not rely on UI cached snapshot).
+    refreshed_best_ask = None
+    try:
+        try:
+            # For debug parity with earlier logs (Gamma market prices)
+            trading_client.fetch_market(slug)
+        except Exception as e:
+            logger.debug("fetch_market failed (non-fatal): %s", e)
+
+        refreshed_best_ask = trading_client.get_best_ask(asset_id)
+        if refreshed_best_ask is not None:
+            logger.info("  refreshed_best_ask=%.4f (CLOB)", float(refreshed_best_ask))
+    except Exception as e:
+        logger.debug("refresh best ask failed (non-fatal): %s", e)
+
+    if refreshed_best_ask is not None and float(refreshed_best_ask) > 0:
+        snapshot_price = float(refreshed_best_ask)
+
+    if snapshot_price is None or float(snapshot_price) <= 0:
+        msg = f"Invalid snapshot_price {snapshot_price}; skip buy"
+        logger.warning(msg)
+        return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
     if snapshot_price > price_threshold:
         msg = f"Snapshot price {snapshot_price:.4f} exceeds threshold {price_threshold:.4f}; skip buy"
         logger.warning(msg)
         return {"success": False, "error": msg, "order_row_id": None, "position": None}
 
-    # Use limit buy at threshold price (max price). Shares derived from threshold.
-    size_shares = amount_usd / price_threshold if price_threshold > 0 else 0
+    limit_price = float(snapshot_price)
+    if limit_price > MAX_LIMIT_PRICE_USD:
+        msg = f"Snapshot price {limit_price:.4f} exceeds hard cap {MAX_LIMIT_PRICE_USD:.4f}; skip buy"
+        logger.warning(msg)
+        return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
+    logger.info("  limit_price=%.4f (from snapshot)", limit_price)
+
+    # Use limit buy at snapshot price. Shares derived from snapshot price.
+    size_shares = amount_usd / limit_price if limit_price > 0 else 0
+    logger.debug("Computed size_shares=%.6f from amount_usd=%.2f and limit_price=%.6f", size_shares, amount_usd, limit_price)
     loop = asyncio.get_event_loop()
-    clob_resp = await loop.run_in_executor(
-        None,
-        lambda: trading_client.buy_limit(
-            token_id=asset_id,
-            price=price_threshold,
-            size=size_shares,
+    logger.debug("Calling trading_client.buy_limit with token_id=%s, price=%.6f, size=%.6f", asset_id[:16], limit_price, size_shares)
+    try:
+        clob_resp = await loop.run_in_executor(
+            None,
+            lambda: trading_client.buy_limit(
+                token_id=asset_id,
+                price=limit_price,
+                size=size_shares,
+            )
         )
-    )
+        logger.debug("Raw CLOB response: %s", clob_resp)
+    except Exception as e:
+        logger.error("Exception calling trading_client.buy_limit: %s", e, exc_info=True)
+        return {"success": False, "error": f"buy_limit exception: {e}", "order_row_id": None, "position": None}
 
     success = clob_resp.get("success", False)
     order_id = clob_resp.get("orderID") or clob_resp.get("order_id") or None

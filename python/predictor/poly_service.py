@@ -257,7 +257,6 @@ async def _try_autopredict_after_end(ended_market_ts: int) -> None:
         min_target_ts = int(ended_market_ts) + 600
         max_target_ts = min_target_ts + 100
 
-        print(f'min predict stamp: {min_target_ts} max: {max_target_ts}')
         targets = await db.fetchall(
             """
             SELECT slug, ts

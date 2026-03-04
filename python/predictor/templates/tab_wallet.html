@@ -1,0 +1,30 @@
+<div id="panel-wallet" class="hidden">
+  <div class="card p-6 mb-6">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-lg font-semibold">Wallet</h2>
+        <p class="text-xs text-slate-400">Live trading status, balances, open positions, and recent orders.</p>
+      </div>
+      <button onclick="loadWallet()" class="btn btn-slate text-xs">Reload</button>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div class="p-3 rounded-lg" style="background:#0b1220;border:1px solid #334155">
+        <div class="text-xs text-slate-400 mb-2">Balance / Allowance</div>
+        <div id="wallet-balance" class="text-xs text-slate-300">Loading...</div>
+      </div>
+      <div class="p-3 rounded-lg" style="background:#0b1220;border:1px solid #334155">
+        <div class="text-xs text-slate-400 mb-2">Open Positions</div>
+        <div id="wallet-positions" class="text-xs text-slate-300">Loading...</div>
+      </div>
+      <div class="p-3 rounded-lg" style="background:#0b1220;border:1px solid #334155">
+        <div class="text-xs text-slate-400 mb-2">Recent Orders</div>
+        <div id="wallet-orders" class="text-xs text-slate-300">Loading...</div>
+      </div>
+    </div>
+
+    <div class="mt-6">
+      <div class="text-xs text-slate-500">Positions are held until market resolution. Manual selling is disabled.</div>
+    </div>
+  </div>
+</div>

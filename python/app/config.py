@@ -21,3 +21,18 @@ TARGET_PRICES = [52, 51, 50, 49, 48]  # in cents
 
 POLY_INTERVAL_SECONDS: int = int(os.getenv("POLY_INTERVAL_SECONDS", "300"))
 POLY_SLUG_TEMPLATE: str = os.getenv("POLY_SLUG_TEMPLATE", "btc-updown-5m-{ts}")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return bool(default)
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "no", "n", "off"):
+        return False
+    return bool(default)
+
+
+EMULATE_DOWN: bool = _env_bool("EMULATE_DOWN", False)

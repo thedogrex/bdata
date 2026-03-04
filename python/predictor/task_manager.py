@@ -38,6 +38,8 @@ class TaskProgress:
         self._cancel_flag = False
 
     def to_dict(self) -> dict:
+        now = time.time()
+        elapsed = (now - self.started_at) if self.started_at else 0
         return {
             "task_id": self.task_id,
             "task_type": self.task_type,
@@ -47,7 +49,7 @@ class TaskProgress:
             "total": self.total,
             "phase": self.phase,
             "started_at": self.started_at,
-            "elapsed_sec": round(self.elapsed_sec, 1),
+            "elapsed_sec": round(elapsed, 1),
             "eta_sec": round(self.eta_sec, 1),
             "extra": self.extra,
         }

@@ -1,4 +1,5 @@
 import json
+import datetime
 from typing import Optional
 from db import DbProvider
 
@@ -421,14 +422,36 @@ async def update_bruteforce_session(bf_id: int, updates: dict) -> None:
 
 async def get_bruteforce_sessions(limit: int = 50) -> list[dict]:
     rows = await db.fetchall(
-        f"SELECT id, strategy, param_grid_json, train_start, train_end, "
-        f"test_start, test_end, tbl, horizon, window_size, retrain_every, "
-        f"total_combos, completed, best_accuracy, best_params_json, "
-        f"status, total_time_sec, elapsed_before_pause, created_at "
-        f"FROM bruteforce_sessions ORDER BY created_at DESC LIMIT {limit}"
+        f"SELECT s.id, s.strategy, s.param_grid_json, s.train_start, s.train_end, "
+        f"s.test_start, s.test_end, s.tbl, s.horizon, s.window_size, s.retrain_every, "
+        f"s.total_combos, s.completed, s.best_accuracy, s.best_params_json, "
+        f"s.status, s.total_time_sec, s.elapsed_before_pause, s.created_at, "
+        f"COALESCE(h.signals, 0) as total_signals "
+        f"FROM bruteforce_sessions s "
+        f"LEFT JOIN backtest_runs r ON r.id = ( "
+        f"  SELECT r2.id "
+        f"  FROM backtest_runs r2 "
+        f"  LEFT JOIN backtest_horizons h2 ON h2.run_id = r2.id AND h2.horizon = s.horizon "
+        f"  WHERE r2.bruteforce_id = s.id AND r2.is_bruteforce = 1 "
+        f"  ORDER BY h2.accuracy_pct DESC, r2.id DESC LIMIT 1 "
+        f") "
+        f"LEFT JOIN backtest_horizons h ON h.run_id = r.id AND h.horizon = s.horizon "
+        f"ORDER BY s.created_at DESC LIMIT {limit}"
     )
     results = []
     for r in rows:
+        # Compute avg signals per month if we have signals and test dates
+        avg_signals_per_month = None
+        if r[19] and r[5] and r[6]:  # total_signals, test_start, test_end
+            try:
+                start = datetime.datetime.strptime(str(r[5]), "%Y-%m-%d")
+                end = datetime.datetime.strptime(str(r[6]), "%Y-%m-%d")
+                if end > start:
+                    months = (end.year - start.year) * 12 + (end.month - start.month) + 1
+                    if months > 0:
+                        avg_signals_per_month = round(r[19] / months)
+            except Exception:
+                pass
         results.append({
             "id": r[0],
             "strategy": r[1],
@@ -449,6 +472,8 @@ async def get_bruteforce_sessions(limit: int = 50) -> list[dict]:
             "total_time_sec": r[16],
             "elapsed_before_pause": r[17],
             "created_at": str(r[18]) if r[18] else "",
+            "signals": r[19] or None,
+            "avg_signals_per_month": avg_signals_per_month,
         })
     return results
 

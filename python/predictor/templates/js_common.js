@@ -2,6 +2,46 @@ function fmtTime(s){if(!s||s<=0)return'--';const m=Math.floor(s/60);const sec=Ma
 function accClass(a){return a>=54?'accuracy-good':a>=51?'accuracy-ok':'accuracy-bad'}
 function statusBadge(s){const m={running:'badge-run',paused:'badge-pause',done:'badge-done',error:'badge-err',cancelled:'badge-cancel',queued:'badge-queue'};return `<span class="badge ${m[s]||'badge-queue'}">${s}</span>`}
 
+function taskExtraLine(t){
+  const e=(t&&t.extra)||{};
+  const parts=[];
+  const state=e.state;
+
+  // State pill
+  if(state==='training'){
+    const trainSec=e.train_elapsed_sec!=null?` ${fmtTime(e.train_elapsed_sec)}`:""
+    parts.push(`⚙️ TRAINING${trainSec}`);
+  } else if(state==='walking'){
+    parts.push('▶ Walking candles');
+  } else if(state==='preloading'){
+    parts.push('⏳ Preloading data...');
+  } else if(state==='done'){
+    parts.push('✓ Combo done');
+  }
+
+  // Train X/Y — always show when available
+  const tc=e.train_count!=null?e.train_count:null;
+  const tt=e.train_total!=null?e.train_total:null;
+  if(tc!=null && tt!=null){
+    parts.push(`Train: ${state==='training'?tc+1:tc}/${tt}`);
+  } else if(tc!=null){
+    parts.push(`Trains done: ${tc}`);
+  }
+
+  // Candles X/Y
+  if(e.candles_total!=null){
+    const done=e.candles_done!=null?e.candles_done:0;
+    const tot=e.candles_total;
+    const pct=tot>0?Math.round(done/tot*100):0;
+    parts.push(`Candles: ${done}/${tot} (${pct}%)`);
+  }
+
+  // Horizon
+  if(e.horizon!=null) parts.push(`H${e.horizon}`);
+
+  return parts.length?parts.join(' | '):'';
+}
+
 // ===== POLLING =====
 function startPolling(){if(pollTimer)return;pollTimer=setInterval(pollStatus,1500);pollStatus()}
 function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
@@ -35,6 +75,12 @@ function renderTaskbar(t){
   document.getElementById('tb-fill').style.width=pct+'%';
   document.getElementById('tb-pct').textContent=pct+'%';
   document.getElementById('tb-phase').textContent=t.phase||'';
+  const extraEl=document.getElementById('tb-extra');
+  if(extraEl){
+    const line=taskExtraLine(t);
+    extraEl.innerHTML=line?`<span style="font-size:12px;font-weight:600;color:#94a3b8">${line}</span>`:""
+    if(!line) extraEl.classList.add('hidden'); else extraEl.classList.remove('hidden');
+  }
   const elapsed=fmtTime(t.elapsed_sec);
   const eta=fmtTime(t.eta_sec);
   document.getElementById('tb-time').textContent=`Elapsed: ${elapsed} | ETA: ${eta}`;
@@ -84,7 +130,7 @@ async function onTaskDone(taskId, status){
     if(!res.ok)return;
     const data=await res.json();
     const p=await(await fetch(API+'/api/tasks/'+taskId)).json();
-    if(p.task_type==='backtest'){renderResult(data,'bt-results')}
+    if(p.task_type==='backtest'){renderResult(data,'bt-results');switchTab('history');loadHistory();}
     else if(p.task_type==='compare'){renderCompare(data)}
     else if(p.task_type==='bruteforce'){renderBfResult(data)}
   }catch(e){console.error(e)}
@@ -103,6 +149,8 @@ async function init(){
   document.getElementById('bt-strategy').addEventListener('change',updateDesc);
   document.getElementById('bf-strategy').addEventListener('change',()=>{loadDefaultGrid();updateDesc()});
   updateDesc();
+  ensureBacktestConfig();
+  ensureCompareConfig();
   histUpdateHorizonButtons();
   loadDefaultGrid();
   startPolling();
@@ -178,18 +226,55 @@ function updateDesc(){
       presets.innerHTML=html;
     }else{presets.innerHTML=''}
   }else{presets.innerHTML=''}
-  const noTrain=s&&!s.needs_training;
-  ['bt-train-start-wrap','bt-train-end-wrap'].forEach(id=>{
-    const el=document.getElementById(id);if(el)el.style.display=noTrain?'none':'';
-  });
+  ensureBacktestConfig();
 }
 
 function applyPreset(jsonStr){
-  document.getElementById('bt-params').value=JSON.stringify(JSON.parse(jsonStr),null,2);
+  const cfgEl=document.getElementById('bt-config');
+  if(!cfgEl) return;
+  let cfg={};
+  const txt=(cfgEl.value||'').trim();
+  if(txt){
+    try{cfg=JSON.parse(txt)||{}}catch(e){cfg={}}
+  }
+  try{
+    cfg.params=JSON.parse(jsonStr);
+  }catch(e){
+    alert('Invalid preset JSON');
+    return;
+  }
+  if(!cfg.strategy) cfg.strategy=document.getElementById('bt-strategy')?.value||'xgboost';
+  cfgEl.value=JSON.stringify(cfg,null,2);
+}
+
+function ensureBacktestConfig(){
+  const el=document.getElementById('bt-config');
+  if(!el) return;
+  const existing=(el.value||'').trim();
+  if(existing){
+    try{
+      const cfg=JSON.parse(existing);
+      if(cfg && typeof cfg==='object') return;
+    }catch(e){}
+  }
+  const strategy=document.getElementById('bt-strategy')?.value||'xgboost';
+  const cfg={
+    strategy,
+    train_start:'2022-01-01',
+    train_end:'2025-06-30',
+    test_start:'2025-07-01',
+    test_end:'2025-12-31',
+    horizons:[1],
+    table:'c_5m',
+    window_size:5000,
+    retrain_every:500,
+    params:{},
+  };
+  el.value=JSON.stringify(cfg,null,2);
 }
 
 // ===== TABS =====
-const TABS=['backtest','bruteforce','history','best','best_compare','poly','analytics'];
+const TABS=['backtest','bruteforce','history','best','best_compare','poly','wallet','analytics'];
 function switchTab(tab){
   TABS.forEach(t=>{
     const panel=document.getElementById('panel-'+t);
@@ -214,19 +299,160 @@ function switchTab(tab){
     stopPolyOrderBookUpdates();
     if(typeof stopLiveMarketPoll === 'function') stopLiveMarketPoll();
   }
+  if(tab==='wallet') loadWallet();
+}
+
+// ===== WALLET =====
+async function loadWallet(){
+  const balEl = document.getElementById('wallet-balance');
+  const posEl = document.getElementById('wallet-positions');
+  const ordEl = document.getElementById('wallet-orders');
+  if(balEl) balEl.textContent = 'Loading...';
+  if(posEl) posEl.textContent = 'Loading...';
+  if(ordEl) ordEl.textContent = 'Loading...';
+  try{
+    const res = await fetch(API + '/api/poly/live/wallet?limit=25');
+    const data = await res.json();
+    renderWallet(data);
+  }catch(e){
+    if(balEl) balEl.textContent = 'Wallet load error';
+    if(posEl) posEl.textContent = 'Wallet load error';
+    if(ordEl) ordEl.textContent = 'Wallet load error';
+  }
+}
+
+function renderWallet(data){
+  const balEl = document.getElementById('wallet-balance');
+  const posEl = document.getElementById('wallet-positions');
+  const ordEl = document.getElementById('wallet-orders');
+  if(!balEl || !posEl || !ordEl) return;
+
+  const balance = data?.balance || {};
+  const positions = Array.isArray(data?.positions) ? data.positions : [];
+  const orders = Array.isArray(data?.orders) ? data.orders : [];
+
+  // Helper to normalize USDC balance (same as js_poly.js)
+  const normUsdc = (x) => {
+    if(x === undefined || x === null) return null;
+    if(typeof x === 'number'){
+      if(!Number.isFinite(x)) return null;
+      if(Number.isInteger(x) && Math.abs(x) >= 1000000) return x / 1e6;
+      return x;
+    }
+    if(typeof x === 'string'){
+      const s = x.trim();
+      if(!s) return null;
+      if(/^[0-9]+$/.test(s)){
+        const n = parseInt(s, 10);
+        if(Number.isFinite(n) && Math.abs(n) >= 1000000) return n / 1e6;
+        return Number.isFinite(n) ? n : null;
+      }
+      const v = parseFloat(s);
+      if(!Number.isFinite(v)) return null;
+      return v;
+    }
+    return null;
+  };
+
+  // Extract and display a friendly USDC balance line
+  let friendlyBalance = '';
+  const coll = balance?.collateral;
+  if(coll){
+    let usd = null;
+    if(typeof coll === 'number' || typeof coll === 'string'){
+      usd = normUsdc(coll);
+    } else if(typeof coll === 'object'){
+      for(const k of ['availableBalance','available_balance','balance','totalBalance','total_balance','amount','value']){
+        if(coll[k] !== undefined && coll[k] !== null){
+          const v = normUsdc(coll[k]);
+          if(v !== null && Number.isFinite(v)){ usd = v; break; }
+        }
+      }
+    }
+    if(usd !== null && Number.isFinite(usd)){
+      friendlyBalance = `<div class="mb-2"><div class="text-slate-400 text-[11px]">Balance (USDC)</div><div class="text-green-400 text-[12px] font-semibold">$${usd.toFixed(2)}</div></div>`;
+    }
+  }
+
+  const balanceBlock = (title, obj) => {
+    const content = obj ? JSON.stringify(obj, null, 2) : '{}';
+    return `<div class="mb-2"><div class="text-slate-400 text-[11px]">${title}</div><pre class="text-[11px] font-mono whitespace-pre-wrap">${content}</pre></div>`;
+  };
+  balEl.innerHTML = friendlyBalance + balanceBlock('Collateral (USDC)', balance.collateral) + balanceBlock('Conditional Tokens', balance.conditional);
+
+  if(!positions.length){
+    posEl.innerHTML = '<div class="text-slate-500 text-xs">No open positions</div>';
+  } else {
+    let html = '<div class="space-y-2">';
+    positions.forEach(p=>{
+      html += `<div class="p-2 rounded" style="background:#0f172a;border:1px solid #334155">
+        <div class="flex items-center justify-between">
+          <div class="text-xs font-semibold">${p.slug}</div>
+          <div class="text-[11px] text-slate-500">${p.outcome_side || ''}</div>
+        </div>
+        <div class="text-[11px] text-slate-400">asset: ${p.asset_id}</div>
+        <div class="grid grid-cols-3 gap-2 text-[11px] mt-1">
+          <div>shares: <b>${(p.shares||0).toFixed(4)}</b></div>
+          <div>avg: <b>${(p.avg_price||0).toFixed(4)}</b></div>
+          <div>cost: <b>$${(p.total_cost||0).toFixed(2)}</b></div>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+    posEl.innerHTML = html;
+  }
+
+  if(!orders.length){
+    ordEl.innerHTML = '<div class="text-slate-500 text-xs">No recent orders</div>';
+  } else {
+    let html = '<div class="space-y-2">';
+    orders.forEach(o=>{
+      html += `<div class="p-2 rounded" style="background:#0f172a;border:1px solid #334155">
+        <div class="flex items-center justify-between">
+          <div class="text-xs font-semibold">${o.side} ${o.outcome_side || ''}</div>
+          <div class="text-[11px] text-slate-500">${o.clob_status || ''}</div>
+        </div>
+        <div class="text-[11px] text-slate-400">${o.slug}</div>
+        <div class="grid grid-cols-3 gap-2 text-[11px] mt-1">
+          <div>price: <b>${(o.price||0).toFixed(4)}</b></div>
+          <div>amt: <b>${(o.amount||0).toFixed(2)}</b></div>
+          <div>id: <b>${o.clob_order_id || '-'}</b></div>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+    ordEl.innerHTML = html;
+  }
 }
 
 // ===== BACKTEST =====
 async function runBacktest(){
-  let params=null;
-  const pt=document.getElementById('bt-params').value.trim();
-  if(pt){try{params=JSON.parse(pt)}catch(e){alert('Invalid JSON');return}}
-  const horizons=document.getElementById('bt-horizons').value.split(',').map(x=>parseInt(x.trim())).filter(x=>!isNaN(x));
-  const body={strategy:document.getElementById('bt-strategy').value,params,
-    train_start:document.getElementById('bt-train-start').value,train_end:document.getElementById('bt-train-end').value,
-    test_start:document.getElementById('bt-test-start').value,test_end:document.getElementById('bt-test-end').value,
-    horizons,table:'c_5m',window_size:parseInt(document.getElementById('bt-window').value)||5000,
-    retrain_every:parseInt(document.getElementById('bt-retrain').value)||500};
+  const txt=(document.getElementById('bt-config')?.value||'').trim();
+  if(!txt){alert('Backtest config JSON is empty');return}
+  let cfg;
+  try{cfg=JSON.parse(txt)}catch(e){alert('Invalid backtest config JSON');return}
+
+  // Allow horizons to be "1" or [1,2]
+  let horizons=cfg.horizons;
+  if(typeof horizons==='string'){
+    horizons=horizons.split(',').map(x=>parseInt(x.trim())).filter(x=>!isNaN(x));
+  }else if(typeof horizons==='number'){
+    horizons=[parseInt(horizons)];
+  }
+  if(!Array.isArray(horizons) || !horizons.length) horizons=[1];
+
+  const body={
+    strategy: cfg.strategy || document.getElementById('bt-strategy').value,
+    params: cfg.params || null,
+    train_start: String(cfg.train_start||''),
+    train_end: String(cfg.train_end||''),
+    test_start: String(cfg.test_start||''),
+    test_end: String(cfg.test_end||''),
+    horizons,
+    table: String(cfg.table||'c_5m'),
+    window_size: parseInt(cfg.window_size)||5000,
+    retrain_every: parseInt(cfg.retrain_every)||500,
+  };
   const res=await fetch(API+'/api/backtest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const data=await res.json();
   if(data.error){alert(data.error);return}
@@ -239,10 +465,14 @@ function renderResult(data,targetId){
   const ws=data.window_size||'?';const re=data.retrain_every||'?';
   const lt=data.load_time_sec?` | Load: ${data.load_time_sec}s`:'';
   const ft=data.feature_time_sec?` | Features: ${data.feature_time_sec}s`:'';
-  let html=`<div class="card p-6 mb-6"><div class="mb-4">
-    <h2 class="text-lg font-semibold">${data.strategy} ${data.id?'<span class="text-xs text-slate-400">#'+data.id+'</span>':''}</h2>
-    <p class="text-xs text-slate-400">Train: ${data.train_period||''} | Test: ${data.test_period||''}</p>
-    <p class="text-xs text-slate-400">Window: ${ws} | Retrain: ${re} | Total: ${data.total_time_sec}s${lt}${ft}</p></div>`;
+  let html=`<div class="card p-6 mb-6"><div class="mb-4 flex items-center justify-between">
+    <div>
+      <h2 class="text-lg font-semibold">${data.strategy} ${data.id?'<span class="text-xs text-slate-400">#'+data.id+'</span>':''}</h2>
+      <p class="text-xs text-slate-400">Train: ${data.train_period||''} | Test: ${data.test_period||''}</p>
+      <p class="text-xs text-slate-400">Window: ${ws} | Retrain: ${re} | Total: ${data.total_time_sec}s${lt}${ft}</p>
+    </div>
+    ${data.params ? `<button onclick="event.stopPropagation();toggleConfigModal(${data.id||0}, '${data.strategy}', ${JSON.stringify(data.params).replace(/'/g, "\\'")})" class="text-blue-400 hover:text-blue-200 text-xs px-2 py-1 rounded border border-slate-600" title="View Config">⚙ ${data.strategy}</button>` : ''}
+  </div></div>`;
   if(data.params){
     const pJson=JSON.stringify(data.params,null,2);
     html+=`<details class="mb-4"><summary class="text-xs text-blue-400 cursor-pointer font-semibold">Strategy Settings (JSON) — click to copy</summary><div class="relative mt-1"><pre id="result-params-json" class="p-3 rounded text-xs font-mono overflow-x-auto" style="background:#0f172a;border:1px solid #334155;cursor:pointer" onclick="navigator.clipboard.writeText(this.textContent).then(()=>{this.style.borderColor='#22c55e';setTimeout(()=>this.style.borderColor='#334155',1000)})">${pJson}</pre></div></details>`;
@@ -277,16 +507,58 @@ function renderResult(data,targetId){
 
 // ===== COMPARE =====
 async function runCompare(){
-  const body={strategies:strategiesData.map(s=>s.name),
-    train_start:document.getElementById('cmp-train-start').value,train_end:document.getElementById('cmp-train-end').value,
-    test_start:document.getElementById('cmp-test-start').value,test_end:document.getElementById('cmp-test-end').value,
-    horizons:[1,2,3],table:'c_5m',window_size:parseInt(document.getElementById('cmp-window').value)||5000,
-    retrain_every:parseInt(document.getElementById('cmp-retrain').value)||500};
+  const txt=(document.getElementById('cmp-config')?.value||'').trim();
+  if(!txt){alert('Compare config JSON is empty');return}
+  let cfg;
+  try{cfg=JSON.parse(txt)}catch(e){alert('Invalid compare config JSON');return}
+
+  let horizons=cfg.horizons;
+  if(typeof horizons==='string'){
+    horizons=horizons.split(',').map(x=>parseInt(x.trim())).filter(x=>!isNaN(x));
+  }else if(typeof horizons==='number'){
+    horizons=[parseInt(horizons)];
+  }
+  if(!Array.isArray(horizons) || !horizons.length) horizons=[1,2,3];
+
+  const body={
+    strategies: cfg.strategies || strategiesData.map(s=>s.name),
+    train_start: String(cfg.train_start||''),
+    train_end: String(cfg.train_end||''),
+    test_start: String(cfg.test_start||''),
+    test_end: String(cfg.test_end||''),
+    horizons,
+    table: String(cfg.table||'c_5m'),
+    window_size: parseInt(cfg.window_size)||5000,
+    retrain_every: parseInt(cfg.retrain_every)||500,
+  };
   const res=await fetch(API+'/api/compare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const data=await res.json();
   if(data.error){alert(data.error);return}
   activeTaskId=data.task_id;
   document.getElementById('cmp-results').classList.add('hidden');
+}
+
+function ensureCompareConfig(){
+  const el=document.getElementById('cmp-config');
+  if(!el) return;
+  const existing=(el.value||'').trim();
+  if(existing){
+    try{
+      const cfg=JSON.parse(existing);
+      if(cfg && typeof cfg==='object') return;
+    }catch(e){}
+  }
+  const cfg={
+    train_start:'2022-01-01',
+    train_end:'2025-06-30',
+    test_start:'2025-07-01',
+    test_end:'2025-12-31',
+    horizons:[1,2,3],
+    table:'c_5m',
+    window_size:5000,
+    retrain_every:500,
+  };
+  el.value=JSON.stringify(cfg,null,2);
 }
 function renderCompare(results){
   if(!Array.isArray(results))return;
@@ -307,17 +579,32 @@ function renderCompare(results){
 async function loadDefaultGrid(){
   const s=document.getElementById('bf-strategy').value;if(!s)return;
   try{const res=await fetch(API+'/api/bruteforce/grid/'+s);const data=await res.json();
-    document.getElementById('bf-grid').value=JSON.stringify(data.grid,null,2);
+    const cfg=data.config||data.grid;
+    document.getElementById('bf-grid').value=JSON.stringify(cfg,null,2);
     document.getElementById('bf-combos').textContent=`Total combos: ${data.total_combos}`}catch(e){}
 }
 async function runBruteforce(){
-  let grid;try{grid=JSON.parse(document.getElementById('bf-grid').value)}catch(e){alert('Invalid grid JSON');return}
-  const body={strategy:document.getElementById('bf-strategy').value,param_grid:grid,
-    train_start:document.getElementById('bf-train-start').value,train_end:document.getElementById('bf-train-end').value,
-    test_start:document.getElementById('bf-test-start').value,test_end:document.getElementById('bf-test-end').value,
-    horizon:parseInt(document.getElementById('bf-horizon').value)||1,table:'c_5m',
-    window_size:parseInt(document.getElementById('bf-window').value)||5000,
-    max_combos:parseInt(document.getElementById('bf-max').value)||50};
+  let cfg;
+  try{cfg=JSON.parse(document.getElementById('bf-grid').value)}catch(e){alert('Invalid grid JSON');return}
+
+  // Backward compatible:
+  // - old format: bf-grid contains ONLY the param grid
+  // - new format: bf-grid can contain {param_grid, retrain_every, window_size, max_combos, horizon}
+  const grid = (cfg && typeof cfg==='object' && cfg.param_grid) ? cfg.param_grid : cfg;
+
+  const body={
+    strategy: (cfg && cfg.strategy) ? String(cfg.strategy) : document.getElementById('bf-strategy').value,
+    param_grid: grid,
+    train_start: String((cfg&&cfg.train_start)!=null?cfg.train_start:''),
+    train_end: String((cfg&&cfg.train_end)!=null?cfg.train_end:''),
+    test_start: String((cfg&&cfg.test_start)!=null?cfg.test_start:''),
+    test_end: String((cfg&&cfg.test_end)!=null?cfg.test_end:''),
+    horizon: parseInt((cfg&&cfg.horizon)!=null?cfg.horizon:1)||1,
+    table: String((cfg&&cfg.table)!=null?cfg.table:'c_5m'),
+    window_size: parseInt((cfg&&cfg.window_size)!=null?cfg.window_size:5000)||5000,
+    retrain_every: parseInt((cfg&&cfg.retrain_every)!=null?cfg.retrain_every:500)||500,
+    max_combos: parseInt((cfg&&cfg.max_combos)!=null?cfg.max_combos:100)||100,
+  };
   const res=await fetch(API+'/api/bruteforce',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const data=await res.json();
   if(data.error){alert(data.error);return}
@@ -331,14 +618,29 @@ async function loadBfSessions(){
   try{const res=await fetch(API+'/api/bruteforce/sessions');const data=await res.json();
     const el=document.getElementById('bf-sessions');
     if(!data.length){el.innerHTML='<p class="text-slate-400 text-sm">No sessions yet.</p>';return}
-    let html='<table><thead><tr><th>ID</th><th>Strategy</th><th>H</th><th>Combos</th><th>Best</th><th>Status</th><th>Time</th><th>Date</th><th></th></tr></thead><tbody>';
+    let html='<table><thead><tr><th>ID</th><th>Strategy</th><th>H</th><th>Combos</th><th>Best</th><th>Avg signals/mo</th><th>Status</th><th>Time</th><th>Date</th><th></th></tr></thead><tbody>';
     data.forEach(s=>{
       const canResume=s.status==='paused'||s.status==='running';
       const resumeBtn=canResume?`<button onclick="resumeBf(${s.id})" class="btn btn-green text-xs">Resume</button>`:'';
+      const stopBtn=canResume?`<button onclick="stopBf(${s.id})" class="btn btn-red text-xs ml-1">Stop</button>`:'';
       const viewBtn=`<button onclick="loadHistory();document.getElementById('hist-strategy').value='';switchTab('history')" class="text-blue-400 text-xs hover:underline ml-1">runs</button>`;
-      html+=`<tr><td>${s.id}</td><td class="font-medium">${s.strategy}</td><td>${s.horizon}</td><td>${s.completed}/${s.total_combos}</td><td class="${accClass(s.best_accuracy)} font-bold">${s.best_accuracy}%</td><td>${statusBadge(s.status)}</td><td>${s.total_time_sec}s</td><td class="text-slate-400 text-xs">${s.created_at}</td><td class="flex gap-1">${resumeBtn}${viewBtn}</td></tr>`});
+      // Compute avg signals per month if we have dates and signals
+      let avgSignalsMo = '--';
+      if(s.avg_signals_per_month != null){
+        avgSignalsMo = s.avg_signals_per_month;
+      } else if(s.test_start && s.test_end && s.signals && s.signals>0){
+        const start = new Date(s.test_start);
+        const end = new Date(s.test_end);
+        if(!isNaN(start) && !isNaN(end) && end > start){
+          const months = (end.getFullYear() - start.getFullYear())*12 + (end.getMonth() - start.getMonth()) + 1;
+          if(months > 0){
+            avgSignalsMo = Math.round(s.signals / months);
+          }
+        }
+      }
+      html+=`<tr><td>${s.id}</td><td class="font-medium">${s.strategy}</td><td>${s.horizon}</td><td>${s.completed}/${s.total_combos}</td><td class="${accClass(s.best_accuracy)} font-bold">${s.best_accuracy}%</td><td class="text-xs text-slate-300">${avgSignalsMo}</td><td>${statusBadge(s.status)}</td><td>${s.total_time_sec}s</td><td class="text-slate-400 text-xs">${s.created_at}</td><td class="flex gap-1">${resumeBtn}${stopBtn}${viewBtn}</td></tr>`});
     html+='</tbody></table>';el.innerHTML=html}catch(e){}
-}
+ }
 async function resumeBf(bfId){
   const res=await fetch(API+'/api/bruteforce/resume/'+bfId,{method:'POST'});
   const data=await res.json();
@@ -346,9 +648,39 @@ async function resumeBf(bfId){
   activeTaskId=data.task_id;
   loadBfSessions();
 }
+async function stopBf(bfId){
+  if(!confirm(`Stop and cancel brute-force session BF#${bfId}? This will terminate all remaining tasks and cannot be undone.`))return;
+  try{
+    const res=await fetch(API+'/api/bruteforce/stop/'+bfId,{method:'POST'});
+    const data=await res.json();
+    if(data.error){alert(data.error);return}
+    loadBfSessions();
+  }catch(e){
+    alert('Error stopping brute-force session: '+e.message);
+  }
+}
 
 // ===== HISTORY =====
 const histBfState={};
+
+// Standalone (non-BF) compare mode
+let histStandaloneCompareMode = false;
+let histStandaloneCompareSelected = new Set();
+let histStandaloneRunCache = {}; // runId -> run (as returned by /api/history)
+
+// Helper: shorten params for display (sorted keys, no vowels, tiny font)
+function histShortParams(params){
+  if(!params || typeof params !== 'object') return '';
+  const keys = Object.keys(params).sort();
+  const parts = [];
+  keys.forEach(k => {
+    const v = params[k];
+    const ks = String(k).replace(/[aeiouAEIOU]/g, '').substring(0,6);
+    const vs = String(v).replace(/[aeiouAEIOU]/g, '').substring(0,6);
+    parts.push(`${ks}=${vs}`);
+  });
+  return parts.join(', ');
+}
 
 function histGetSelectedHorizons(){
   const v=document.getElementById('hist-horizons')?.value||'1,2,3';
@@ -607,24 +939,120 @@ async function loadHistory(){
       html+=`<details class="mb-3 p-3 rounded-lg" style="background:#0f172a;border:1px solid #334155" ontoggle="histOnToggleBf(${bfId},this)">
         <summary class="cursor-pointer flex items-center justify-between">
           <span><span class="badge badge-bf">BF#${bfId}</span> <b class="ml-2">${s.strategy}</b> <span class="text-slate-400 text-xs ml-2">${s.completed||0} runs</span></span>
-          <span class="flex items-center gap-3">
-            <span class="${accClass(bestAcc)} font-bold">Best: ${bestAcc}%</span>
-            <button onclick="event.stopPropagation();deleteBruteforceGroup(${bfId})" class="text-red-400 text-xs hover:underline">remove pack</button>
-          </span>
+          <span class="${accClass(bestAcc)} font-bold">Best: ${bestAcc}%</span>
         </summary>
+        <div class="flex items-center justify-end mt-2">
+          <button onclick="event.stopPropagation();deleteBruteforceGroup(${bfId})" class="text-red-400 text-xs hover:underline">remove pack</button>
+        </div>
         <div id="hist-bf-body-${bfId}"></div>
       </details>`;
     });
 
     const standaloneLimited=limited.filter(x=>x.type==='run').map(x=>x.run);
     if(standaloneLimited.length){
-      html+=`<table><thead><tr><th>ID</th><th>Strategy</th><th>Test Period</th><th>Win</th><th>Horizons</th><th>Time</th><th>Date</th><th></th></tr></thead><tbody>`;
+      // Cache standalone runs so Compare can infer horizon from actual run data.
+      histStandaloneRunCache = {};
+      standaloneLimited.forEach(r=>{ if(r && r.id!=null) histStandaloneRunCache[String(r.id)] = r; });
+
+      const cmp = !!histStandaloneCompareMode;
+      const sel = histStandaloneCompareSelected || new Set();
+      const cmpBtnLabel = cmp ? 'Exit Compare' : 'Compare Mode';
+      const cmpBtnClass = cmp ? 'btn-purple' : 'btn-slate';
+      html+=`<div class="mt-4 flex items-center justify-between gap-2 flex-wrap">
+        <div class="text-xs text-slate-400">Standalone backtests</div>
+        <div class="flex items-center gap-2">
+          <button onclick="histStandaloneToggleCompareMode()" class="btn ${cmpBtnClass} text-xs">${cmpBtnLabel}</button>
+          ${cmp ? `<button id="hist-standalone-cmp-btn" onclick="histStandaloneRunCompare()" class="btn btn-purple text-xs" ${sel.size<1?'disabled':''}>Compare Selected (<span id="hist-standalone-cmp-count">${sel.size}</span>)</button>` : ''}
+        </div>
+      </div>`;
+
+      html+=`<table class="mt-2"><thead><tr>`;
+      if(cmp) html+=`<th style="width:32px"><input type="checkbox" onchange="histStandaloneToggleAllSelect(this.checked)" title="Select all"></th>`;
+      html+=`<th>ID</th><th>Strategy</th><th>Test Period</th><th>Win</th><th>Horizons</th><th>Time</th><th>Params</th><th>Date</th><th></th></tr></thead><tbody>`;
       standaloneLimited.forEach(r=>{
         const hs=histHorizonsHtml(r, selectedHorizons);
-        html+=`<tr class="cursor-pointer" onclick="showDetail(${r.id})"><td>${r.id}</td><td class="font-medium">${r.strategy}</td><td class="text-xs">${r.test_period||''}</td><td>${r.window_size||'?'} </td><td>${hs}</td><td>${r.total_time_sec}s</td><td class="text-slate-400 text-xs">${r.created_at||''}</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`});
+        const shortParams = histShortParams(r.params);
+        const checked = (cmp && sel.has(r.id)) ? 'checked' : '';
+        const rowClick = cmp ? `event.stopPropagation();histStandaloneToggleSelect(${r.id})` : `showDetail(${r.id})`;
+        const selectedBg = (cmp && sel.has(r.id)) ? 'background:rgba(139,92,246,0.12)' : 'background:#0b1220';
+        html+=`<tr class="cursor-pointer hover:bg-slate-700" onclick="${rowClick}" style="${selectedBg}">`;
+        if(cmp) html+=`<td><input type="checkbox" ${checked} onclick="event.stopPropagation();histStandaloneToggleSelect(${r.id})" data-standalone-run="${r.id}"></td>`;
+        html+=`<td>${r.id}</td><td class="font-medium">${r.strategy}</td><td class="text-xs">${r.test_period||''}</td><td>${r.window_size||'?'} </td><td>${hs}</td><td>${r.total_time_sec}s</td><td class="text-xs font-mono text-slate-500" style="font-size:0.65em;line-height:1">${shortParams}</td><td class="text-slate-400 text-xs">${r.created_at||''}</td><td><button onclick="event.stopPropagation();deleteRun(${r.id})" class="text-red-400 text-xs hover:underline">del</button></td></tr>`
+      });
       html+=`</tbody></table>`;
     }
     html+='</div>';el.innerHTML=html}catch(e){console.error(e)}
+}
+
+function histStandaloneToggleCompareMode(){
+  histStandaloneCompareMode = !histStandaloneCompareMode;
+  if(!histStandaloneCompareMode){
+    if(histStandaloneCompareSelected) histStandaloneCompareSelected.clear();
+  }
+  loadHistory();
+}
+
+function histStandaloneToggleSelect(runId){
+  if(!histStandaloneCompareSelected) histStandaloneCompareSelected = new Set();
+  if(histStandaloneCompareSelected.has(runId)) histStandaloneCompareSelected.delete(runId);
+  else histStandaloneCompareSelected.add(runId);
+  // Update checkbox + row highlight + count without full re-render
+  const cb = document.querySelector(`input[data-standalone-run="${runId}"]`);
+  if(cb) cb.checked = histStandaloneCompareSelected.has(runId);
+  const cnt = document.getElementById('hist-standalone-cmp-count');
+  if(cnt) cnt.textContent = String(histStandaloneCompareSelected.size);
+  const btn = document.getElementById('hist-standalone-cmp-btn');
+  if(btn) btn.disabled = histStandaloneCompareSelected.size < 1;
+}
+
+function histStandaloneToggleAllSelect(checked){
+  if(!histStandaloneCompareSelected) histStandaloneCompareSelected = new Set();
+  const all = Array.from(document.querySelectorAll('input[data-standalone-run]')).map(cb=>parseInt(cb.getAttribute('data-standalone-run'))).filter(n=>!isNaN(n));
+  if(checked){ all.forEach(id=>histStandaloneCompareSelected.add(id)); } else { all.forEach(id=>histStandaloneCompareSelected.delete(id)); }
+  document.querySelectorAll('input[data-standalone-run]').forEach(cb=>{
+    const rid=parseInt(cb.getAttribute('data-standalone-run'));
+    cb.checked = histStandaloneCompareSelected.has(rid);
+  });
+  const cnt = document.getElementById('hist-standalone-cmp-count');
+  if(cnt) cnt.textContent = String(histStandaloneCompareSelected.size);
+  const btn = document.getElementById('hist-standalone-cmp-btn');
+  if(btn) btn.disabled = histStandaloneCompareSelected.size < 1;
+}
+
+async function histStandaloneRunCompare(){
+  const sel = histStandaloneCompareSelected;
+  if(!sel || sel.size < 1){ alert('Select at least 1 run'); return; }
+  // Derive horizon from the first selected run (prefer actual run data).
+  // Fallback: use the first horizon from History filter.
+  let horizon = 1;
+  try{
+    const firstId = [...sel][0];
+    const run = histStandaloneRunCache ? histStandaloneRunCache[String(firstId)] : null;
+    const keys = run && run.horizons ? Object.keys(run.horizons).map(Number).filter(n=>n>0).sort((a,b)=>a-b) : [];
+    if(keys.length){
+      horizon = keys[0];
+    } else {
+      const hs = histGetSelectedHorizons();
+      if(hs && hs.length) horizon = hs[0];
+    }
+  }catch(e){}
+
+  const ids = [...sel];
+  try{
+    const res = await fetch(API + '/api/best/compare', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({run_ids: ids, horizon})
+    });
+    bestCompareData = await res.json();
+    if(!Array.isArray(bestCompareData) || bestCompareData.length < 1){
+      alert('Compare returned no data (check that selected runs have the chosen horizon)');
+      return;
+    }
+    _bcSetSource('history');
+    switchTab('best_compare');
+    bestCompareRecalc();
+  }catch(e){ console.error(e); alert('Error loading comparison data'); }
 }
 async function showDetail(id){try{const res=await fetch(API+'/api/history/'+id);const data=await res.json();if(data.error){alert(data.error);return}switchTab('backtest');renderResult(data,'bt-results');document.getElementById('bt-results').scrollIntoView({behavior:'smooth',block:'start'})}catch(e){alert(e.message)}}
 async function deleteRun(id){if(!confirm('Delete #'+id+'?'))return;await fetch(API+'/api/history/'+id,{method:'DELETE'});loadHistory()}
@@ -660,7 +1088,7 @@ async function loadBest(){
 function renderBestList(data, horizon){
   const el=document.getElementById('best-list');
   const cmp = bestCompareMode;
-  let html='<div class="card p-6"><h2 class="text-lg font-semibold mb-4">Top Runs (H'+horizon+')</h2><table><thead><tr>';
+  let html='<div class="card p-6"><div class="flex items-center justify-between mb-4"><h2 class="text-lg font-semibold">Top Runs (H'+horizon+')</h2><button onclick="event.stopPropagation();toggleConfigModal(0, \'Best List\', {horizon:'+horizon+', limit:'+data.length+'})" class="text-blue-400 hover:text-blue-200 text-xs px-2 py-1 rounded border border-slate-600" title="View Config">⚙ Config</button></div><table><thead><tr>';
   if(cmp) html+='<th style="width:32px"><input type="checkbox" onchange="bestToggleAll(this.checked)" title="Select all"></th>';
   html+='<th>#</th><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Correct</th><th>Wrong</th><th>W/L</th><th>Win</th><th>Params</th></tr></thead><tbody>';
   data.forEach((r,i)=>{const ps=JSON.stringify(r.params||{}).substring(0,60);
@@ -977,7 +1405,7 @@ function bestRenderCompareChart(simResults, startBank, targetElId, title){
   });
   legend += '</div>';
 
-  el.innerHTML = `<h3 class="font-semibold mb-3">${title || 'Bank Growth'}</h3>${svg}${legend}`;
+  el.innerHTML = `<div class="flex items-center justify-between mb-3"><h3 class="font-semibold">${title || 'Bank Growth'}</h3>${simResults.length === 1 ? `<button onclick="event.stopPropagation();showConfigPopover(this)" data-run-id="${simResults[0].run.id}" data-strategy="${simResults[0].run.strategy}" data-params='${JSON.stringify(simResults[0].run.params)}' class="text-blue-400 hover:text-blue-200 text-xs px-2 py-1 rounded border border-slate-600" title="View Config">⚙ ${simResults[0].run.strategy}</button>` : ''}</div>${svg}${legend}`;
 }
 
 function bestRenderCompareTable(simResults, startBank, targetElId, title){
@@ -1006,7 +1434,7 @@ function bestRenderCompareTable(simResults, startBank, targetElId, title){
     return sa.localeCompare(sb);
   });
 
-  let html = `<h3 class="font-semibold mb-3">${title || 'Month-by-Month Bank Progression'}</h3>`;
+  let html = `<div class="flex items-center justify-between mb-3"><h3 class="font-semibold">${title || 'Month-by-Month Bank Progression'}</h3>${simResults.length === 1 ? `<button onclick="event.stopPropagation();showConfigPopover(this)" data-run-id="${simResults[0].run.id}" data-strategy="${simResults[0].run.strategy}" data-params='${JSON.stringify(simResults[0].run.params)}' class="text-blue-400 hover:text-blue-200 text-xs px-2 py-1 rounded border border-slate-600" title="View Config">⚙ ${simResults[0].run.strategy}</button>` : ''}</div>`;
   html += `<div style="overflow-x:auto"><table><thead><tr><th>Run</th><th>${kLabel}</th><th>Start</th>`;
   allMonths.forEach(m => html += `<th>${m}</th>`);
   html += '<th>Final</th><th>ROI</th></tr></thead><tbody>';
@@ -1084,7 +1512,7 @@ function bestRenderCompareSummary(simResults, startBank, buyPriceCents, maxBet){
   const sorted = [...simResults].sort((a,b) => b.finalBank - a.finalBank);
 
   let html = '<h3 class="font-semibold mb-3">Summary — Ranked by Final Bank</h3>';
-  html += '<table><thead><tr><th>Rank</th><th>Run</th><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Kelly%</th><th>½Kelly%</th><th>Max Lose Streak</th><th>Final Bank</th><th>ROI</th><th>Profit</th></tr></thead><tbody>';
+  html += '<table><thead><tr><th>Rank</th><th>Run</th><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Kelly%</th><th>½Kelly%</th><th>Max Lose Streak</th><th>Final Bank</th><th>ROI</th><th>Profit</th><th></th></tr></thead><tbody>';
 
   sorted.forEach((s, i) => {
     const r = s.run;
@@ -1109,6 +1537,7 @@ function bestRenderCompareSummary(simResults, startBank, buyPriceCents, maxBet){
     html += `<td class="font-bold font-mono ${roiClass}">$${s.finalBank.toFixed(0)}</td>`;
     html += `<td class="font-bold ${roiClass}">${roi}%</td>`;
     html += `<td class="font-mono ${roiClass}">${profit >= 0 ? '+' : ''}$${profit.toFixed(0)}</td>`;
+    html += `<td><button onclick="event.stopPropagation();toggleConfigModal(${r.id}, '${r.strategy}', ${JSON.stringify(r.params).replace(/'/g, "\\'")})" class="text-blue-400 text-xs hover:underline">Config</button></td>`;
     html += '</tr>';
   });
 
@@ -1138,7 +1567,194 @@ function bestRenderCompareSummary(simResults, startBank, buyPriceCents, maxBet){
     </div>
   </div>`;
 
+  // Modal container for config
+  html += `<div id="bc-config-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50" onclick="if(event.target===this)toggleConfigModal()">
+    <div class="bg-slate-800 rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-auto">
+      <div class="flex justify-between items-center mb-4">
+        <h3 class="text-lg font-semibold">Strategy Config</h3>
+        <button onclick="toggleConfigModal()" class="text-slate-400 hover:text-white text-2xl leading-none">&times;</button>
+      </div>
+      <div id="bc-config-content" class="text-xs font-mono bg-slate-900 p-3 rounded whitespace-pre-wrap"></div>
+    </div>
+  </div>`;
+
   el.innerHTML = html;
+}
+
+// Modal to show strategy config JSON (fallback for other pages)
+function toggleConfigModal(runId, strategy, params){
+  const modal = document.getElementById('bc-config-modal');
+  const content = document.getElementById('bc-config-content');
+  if(!modal || !content) return;
+  if(modal.classList.contains('hidden')){
+    content.innerHTML = `<div class="mb-2"><b>Run #${runId} — ${strategy}</b></div><pre>${JSON.stringify(params, null, 2)}</pre>`;
+    modal.classList.remove('hidden');
+  } else {
+    modal.classList.add('hidden');
+  }
+}
+
+// Popover for Best Compare: small floating tooltip next to button
+function showConfigPopover(button){
+  // Remove any existing popover
+  const existing = document.getElementById('bc-config-popover');
+  if(existing) existing.remove();
+
+  const runId = button.getAttribute('data-run-id');
+  const strategy = button.getAttribute('data-strategy');
+  let params = {};
+  try {
+    params = JSON.parse(button.getAttribute('data-params') || '{}');
+  } catch(e){
+    console.error('Failed to parse data-params', e);
+  }
+
+  const popover = document.createElement('div');
+  popover.id = 'bc-config-popover';
+  popover.className = 'absolute z-50 p-3 rounded-lg shadow-lg text-xs font-mono';
+  popover.style.cssText = 'background:#0f172a;border:1px solid #334155;min-width:280px;max-width:420px;max-height:320px;overflow:auto';
+  popover.innerHTML = `
+    <div class="flex items-center justify-between mb-2">
+      <div><b>#${runId} — ${strategy}</b></div>
+      <button onclick="this.parentElement.parentElement.remove()" class="text-slate-400 hover:text-white text-xs px-1">✕</button>
+    </div>
+    <pre style="margin:0;white-space:pre-wrap;word-break:break-all">${JSON.stringify(params, null, 2)}</pre>
+    <div class="mt-2">
+      <button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy JSON',1500)})" class="text-blue-400 hover:text-blue-200 text-xs font-semibold">Copy JSON</button>
+    </div>
+  `;
+
+  // Position near button (bottom-left)
+  const rect = button.getBoundingClientRect();
+  popover.style.position = 'fixed';
+  popover.style.top = `${rect.bottom + window.scrollY + 4}px`;
+  popover.style.left = `${rect.left + window.scrollX}px`;
+
+  document.body.appendChild(popover);
+
+  // Auto-close on click outside
+  const closeOnOutside = (e) => {
+    if (!popover.contains(e.target) && e.target !== button) {
+      popover.remove();
+      document.removeEventListener('click', closeOnOutside);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeOnOutside), 0);
+}
+
+// ===== PREDICT CONFIG PANEL =====
+
+let predictConfigData = null;
+
+function togglePredictConfigPanel(){
+  const panel = document.getElementById('predict-config-panel');
+  if(!panel) return;
+  if(panel.classList.contains('hidden')){
+    panel.classList.remove('hidden');
+    loadPredictConfig();
+    loadPredictTemplateConfigs();
+  } else {
+    panel.classList.add('hidden');
+  }
+}
+
+async function loadPredictConfig(){
+  const textarea = document.getElementById('predict-config-json');
+  if(!textarea) return;
+  try{
+    const res = await fetch(API + '/api/poly/settings');
+    if(res.ok){
+      const data = await res.json();
+      predictConfigData = data;
+      textarea.value = JSON.stringify(data, null, 2);
+    } else {
+      textarea.value = 'Error loading config';
+    }
+  }catch(e){
+    textarea.value = 'Network error';
+  }
+}
+
+async function savePredictConfig(){
+  const textarea = document.getElementById('predict-config-json');
+  if(!textarea) return;
+  try{
+    const json = JSON.parse(textarea.value);
+    const res = await fetch(API + '/api/poly/settings', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(json)
+    });
+    if(res.ok){
+      alert('Config saved');
+      predictConfigData = json;
+    } else {
+      alert('Failed to save config');
+    }
+  }catch(e){
+    alert('Invalid JSON');
+  }
+}
+
+async function loadPredictTemplateConfigs(){
+  const container = document.getElementById('predict-template-configs');
+  if(!container) return;
+  try{
+    const res = await fetch(API + '/api/poly/pred_templates');
+    if(!res.ok){ container.innerHTML = '<div class="text-red-400">Failed to load templates</div>'; return; }
+    const templates = await res.json();
+    if(!Array.isArray(templates)){ container.innerHTML = '<div class="text-red-400">Invalid response</div>'; return; }
+    let html = '';
+    templates.forEach(t => {
+      const paramsJson = JSON.stringify(t.params || {}, null, 2);
+      const statusDot = t.active ? '<span class="inline-block w-2 h-2 rounded-full" style="background:#22c55e"></span>' : '<span class="inline-block w-2 h-2 rounded-full" style="background:#64748b"></span>';
+      html += `<div class="mb-2 p-2 rounded-lg" style="background:#0b1220;border:1px solid #334155">
+        <div class="flex items-center justify-between gap-2 mb-1">
+          <div class="flex items-center gap-2">
+            ${statusDot}
+            <span class="font-semibold text-xs text-slate-200">${t.name || '(unnamed)'}</span>
+            <span class="text-slate-500 text-[11px] font-mono">${t.strategy}</span>
+            <span class="text-slate-600 text-[11px]">win=${t.window_size} H${t.horizon}</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <button onclick="reloadPredictTemplateConfig(${t.id})" class="text-blue-400 hover:text-blue-200 text-xs font-semibold" title="Reload this template">↺</button>
+            <button onclick="savePredictTemplateConfig(${t.id})" class="text-green-400 hover:text-green-200 text-xs font-semibold" title="Save params JSON">Save</button>
+          </div>
+        </div>
+        <textarea id="predict-template-config-${t.id}" rows="4" class="w-full text-xs font-mono" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px 10px">${paramsJson}</textarea>
+      </div>`;
+    });
+    container.innerHTML = html || '<div class="text-slate-500">No templates</div>';
+  }catch(e){
+    container.innerHTML = '<div class="text-red-400">Network error</div>';
+  }
+}
+
+function reloadPredictTemplateConfig(templateId){
+  // Simple approach: reload all templates and re-render.
+  // Keeps UI consistent and avoids partial DOM diff complexity.
+  loadPredictTemplateConfigs();
+}
+
+async function savePredictTemplateConfig(templateId){
+  const textarea = document.getElementById(`predict-template-config-${templateId}`);
+  if(!textarea) return;
+  try{
+    const params = JSON.parse(textarea.value);
+    const res = await fetch(API + `/api/poly/pred_templates/${templateId}`, {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ params })
+    });
+    if(res.ok){
+      // Silent success to match the compact UX in Polymarket popup.
+      await loadPredictTemplateConfigs();
+    } else {
+      alert('Failed to save template config');
+    }
+  }catch(e){
+    alert('Invalid JSON');
+  }
 }
 
 // ===== ANALYTICS =====

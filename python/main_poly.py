@@ -5,7 +5,7 @@ import asyncio
 import os
 import logging
 
-from app.poly_client import PolymarketClient
+from predictor.poly_client import PolymarketClient
 
 os.environ['TZ'] = 'UTC'
 

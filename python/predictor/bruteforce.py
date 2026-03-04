@@ -15,6 +15,8 @@ from predictor.db_history import (
     get_completed_combo_indices,
 )
 
+BF_COMBO_DELAY_SEC = 0.2
+
 if TYPE_CHECKING:
     from predictor.task_manager import TaskProgress
 
@@ -22,13 +24,19 @@ if TYPE_CHECKING:
 # Default grids per strategy
 PARAM_GRIDS: dict[str, dict[str, list]] = {
     "xgboost": {
-        "n_estimators": [100, 200, 300, 500],
-        "max_depth": [3, 4, 5, 6],
-        "learning_rate": [0.03, 0.05, 0.08, 0.1],
-        "subsample": [0.7, 0.8, 0.9],
-        "colsample_bytree": [0.7, 0.8, 0.9],
-        "threshold": [0.50, 0.52, 0.53, 0.55],
-        "window_size": [3000, 5000, 8000],
+        "n_estimators": [80, 120, 180, 240],
+        "max_depth": [2, 3, 4],
+        "learning_rate": [0.05, 0.08, 0.12],
+        "subsample": [0.8, 0.9],
+        "colsample_bytree": [0.8, 0.9],
+        "min_child_weight": [1, 5, 10],
+        "reg_lambda": [1.0, 3.0],
+        "gamma": [0.0, 0.5],
+        "tree_method": ["hist"],
+        "max_bin": [128, 256],
+        "n_jobs": [2, 4],
+        "threshold": [0.51, 0.53, 0.55],
+        "window_size": [2000, 3000, 5000],
     },
     "rsi_mean_reversion": {
         "rsi_period": [6, 14],
@@ -112,7 +120,14 @@ def get_default_grid(strategy: str) -> dict[str, list]:
 def build_combos(param_grid: dict[str, list]) -> list[dict]:
     """Generate all combinations from a param grid."""
     keys = list(param_grid.keys())
-    values = list(param_grid.values())
+    values = []
+    for k in keys:
+        v = param_grid.get(k)
+        # Allow scalars for convenience (treat as a single-option list)
+        if isinstance(v, (list, tuple, set, range)):
+            values.append(list(v))
+        else:
+            values.append([v])
     combos = []
     for combo in itertools.product(*values):
         combos.append(dict(zip(keys, combo)))
@@ -151,6 +166,8 @@ async def _run_bf_loop(
     if progress:
         progress.total = total
         progress.extra["bruteforce_id"] = bf_id
+        progress.extra["state"] = "preloading"
+        progress.phase = "Preloading data (candles + features)..."
 
     # ── Preload data once for ALL combos ──
     preloaded = await preload_backtest_data(
@@ -292,6 +309,11 @@ async def _run_bf_loop(
             if is_fast and completed % 20 == 0:
                 await asyncio.sleep(0)
 
+            # Small delay between combos to keep the event loop responsive for
+            # other tasks (e.g., live market/prediction requests).
+            if BF_COMBO_DELAY_SEC and BF_COMBO_DELAY_SEC > 0:
+                await asyncio.sleep(BF_COMBO_DELAY_SEC)
+
         except Exception as e:
             from predictor.task_manager import CancelledError
             if isinstance(e, CancelledError):
@@ -317,6 +339,9 @@ async def _run_bf_loop(
             })
 
             print(f"[BF {bf_id}] {completed}/{total} | ws={ws} ERROR: {e}", flush=True)
+
+            if BF_COMBO_DELAY_SEC and BF_COMBO_DELAY_SEC > 0:
+                await asyncio.sleep(BF_COMBO_DELAY_SEC)
 
     total_time = elapsed_before + (time.time() - t0)
 

@@ -7,63 +7,12 @@
           <label class="block text-xs text-slate-400 mb-1">Strategy <span class="tooltip cursor-help text-blue-400" id="bt-strategy-info">&#9432;<span class="tt"></span></span></label>
           <select id="bt-strategy" class="w-full"></select>
         </div>
-
-        <div class="grid grid-cols-2 gap-4">
-          <div>
-            <div class="text-xs text-slate-300 font-semibold mb-2">Train</div>
-            <div class="grid gap-3">
-              <div id="bt-train-start-wrap"><label class="block text-xs text-slate-400 mb-1">Start</label><input type="date" id="bt-train-start" value="2022-01-01" class="w-40"></div>
-              <div id="bt-train-end-wrap"><label class="block text-xs text-slate-400 mb-1">End</label><input type="date" id="bt-train-end" value="2025-06-30" class="w-40"></div>
-            </div>
-          </div>
-          <div>
-            <div class="text-xs text-slate-300 font-semibold mb-2">Test</div>
-            <div class="grid gap-3">
-              <div><label class="block text-xs text-slate-400 mb-1">Start</label><input type="date" id="bt-test-start" value="2025-07-01" class="w-40"></div>
-              <div><label class="block text-xs text-slate-400 mb-1">End</label><input type="date" id="bt-test-end" value="2025-12-31" class="w-40"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="grid gap-3">
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Window Size</label>
-            <input type="number" id="bt-window" value="5000" class="w-40">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Retrain Every</label>
-            <input type="number" id="bt-retrain" value="500" class="w-40">
-          </div>
-
-          <div class="flex items-end justify-end gap-3 pt-1">
-            <div class="text-right">
-              <label class="block text-xs text-slate-400 mb-1">Horizons</label>
-              <input type="text" id="bt-horizons" value="1" class="w-28 text-right" placeholder="1,2,3">
-            </div>
-            <div class="text-xs text-slate-500" style="line-height:1.1">
-              <div class="flex items-center gap-2 justify-end">
-                <span class="text-slate-500">H1</span>
-                <span style="display:inline-flex;align-items:flex-end;gap:3px">
-                  <span style="width:6px;height:14px;background:#e2e8f0;border-radius:2px"></span>
-                  <span style="width:6px;height:14px;border:1px dashed #60a5fa;border-radius:2px"></span>
-                </span>
-              </div>
-              <div class="flex items-center gap-2 justify-end mt-1">
-                <span class="text-slate-500">H2</span>
-                <span style="display:inline-flex;align-items:flex-end;gap:3px">
-                  <span style="width:6px;height:14px;background:#e2e8f0;border-radius:2px"></span>
-                  <span style="width:6px;height:14px;background:#64748b;border-radius:2px"></span>
-                  <span style="width:6px;height:14px;border:1px dashed #60a5fa;border-radius:2px"></span>
-                </span>
-              </div>
-            </div>
-          </div>
+        <div class="md:col-span-2">
+          <label class="block text-xs text-slate-400 mb-1">Backtest Config (JSON) <span class="tooltip cursor-help text-blue-400" id="bt-params-info">&#9432;<span class="tt"></span></span></label>
+          <textarea id="bt-config" rows="10" class="w-full mt-1 text-xs font-mono"></textarea>
+          <div class="flex gap-2 mt-1" id="bt-presets"></div>
         </div>
       </div>
-      <details class="mt-2"><summary class="text-xs text-slate-400 cursor-pointer">Custom Params (JSON) <span class="tooltip cursor-help text-blue-400" id="bt-params-info">&#9432;<span class="tt"></span></span></summary>
-        <textarea id="bt-params" rows="3" class="w-full mt-2 text-xs font-mono" placeholder='{"n_estimators":300}'></textarea>
-        <div class="flex gap-2 mt-1" id="bt-presets"></div>
-      </details>
       <div id="strategy-desc" class="mt-2 text-xs text-slate-500 italic"></div>
       <div id="strategy-ref" class="hidden mt-3 p-3 rounded-lg text-xs" style="background:#0f172a;border:1px solid #334155"></div>
       <button onclick="runBacktest()" id="btn-run" class="btn btn-green mt-4">Run Backtest</button>
@@ -75,13 +24,11 @@
   <div id="panel-compare" class="hidden">
     <div class="card p-6 mb-6">
       <h2 class="text-lg font-semibold mb-4">Compare All Strategies</h2>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-        <div><label class="block text-xs text-slate-400 mb-1">Train Start</label><input type="date" id="cmp-train-start" value="2022-01-01" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Train End</label><input type="date" id="cmp-train-end" value="2025-06-30" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Test Start</label><input type="date" id="cmp-test-start" value="2025-07-01" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Test End</label><input type="date" id="cmp-test-end" value="2025-12-31" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Window Size</label><input type="number" id="cmp-window" value="5000" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Retrain Every</label><input type="number" id="cmp-retrain" value="500" class="w-full"></div>
+      <div class="grid grid-cols-1 gap-4 mb-4">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Compare Config (JSON)</label>
+          <textarea id="cmp-config" rows="8" class="w-full text-xs font-mono"></textarea>
+        </div>
       </div>
       <button onclick="runCompare()" id="btn-compare" class="btn btn-green">Compare All</button>
     </div>
@@ -92,20 +39,18 @@
   <div id="panel-bruteforce" class="hidden">
     <div class="card p-6 mb-6">
       <h2 class="text-lg font-semibold mb-4">Brute-Force Hyperparameter Search</h2>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-        <div><label class="block text-xs text-slate-400 mb-1">Strategy <span class="tooltip cursor-help text-blue-400" id="bf-strategy-info">&#9432;<span class="tt"></span></span></label><select id="bf-strategy" class="w-full"></select></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Horizon</label><input type="number" id="bf-horizon" value="1" min="1" max="5" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Max Combos</label><input type="number" id="bf-max" value="50" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Window Size</label><input type="number" id="bf-window" value="5000" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Train Start</label><input type="date" id="bf-train-start" value="2022-01-01" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Train End</label><input type="date" id="bf-train-end" value="2025-06-30" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Test Start</label><input type="date" id="bf-test-start" value="2025-07-01" class="w-full"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Test End</label><input type="date" id="bf-test-end" value="2025-12-31" class="w-full"></div>
-      </div>
       <div class="mt-2">
-        <label class="block text-xs text-slate-400 mb-1">Param Grid (JSON) — <button onclick="loadDefaultGrid()" class="text-blue-400 underline text-xs">Load Default</button> <span class="tooltip cursor-help text-blue-400" id="bf-grid-info">&#9432;<span class="tt"></span></span></label>
-        <textarea id="bf-grid" rows="6" class="w-full text-xs font-mono"></textarea>
-        <div id="bf-combos" class="text-xs text-slate-400 mt-1"></div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-start">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Strategy <span class="tooltip cursor-help text-blue-400" id="bf-strategy-info">&#9432;<span class="tt"></span></span></label>
+            <select id="bf-strategy" class="w-full"></select>
+          </div>
+          <div class="md:col-span-2">
+            <label class="block text-xs text-slate-400 mb-1">Bruteforce Config (JSON) — <button onclick="loadDefaultGrid()" class="text-blue-400 underline text-xs">Load Default</button> <span class="tooltip cursor-help text-blue-400" id="bf-grid-info">&#9432;<span class="tt"></span></span></label>
+            <textarea id="bf-grid" rows="10" class="w-full text-xs font-mono"></textarea>
+            <div id="bf-combos" class="text-xs text-slate-400 mt-1"></div>
+          </div>
+        </div>
       </div>
       <button onclick="runBruteforce()" id="btn-bf" class="btn btn-purple mt-4">Queue Brute Force</button>
     </div>
@@ -116,9 +61,9 @@
   <div id="panel-history" class="hidden">
     <div class="card p-6 mb-4">
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div><label class="block text-xs text-slate-400 mb-1">Strategy</label><select id="hist-strategy" class="w-full"><option value="">All</option></select></div>
+        <div><label class="block text-xs text-slate-400 mb-1" for="hist-strategy">Strategy</label><select id="hist-strategy" class="w-full"><option value="">All</option></select></div>
         <div>
-          <label class="block text-xs text-slate-400 mb-1">Horizons</label>
+          <label class="block text-xs text-slate-400 mb-1" for="hist-horizons">Horizons</label>
           <input type="hidden" id="hist-horizons" value="1,2,3" />
           <div class="inline-flex rounded-lg overflow-hidden" style="border:1px solid #334155;background:#0f172a">
             <button onclick="histToggleHorizon(1)" id="hist-h1" class="px-3 py-2 text-xs font-semibold" style="background:#052e16;color:#22c55e">H1</button>
@@ -126,8 +71,8 @@
             <button onclick="histToggleHorizon(3)" id="hist-h3" class="px-3 py-2 text-xs font-semibold" style="background:#052e16;color:#22c55e">H3</button>
           </div>
         </div>
-        <div><label class="block text-xs text-slate-400 mb-1">Min Accuracy %</label><input type="number" id="hist-min-acc" value="" placeholder="53" class="w-20"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Limit</label><input type="number" id="hist-limit" value="50" class="w-full"></div>
+        <div><label class="block text-xs text-slate-400 mb-1" for="hist-min-acc">Min Accuracy %</label><input type="number" id="hist-min-acc" value="" placeholder="53" class="w-20"></div>
+        <div><label class="block text-xs text-slate-400 mb-1" for="hist-limit">Limit</label><input type="number" id="hist-limit" value="50" class="w-full"></div>
         <div class="flex items-end gap-2">
           <button onclick="loadHistory()" class="btn btn-primary">Search</button>
           <button onclick="clearAllHistory()" class="btn btn-red">Clear All</button>
@@ -141,10 +86,10 @@
   <div id="panel-best" class="hidden">
     <div class="card p-6 mb-4">
       <div class="flex gap-4 items-end flex-wrap">
-        <div><label class="block text-xs text-slate-400 mb-1">Horizon</label><input type="number" id="best-horizon" value="1" min="1" max="5" class="w-32"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Limit</label><input type="number" id="best-limit" value="20" class="w-32"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Signals from</label><input type="number" id="best-signals-min" placeholder="0" class="w-32"></div>
-        <div><label class="block text-xs text-slate-400 mb-1">Signals to</label><input type="number" id="best-signals-max" placeholder="∞" class="w-32"></div>
+        <div><label class="block text-xs text-slate-400 mb-1" for="best-horizon">Horizon</label><input type="number" id="best-horizon" value="1" min="1" max="5" class="w-32"></div>
+        <div><label class="block text-xs text-slate-400 mb-1" for="best-limit">Limit</label><input type="number" id="best-limit" value="20" class="w-32"></div>
+        <div><label class="block text-xs text-slate-400 mb-1" for="best-signals-min">Signals from</label><input type="number" id="best-signals-min" placeholder="0" class="w-32"></div>
+        <div><label class="block text-xs text-slate-400 mb-1" for="best-signals-max">Signals to</label><input type="number" id="best-signals-max" placeholder="∞" class="w-32"></div>
         <button onclick="loadBest()" class="btn btn-amber">Load Best</button>
         <div style="border-left:1px solid #475569;height:32px;margin:0 4px"></div>
         <button onclick="bestToggleCompareMode()" id="best-compare-toggle" class="btn btn-slate">Compare Mode</button>
@@ -163,12 +108,12 @@
           <h2 class="text-lg font-semibold">Half-Kelly Strategy Comparison</h2>
         </div>
         <div class="flex gap-4 items-end flex-wrap">
-          <div><label class="block text-xs text-slate-400 mb-1">Starting Bank ($)</label><input type="number" id="bc-bank" value="1000" min="1" class="w-32" onchange="bestCompareRecalc()"></div>
-          <div><label class="block text-xs text-slate-400 mb-1">Buy Price (¢)</label><input type="number" id="bc-buy-price" value="52" min="1" max="99" step="0.5" class="w-32" onchange="bestCompareRecalc()" title="Share buy price in cents (win pays $1.00)"></div>
-          <div><label class="block text-xs text-slate-400 mb-1">Max Bet ($)</label><input type="number" id="bc-max-bet" value="500" min="1" class="w-32" onchange="bestCompareRecalc()" title="Maximum stake per signal"></div>
-          <div><label class="block text-xs text-slate-400 mb-1">½ Kelly % (bank)</label><input type="number" id="bc-hkpct" value="1.70" min="0" step="0.01" class="w-32" onchange="bestCompareRecalc()" title="Percent of current bank to stake per signal"></div>
-          <div><label class="block text-xs text-slate-400 mb-1">Full Kelly % (bank)</label><input type="number" id="bc-fkpct" value="3.34" min="0" step="0.01" class="w-32" onchange="bestCompareRecalc()" title="Percent of current bank to stake per signal"></div>
-          <div><label class="block text-xs text-slate-400 mb-1">Fee (%)</label><input type="number" id="bc-fee" value="1.56" min="0" step="0.01" class="w-32" onchange="bestCompareRecalc()" title="Fee charged per bet (percent of stake)"></div>
+          <div><label class="block text-xs text-slate-400 mb-1" for="bc-bank">Starting Bank ($)</label><input type="number" id="bc-bank" value="1000" min="1" class="w-32" onchange="bestCompareRecalc()"></div>
+          <div><label class="block text-xs text-slate-400 mb-1" for="bc-buy-price">Buy Price (¢)</label><input type="number" id="bc-buy-price" value="52" min="1" max="99" step="0.5" class="w-32" onchange="bestCompareRecalc()" title="Share buy price in cents (win pays $1.00)"></div>
+          <div><label class="block text-xs text-slate-400 mb-1" for="bc-max-bet">Max Bet ($)</label><input type="number" id="bc-max-bet" value="500" min="1" class="w-32" onchange="bestCompareRecalc()" title="Maximum stake per signal"></div>
+          <div><label class="block text-xs text-slate-400 mb-1" for="bc-hkpct">½ Kelly % (bank)</label><input type="number" id="bc-hkpct" value="1.70" min="0" step="0.01" class="w-32" onchange="bestCompareRecalc()" title="Percent of current bank to stake per signal"></div>
+          <div><label class="block text-xs text-slate-400 mb-1" for="bc-fkpct">Full Kelly % (bank)</label><input type="number" id="bc-fkpct" value="3.34" min="0" step="0.01" class="w-32" onchange="bestCompareRecalc()" title="Percent of current bank to stake per signal"></div>
+          <div><label class="block text-xs text-slate-400 mb-1" for="bc-fee">Fee (%)</label><input type="number" id="bc-fee" value="1.56" min="0" step="0.01" class="w-32" onchange="bestCompareRecalc()" title="Fee charged per bet (percent of stake)"></div>
           <button onclick="bestCompareRecalc()" class="btn btn-purple">Recalculate</button>
         </div>
       </div>

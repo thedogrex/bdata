@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from db import DbProvider
-from app.poly_client import PolymarketClient, MarketData
+from predictor.poly_client import PolymarketClient, MarketData
 import app.config as config
 
 
@@ -569,6 +569,57 @@ async def list_markets(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]
             "status": status
         })
     return out
+
+
+async def list_prediction_updates(since_ts: int = 0, limit: int = 20) -> Dict[str, Any]:
+    """Return newly created predictions for future markets since `since_ts`.
+
+    This is used by the frontend to reliably detect backend-generated predictions.
+    Only defined predictions (UP/DOWN) are returned.
+    """
+    now_ts = int(time.time())
+    since_ts = int(since_ts or 0)
+    limit = max(1, min(100, int(limit or 20)))
+
+    emulate_down = bool(getattr(config, "EMULATE_DOWN", False))
+    outcomes_sql = "('UP','DOWN','UNDEFINED')" if emulate_down else "('UP','DOWN')"
+
+    rows = await db.fetchall(
+        """
+        SELECT slug, ts, prediction_outcome, prediction_ts
+        FROM poly_markets
+        WHERE prediction_ts IS NOT NULL
+          AND prediction_ts > %s
+          AND prediction_outcome IN """ + outcomes_sql + """
+          AND ts > %s
+          AND closed = 0
+        ORDER BY prediction_ts ASC
+        LIMIT %s
+        """,
+        (since_ts, now_ts, limit),
+    )
+
+    updates: List[Dict[str, Any]] = []
+    for slug, ts, outcome, pts in rows:
+        updates.append({
+            "slug": str(slug),
+            "ts": int(ts),
+            "prediction_outcome": str(outcome),
+            "prediction_ts": int(pts) if pts is not None else None,
+        })
+
+    max_ts = since_ts
+    for u in updates:
+        if u.get("prediction_ts") and int(u["prediction_ts"]) > max_ts:
+            max_ts = int(u["prediction_ts"])
+
+    return {
+        "now": now_ts,
+        "since": since_ts,
+        "cursor": max_ts,
+        "updates": updates,
+        "emulate_down": emulate_down,
+    }
 
 
 async def get_market(slug: str) -> Optional[Dict[str, Any]]:

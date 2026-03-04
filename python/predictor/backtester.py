@@ -1,5 +1,6 @@
 import time
 import asyncio
+import math
 import numpy as np
 import pandas as pd
 from typing import Optional, TYPE_CHECKING
@@ -13,6 +14,10 @@ if TYPE_CHECKING:
 
 
 RULE_BASED_STRATEGIES = {"rsi_mean_reversion", "momentum", "stochastic_adx", "candlestick_pattern"}
+
+
+def _is_cpu_heavy_strategy(strategy_name: str) -> bool:
+    return strategy_name in {"xgboost", "lightgbm", "lstm"}
 
 
 async def run_backtest(
@@ -94,6 +99,18 @@ async def run_backtest(
 
     results_by_horizon = {}
 
+    offload_cpu = _is_cpu_heavy_strategy(strategy_name)
+
+    if progress:
+        # Extra fields for UI visibility (bruteforce): how many candles are processed in current run
+        progress.extra["candles_total"] = int(len(test_indices))
+        progress.extra["candles_done"] = 0
+        progress.extra["horizon"] = int(horizons[0]) if horizons else 1
+        progress.extra["train_count"] = 0
+        progress.extra["train_total"] = max(1, math.ceil(len(test_indices) / max(retrain_every, 1)))
+        progress.extra["state"] = "init"
+        progress.extra["train_elapsed_sec"] = 0.0
+
     for h_idx, horizon in enumerate(horizons):
         t1 = time.time()
         target_col = f"future_dir_{horizon}"
@@ -103,11 +120,32 @@ async def run_backtest(
         last_train_idx = -retrain_every  # force first train
         train_count = 0
         total_train_time = 0.0
+        train_total_est = max(1, math.ceil(len(test_indices) / max(retrain_every, 1)))
+        if progress:
+            progress.extra["train_total"] = train_total_est
+            progress.extra["train_count"] = 0
+            progress.extra["horizon"] = int(horizon)
 
         for step, i in enumerate(test_indices):
             # Pause/cancel check every 50 candles
             if progress and step % 50 == 0:
                 await progress.check_pause_cancel()
+                progress.extra["state"] = "walking"
+                progress.extra["train_elapsed_sec"] = 0.0
+                progress.extra["candles_done"] = int(step)
+                progress.extra["candles_total"] = int(len(test_indices))
+                progress.extra["horizon"] = int(horizon)
+                progress.extra["train_count"] = int(train_count)
+                progress.extra["train_total"] = train_total_est
+                if step % 200 == 0:
+                    try:
+                        print(
+                            f"[backtest] {strategy_name} H{horizon} walking: {step}/{len(test_indices)} candles"
+                            f" | train {train_count}/{train_total_est}",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
                 correct_so_far = sum(1 for p in all_preds if p[1] == p[3] and p[1] != -1)
                 signals_so_far = sum(1 for p in all_preds if p[1] != -1)
                 acc_so_far = round(correct_so_far / signals_so_far * 100, 1) if signals_so_far > 0 else 0
@@ -135,15 +173,66 @@ async def run_backtest(
                     continue
 
                 if progress:
-                    progress.phase = f"H{horizon}: Training model (retrain #{train_count + 1}) on {len(df_train)} candles..."
+                    progress.extra["train_count"] = int(train_count)
+                    progress.extra["train_total"] = train_total_est
+                    progress.phase = f"H{horizon}: Training model ({train_count + 1}/{train_total_est}) on {len(df_train)} candles..."
 
                 t_train = time.time()
                 strategy = get_strategy(strategy_name, strategy_params)
-                strategy.fit(df_train, horizon)
+                if offload_cpu:
+                    if progress:
+                        progress.extra["state"] = "training"
+                        progress.extra["train_elapsed_sec"] = 0.0
+                    train_started_at = time.time()
+                    last_print_bucket = -1
+
+                    async def _train_ticker():
+                        nonlocal last_print_bucket
+                        while True:
+                            if progress:
+                                progress.extra["state"] = "training"
+                                progress.extra["train_count"] = int(train_count)
+                                progress.extra["train_total"] = train_total_est
+                                progress.extra["train_elapsed_sec"] = round(time.time() - train_started_at, 1)
+                            try:
+                                bucket = int((time.time() - train_started_at) // 10)
+                                if bucket != last_print_bucket:
+                                    last_print_bucket = bucket
+                                    print(
+                                        f"[backtest] {strategy_name} H{horizon}"
+                                        f" TRAINING {train_count + 1}/{train_total_est}"
+                                        f" | {int(time.time() - train_started_at)}s elapsed"
+                                        f" | candles so far: {len(all_preds)}",
+                                        flush=True,
+                                    )
+                            except Exception:
+                                pass
+                            await asyncio.sleep(1)
+
+                    ticker_task = asyncio.create_task(_train_ticker())
+                    try:
+                        await asyncio.to_thread(strategy.fit, df_train, horizon)
+                    finally:
+                        ticker_task.cancel()
+                        if progress:
+                            progress.extra["train_elapsed_sec"] = round(time.time() - train_started_at, 1)
+                else:
+                    strategy.fit(df_train, horizon)
                 train_elapsed = time.time() - t_train
                 total_train_time += train_elapsed
                 train_count += 1
                 last_train_idx = i
+                if progress:
+                    progress.extra["train_count"] = int(train_count)
+                    progress.extra["train_total"] = train_total_est
+                    progress.extra["state"] = "walking"
+                    if not offload_cpu:
+                        print(
+                            f"[backtest] {strategy_name} H{horizon}"
+                            f" train {train_count}/{train_total_est} done"
+                            f" in {round(train_elapsed, 1)}s",
+                            flush=True,
+                        )
 
                 # Yield after training (can be slow for XGBoost)
                 await asyncio.sleep(0)
@@ -156,14 +245,26 @@ async def run_backtest(
                 prob = float(strategy.predict_proba_row(x_row))
             else:
                 df_single = df_feat.iloc[[i]]
-                pred_arr = strategy.predict(df_single, horizon)
-                prob_arr = strategy.predict_proba(df_single, horizon)
+                if offload_cpu:
+                    pred_arr = await asyncio.to_thread(strategy.predict, df_single, horizon)
+                    prob_arr = await asyncio.to_thread(strategy.predict_proba, df_single, horizon)
+                else:
+                    pred_arr = strategy.predict(df_single, horizon)
+                    prob_arr = strategy.predict_proba(df_single, horizon)
                 pred = int(pred_arr[0])
                 prob = float(prob_arr[0])
 
             all_preds.append((i, pred, prob, int(actual_val)))
 
         work_done += len(test_indices)
+
+        if progress:
+            progress.extra["candles_done"] = int(len(test_indices))
+            progress.extra["candles_total"] = int(len(test_indices))
+            progress.extra["horizon"] = int(horizon)
+            progress.extra["train_count"] = int(train_count)
+            progress.extra["train_total"] = train_total_est
+            progress.extra["state"] = "done"
         fit_time = time.time() - t1
 
         # Evaluate

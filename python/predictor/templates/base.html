@@ -54,6 +54,7 @@
       </div>
       <div class="flex gap-2" id="tb-actions"></div>
     </div>
+    <div id="tb-extra" class="text-xs text-slate-400 mb-2"></div>
     <div class="progress-bar mb-1">
       <div id="tb-fill" class="progress-fill" style="width:0%"></div>
       <div id="tb-pct" class="progress-text">0%</div>
@@ -86,6 +87,30 @@
       </button>
       <span id="autopredict-label" class="text-xs font-semibold" style="color:#94a3b8">OFF</span>
       <span id="autopredict-status" class="text-xs text-slate-500 font-mono" style="min-width:80px"></span>
+      <button onclick="togglePredictConfigPanel()" class="text-slate-400 hover:text-white text-xs px-2 py-1 rounded border border-slate-600" title="Predict Config">⚙</button>
+    </div>
+  </div>
+
+  <!-- Predict Config Panel (collapsible) -->
+  <div id="predict-config-panel" class="hidden mb-4">
+    <div class="card p-4" style="background:#0f172a;border:1px solid #334155;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold text-sm">Predict Configurations</h3>
+        <button onclick="togglePredictConfigPanel()" class="text-slate-400 hover:text-white text-xs px-1">✕</button>
+      </div>
+
+      <div class="grid grid-cols-1 gap-4">
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-xs text-slate-400">Template Configs</label>
+            <button onclick="loadPredictTemplateConfigs()" class="text-blue-400 hover:text-blue-200 text-xs font-semibold">↺ Reload</button>
+          </div>
+          <div id="predict-template-configs" class="text-xs" style="max-height:320px;overflow-y:auto">
+            <div class="text-slate-500">Loading templates...</div>
+          </div>
+          <div class="text-slate-500 text-[11px] mt-1">These update <code>poly_pred_templates.params_json</code> via <code>PUT /api/poly/pred_templates/:id</code>.</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -97,6 +122,7 @@
     <button onclick="switchTab('history')" id="tab-history" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">History</button>
     <button onclick="switchTab('best')" id="tab-best" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Best Runs</button>
     <button onclick="switchTab('poly')" id="tab-poly" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Polymarket</button>
+    <button onclick="switchTab('wallet')" id="tab-wallet" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Wallet</button>
     <button onclick="switchTab('analytics');analyticsLoad()" id="tab-analytics" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Analytics</button>
   </div>
 
@@ -106,6 +132,7 @@
   {{TAB_HISTORY}}
   {{TAB_BEST}}
   {{TAB_POLY}}
+  {{TAB_WALLET}}
   {{TAB_ANALYTICS}}
 
   <!-- Compare Development Dialog -->

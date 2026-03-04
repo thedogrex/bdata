@@ -5,7 +5,7 @@ import pathlib
 import traceback
 from typing import Optional
 from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -25,6 +25,8 @@ from predictor.db_history import (
 from predictor.bruteforce import run_bruteforce, resume_bruteforce, get_default_grid, build_combos
 from predictor.task_manager import task_mgr
 from predictor import poly_service
+from predictor import live_trading
+import app.config as config
 
 app = FastAPI(title="Candle Predictor & Backtester", version="3.0.0")
 
@@ -34,6 +36,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Serve favicon.ico from project root."""
+    favicon_path = pathlib.Path(__file__).resolve().parents[1] / "favicon.ico"
+    if favicon_path.is_file():
+        return FileResponse(favicon_path, media_type="image/x-icon")
+    # Return 204 No Content if favicon does not exist
+    return JSONResponse(status_code=204, content={})
 
 
 poly_stop_event: asyncio.Event | None = None
@@ -131,6 +143,22 @@ class BatchPredictRequest(BaseModel):
     table: str = "c_5m"
 
 
+class LiveBuyRequest(BaseModel):
+    slug: str
+    asset_id: str
+    outcome_side: str = "UP"
+    prediction_direction: str = "UP"
+    amount_usd: float = 0.0
+    snapshot_price: float = 0.50
+    price_threshold: float = 0.52
+    bank_usd: float | None = None
+    bank_pct: float = 0.05
+    min_buy_usd: float = 3.0
+    max_buy_usd: float = 20.0
+    batch_id: str | None = None
+    template_id: int | None = None
+
+
 # ==================== API ROUTES ====================
 
 @app.get("/api/strategies")
@@ -161,7 +189,10 @@ async def api_poly_markets(limit: int = Query(50), offset: int = Query(0)):
 
 @app.get("/api/poly/status")
 async def api_poly_status():
-    return {"active_ts": poly_service.current_active_ts()}
+    return {
+        "active_ts": poly_service.current_active_ts(),
+        "emulate_down": bool(getattr(config, "EMULATE_DOWN", False)),
+    }
 
 
 @app.get("/api/poly/market/{slug}")
@@ -281,6 +312,11 @@ async def api_poly_save_settings(req: SettingsRequest):
 @app.get("/api/poly/prediction/{slug}")
 async def api_poly_prediction(slug: str):
     return await poly_service.get_saved_prediction(slug=slug)
+
+
+@app.get("/api/poly/pred_updates")
+async def api_poly_pred_updates(since: int = Query(0), limit: int = Query(20)):
+    return await poly_service.list_prediction_updates(since_ts=since, limit=limit)
 
 
 @app.get("/api/poly/prediction_candles/{slug}")
@@ -513,13 +549,43 @@ async def api_best_compare(req: BestCompareRequest):
 async def api_default_grid(strategy: str):
     grid = get_default_grid(strategy)
     combos = build_combos(grid) if grid else []
-    return {"strategy": strategy, "grid": grid, "total_combos": len(combos)}
+
+    # New UI format: return a full config object that can be pasted/edited as JSON.
+    cfg = {
+        "strategy": strategy,
+        "train_start": BruteforceRequest.model_fields["train_start"].default,
+        "train_end": BruteforceRequest.model_fields["train_end"].default,
+        "test_start": BruteforceRequest.model_fields["test_start"].default,
+        "test_end": BruteforceRequest.model_fields["test_end"].default,
+        "horizon": BruteforceRequest.model_fields["horizon"].default,
+        "table": BruteforceRequest.model_fields["table"].default,
+        "window_size": BruteforceRequest.model_fields["window_size"].default,
+        "retrain_every": BruteforceRequest.model_fields["retrain_every"].default,
+        "max_combos": BruteforceRequest.model_fields["max_combos"].default,
+        "param_grid": grid,
+    }
+    return {"strategy": strategy, "config": cfg, "total_combos": len(combos)}
 
 
 @app.post("/api/bruteforce")
 async def api_run_bruteforce(req: BruteforceRequest):
     """Queue a brute-force task. Returns task_id immediately."""
     grid = req.param_grid or get_default_grid(req.strategy)
+
+    # UI may send a full config object by mistake (with nested param_grid).
+    # In that case, extract the actual grid so combo counting works.
+    if isinstance(grid, dict) and "param_grid" in grid and isinstance(grid.get("param_grid"), dict):
+        grid = grid.get("param_grid")
+
+    # If any non-grid metadata keys slipped into the grid, ignore them.
+    if isinstance(grid, dict):
+        grid = {
+            k: v for k, v in grid.items()
+            if k not in {
+                "strategy", "train_start", "train_end", "test_start", "test_end",
+                "horizon", "table", "retrain_every", "max_combos",
+            }
+        }
     if not grid:
         return JSONResponse(status_code=400, content={"error": f"No param grid for {req.strategy}"})
 
@@ -569,6 +635,25 @@ async def api_resume_bruteforce(bf_id: int):
     label = f"Resume BF#{bf_id} {session['strategy']} H{session['horizon']} ({remaining} remaining)"
     task_id = task_mgr.enqueue("bruteforce", label, _run, total=session["total_combos"])
     return {"task_id": task_id, "status": "queued", "label": label, "bf_id": bf_id, "remaining": remaining}
+
+
+@app.post("/api/bruteforce/stop/{bf_id}")
+async def api_stop_bruteforce(bf_id: int):
+    """Stop and cancel a brute-force session."""
+    session = await get_bruteforce_session_by_id(bf_id)
+    if not session:
+        return JSONResponse(status_code=404, content={"error": f"Session {bf_id} not found"})
+    
+    # Try to cancel the task if it's running
+    success = True
+    if session.get("task_id"):
+        success = task_mgr.cancel(session["task_id"])
+    
+    # Mark session as stopped in database
+    from predictor.db_history import update_bruteforce_session
+    await update_bruteforce_session(bf_id, {"status": "stopped"})
+    
+    return {"ok": success, "bf_id": bf_id, "status": "stopped"}
 
 
 # ==================== TASK QUEUE ====================
@@ -688,6 +773,52 @@ async def api_kelly_sim(
 
 # ==================== ADMIN PANEL ====================
 
+# ==================== LIVE TRADING ====================
+
+@app.on_event("startup")
+async def startup_live_trading():
+    await live_trading.ensure_tables()
+
+
+@app.post("/api/poly/live/buy")
+async def api_live_buy(req: LiveBuyRequest):
+    """Buy an outcome token after prediction."""
+    if float(req.price_threshold) > 0.52:
+        return {"success": False, "error": "price_threshold must be <= 0.52"}
+    return await live_trading.buy_after_prediction(
+        slug=req.slug,
+        asset_id=req.asset_id,
+        outcome_side=req.outcome_side,
+        prediction_direction=req.prediction_direction,
+        amount_usd=req.amount_usd,
+        snapshot_price=req.snapshot_price,
+        price_threshold=req.price_threshold,
+        bank_usd=req.bank_usd,
+        bank_pct=req.bank_pct,
+        min_buy_usd=req.min_buy_usd,
+        max_buy_usd=req.max_buy_usd,
+        batch_id=req.batch_id,
+        template_id=req.template_id,
+    )
+
+
+@app.get("/api/poly/live/positions")
+async def api_live_positions(status: str = Query("open"), slug: str | None = Query(None)):
+    if status == "open":
+        return await live_trading.list_open_positions(slug=slug)
+    return await live_trading.list_all_positions(slug=slug)
+
+
+@app.get("/api/poly/live/orders")
+async def api_live_orders(limit: int = Query(100), slug: str | None = Query(None)):
+    return await live_trading.list_orders(limit=limit, slug=slug)
+
+
+@app.get("/api/poly/live/wallet")
+async def api_live_wallet(limit: int = Query(25)):
+    return await live_trading.wallet_summary(limit=limit)
+
+
 _TEMPLATE_DIR = pathlib.Path(__file__).parent / "templates"
 
 
@@ -704,6 +835,7 @@ def _build_admin_html() -> str:
         "{{TAB_HISTORY}}": "",   # included in tabs_backtest.html
         "{{TAB_BEST}}": "",      # included in tabs_backtest.html
         "{{TAB_POLY}}": _load_template("tab_poly.html"),
+        "{{TAB_WALLET}}": _load_template("tab_wallet.html"),
         "{{TAB_ORDERBOOKS}}": _load_template("tab_orderbooks.html"),
         "{{TAB_ANALYTICS}}": _load_template("tab_analytics.html"),
         "{{JS_COMMON}}": _load_template("js_common.js"),

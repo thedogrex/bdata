@@ -26,11 +26,18 @@ class XGBoostStrategy(BaseStrategy):
     @staticmethod
     def default_params() -> dict:
         return {
-            "n_estimators": 300,
-            "max_depth": 4,
-            "learning_rate": 0.05,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
+            "n_estimators": 200,
+            "max_depth": 3,
+            "learning_rate": 0.08,
+            "subsample": 0.85,
+            "colsample_bytree": 0.85,
+            "min_child_weight": 5,
+            "reg_lambda": 1.0,
+            "reg_alpha": 0.0,
+            "gamma": 0.0,
+            "tree_method": "hist",
+            "max_bin": 256,
+            "n_jobs": 4,
             "threshold": 0.53,
         }
 
@@ -42,6 +49,13 @@ class XGBoostStrategy(BaseStrategy):
             "learning_rate": "Step size shrinkage. Lower values require more trees but often generalize better. Typical: 0.01-0.1.",
             "subsample": "Fraction of samples used per tree. Prevents overfitting. Typical: 0.6-1.0.",
             "colsample_bytree": "Fraction of features used per tree. Prevents overfitting. Typical: 0.6-1.0.",
+            "min_child_weight": "Minimum sum of instance weight (hessian) needed in a child. Higher values reduce overfitting and can speed up training. Typical: 1-10.",
+            "reg_lambda": "L2 regularization term on weights. Typical: 1-10.",
+            "reg_alpha": "L1 regularization term on weights. Typical: 0-1.",
+            "gamma": "Minimum loss reduction required to make a split. Higher values make the model more conservative. Typical: 0-2.",
+            "tree_method": "Tree construction algorithm. Use 'hist' for fastest CPU training on tabular data.",
+            "max_bin": "Max number of bins for histogram algorithm (tree_method='hist'). Lower can be faster. Typical: 128-512.",
+            "n_jobs": "CPU threads for training/prediction. Limit this to keep realtime market polling responsive. Typical: 2-8.",
             "threshold": "Minimum probability to make a prediction. Higher = fewer but more confident signals. Typical: 0.50-0.55.",
         }
 
@@ -62,14 +76,21 @@ class XGBoostStrategy(BaseStrategy):
         X_scaled = self.scaler.transform(X)
 
         self.model = xgb.XGBClassifier(
-            n_estimators=self.params["n_estimators"],
-            max_depth=self.params["max_depth"],
-            learning_rate=self.params["learning_rate"],
-            subsample=self.params["subsample"],
-            colsample_bytree=self.params["colsample_bytree"],
+            n_estimators=int(self.params.get("n_estimators", 200)),
+            max_depth=int(self.params.get("max_depth", 3)),
+            learning_rate=float(self.params.get("learning_rate", 0.08)),
+            subsample=float(self.params.get("subsample", 0.85)),
+            colsample_bytree=float(self.params.get("colsample_bytree", 0.85)),
+            min_child_weight=float(self.params.get("min_child_weight", 5)),
+            reg_lambda=float(self.params.get("reg_lambda", 1.0)),
+            reg_alpha=float(self.params.get("reg_alpha", 0.0)),
+            gamma=float(self.params.get("gamma", 0.0)),
+            tree_method=str(self.params.get("tree_method", "hist")),
+            max_bin=int(self.params.get("max_bin", 256)),
             eval_metric="logloss",
             random_state=42,
-            n_jobs=-1,
+            n_jobs=int(self.params.get("n_jobs", 4)),
+            verbosity=0,
         )
         self.model.fit(X_scaled, y)
 

@@ -14,9 +14,11 @@ All CLOB operations are sync (py_clob_client) — run in executor.
 import asyncio
 import json
 import logging
+from decimal import Decimal, ROUND_CEILING
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import app.config as config
 from db import DbProvider
 from predictor.poly_client import PolymarketClient
 
@@ -337,7 +339,108 @@ async def buy_after_prediction(
         logger.warning(msg)
         return {"success": False, "error": msg, "order_row_id": None, "position": None}
 
+    use_market = bool(getattr(config, "BUY_MARKET", True))
+    if use_market:
+        worst_price = float(min(float(price_threshold), float(MAX_LIMIT_PRICE_USD)))
+        if worst_price <= 0:
+            msg = f"Invalid worst_price {worst_price}; skip buy"
+            logger.warning(msg)
+            return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
+        size_shares = amount_usd / float(snapshot_price) if float(snapshot_price) > 0 else 0.0
+        logger.info("  BUY_MARKET enabled: worst_price=%.4f", worst_price)
+        logger.debug("Computed size_shares=%.6f from amount_usd=%.2f and snapshot_price=%.6f", size_shares, amount_usd, float(snapshot_price))
+        loop = asyncio.get_event_loop()
+        logger.debug("Calling trading_client.buy_market with token_id=%s, amount=%.6f, worst_price=%.6f", asset_id[:16], float(amount_usd), float(worst_price))
+        try:
+            clob_resp = await loop.run_in_executor(
+                None,
+                lambda: trading_client.buy_market(
+                    token_id=asset_id,
+                    amount=float(amount_usd),
+                    worst_price=float(worst_price),
+                )
+            )
+            logger.debug("Raw CLOB response: %s", clob_resp)
+        except Exception as e:
+            logger.error("Exception calling trading_client.buy_market: %s", e, exc_info=True)
+            return {"success": False, "error": f"buy_market exception: {e}", "order_row_id": None, "position": None}
+
+        success = clob_resp.get("success", False)
+        order_id = clob_resp.get("orderID") or clob_resp.get("order_id") or None
+        status = clob_resp.get("status", "error" if not success else "unknown")
+        error_msg = clob_resp.get("errorMsg") or clob_resp.get("error_msg") or None
+
+        logger.info("CLOB response: success=%s  order_id=%s  status=%s  error=%s",
+                    success, order_id, status, error_msg)
+
+        # Record order in DB
+        order_row_id = await db.execute(
+            """
+            INSERT INTO poly_live_orders
+              (slug, asset_id, outcome_side, side, order_type, price, amount,
+               clob_order_id, clob_status, clob_error_msg, clob_response_json,
+               prediction_batch_id, template_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                slug, asset_id, outcome_side, "BUY", "FOK",
+                worst_price, amount_usd,
+                order_id, status, error_msg,
+                json.dumps(clob_resp, default=str),
+                batch_id, template_id,
+            ),
+        )
+        logger.info("Order recorded in DB: row_id=%s", order_row_id)
+
+        position_info = None
+
+        # If order was matched, update position
+        if success and status in ("matched", "live"):
+            estimated_shares = size_shares
+            try:
+                existing = await db.fetchone(
+                    "SELECT id, shares, total_cost FROM poly_live_positions "
+                    "WHERE slug=%s AND asset_id=%s AND closed=0 LIMIT 1",
+                    (slug, asset_id),
+                )
+                if existing:
+                    pos_id, shares0, cost0 = existing
+                    shares_new = float(shares0 or 0) + float(estimated_shares)
+                    cost_new = float(cost0 or 0) + float(amount_usd)
+                    avg_new = cost_new / shares_new if shares_new > 0 else 0
+                    await db.execute(
+                        "UPDATE poly_live_positions SET shares=%s,total_cost=%s,avg_price=%s,last_order_id=%s WHERE id=%s",
+                        (shares_new, cost_new, avg_new, order_id, pos_id),
+                    )
+                    position_info = {"id": pos_id, "shares": shares_new, "total_cost": cost_new, "avg_price": avg_new}
+                else:
+                    pos_id = await db.execute(
+                        "INSERT INTO poly_live_positions (slug, asset_id, outcome_side, shares, avg_price, total_cost, closed, last_order_id) VALUES (%s,%s,%s,%s,%s,%s,0,%s)",
+                        (slug, asset_id, outcome_side, float(estimated_shares), worst_price, float(amount_usd), order_id),
+                    )
+                    position_info = {"id": pos_id, "shares": float(estimated_shares), "total_cost": float(amount_usd), "avg_price": worst_price}
+            except Exception as e:
+                logger.error("Position update failed (non-fatal): %s", e)
+
+        return {
+            "success": bool(success),
+            "order_id": order_id,
+            "status": status,
+            "order_row_id": order_row_id,
+            "position": position_info,
+            "clob": clob_resp,
+        }
+
     limit_price = float(snapshot_price)
+    try:
+        tick_size_s = trading_client.get_tick_size(asset_id)
+        tick = Decimal(str(tick_size_s))
+        if tick > 0:
+            p = Decimal(str(limit_price))
+            limit_price = float((p / tick).to_integral_value(rounding=ROUND_CEILING) * tick)
+    except Exception:
+        pass
     if limit_price > MAX_LIMIT_PRICE_USD:
         msg = f"Snapshot price {limit_price:.4f} exceeds hard cap {MAX_LIMIT_PRICE_USD:.4f}; skip buy"
         logger.warning(msg)

@@ -38,3 +38,5 @@ def _env_bool(name: str, default: bool = False) -> bool:
 EMULATE_DOWN: bool = _env_bool("EMULATE_DOWN", False)
 
 NEED_CONFIRMATION: bool = _env_bool("NEED_CONFIRMATION", True)
+
+BUY_MARKET: bool = _env_bool("BUY_MARKET", True)

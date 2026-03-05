@@ -28,10 +28,6 @@ let polyPredRunsCache = [];
 let polyLastPredBatchId = null;
 let polyLastLiveOrderPlacedForBatchId = null;
 
-let polyLiveConfirmState = null;
-let polyLiveConfirmTimer = null;
-let polyLiveConfirmTtlTimer = null;
-
 let polyLastConfirmPromptKey = null;
 
 let polyNotifAudioCtx = null;
@@ -77,13 +73,13 @@ function polyDesktopNotify(title, body){
 const POLY_PRED_SETTINGS_KEY = 'poly_pred_settings_v1';
 
 const POLY_LIVE_TRADE_SETTINGS_KEY = 'poly_live_trade_settings_v1';
+const POLY_MAX_BANK_PCT = 0.12;
 const POLY_PRED_UPDATES_CURSOR_KEY = 'poly_pred_updates_cursor_v1';
 
 let polyPredUpdatesPollTimer = null;
 let polyPredUpdatesInFlight = false;
 
 let polyEmulateDown = false;
-let polyNeedConfirmation = true;
 
 function polyGetPredUpdatesCursor(){
   try{
@@ -108,12 +104,6 @@ async function polyPollPredUpdates(){
       polyPredUpdatesInFlight = false;
       return;
     }
-    // If a confirm modal is already open, don't poll-trigger another.
-    if(polyLiveConfirmState){
-      polyPredUpdatesInFlight = false;
-      return;
-    }
-
     const since = polyGetPredUpdatesCursor();
     const res = await fetch(API + `/api/poly/pred_updates?since=${encodeURIComponent(String(since))}&limit=20`);
     if(!res.ok){
@@ -150,7 +140,7 @@ async function polyPollPredUpdates(){
 
       console.log('[pred_updates] new prediction', u, {rawPred, pred, emulate_down: polyEmulateDown});
       try{ if(!polySelectedMarketSlug || polySelectedMarketSlug !== slug){ await selectPolyMarket(slug); } }catch(e){}
-      await polyPlaceLiveOrderAfterPrediction(slug, pred, null, !!polyNeedConfirmation);
+      await polyPlaceLiveOrderAfterPrediction(slug, pred, null);
       break;
     }
   }catch(e){
@@ -180,8 +170,9 @@ function polyGetLiveTradeSettings(){
     const raw = localStorage.getItem(POLY_LIVE_TRADE_SETTINGS_KEY);
     if(!raw) return defaults;
     const obj = JSON.parse(raw);
+    const pct = (typeof obj.bank_pct === 'number') ? obj.bank_pct : defaults.bank_pct;
     return {
-      bank_pct: (typeof obj.bank_pct === 'number') ? obj.bank_pct : defaults.bank_pct,
+      bank_pct: Math.min(Math.max(pct, 0), POLY_MAX_BANK_PCT),
       min_buy_usd: (typeof obj.min_buy_usd === 'number') ? obj.min_buy_usd : defaults.min_buy_usd,
       max_buy_usd: (typeof obj.max_buy_usd === 'number') ? obj.max_buy_usd : defaults.max_buy_usd,
       price_cap_cents: (typeof obj.price_cap_cents === 'number') ? obj.price_cap_cents : defaults.price_cap_cents,
@@ -248,6 +239,9 @@ function polyClamp(v, lo, hi){
 
 async function polyComputeOrderAmountUsd(settings){
   const bankPct = Number(settings?.bank_pct ?? 0.05);
+  if(bankPct > POLY_MAX_BANK_PCT){
+    throw new Error(`bank_pct cannot exceed ${(POLY_MAX_BANK_PCT*100).toFixed(0)}%`);
+  }
   const minBuy = Number(settings?.min_buy_usd ?? 3.0);
   const maxBuy = Number(settings?.max_buy_usd ?? 20.0);
   const bank = await polyFetchCollateralBankUsd();
@@ -288,8 +282,8 @@ function polySaveLiveTradeSettings(){
   const price_cap_cents = parseFloat(capEl?.value || '52');
   const auto_place = !!autoEl?.checked;
 
-  if(!(bank_pct >= 0 && bank_pct <= 1)){
-    if(msgEl) msgEl.innerHTML = '<span class="text-red-300">Bank % must be between 0 and 1</span>';
+  if(!(bank_pct >= 0 && bank_pct <= POLY_MAX_BANK_PCT)){
+    if(msgEl) msgEl.innerHTML = `<span class="text-red-300">Bank % must be between 0 and ${(POLY_MAX_BANK_PCT*100).toFixed(0)}%</span>`;
     return;
   }
   if(!(price_cap_cents > 0 && price_cap_cents <= 52)){
@@ -313,87 +307,7 @@ function polyMarketsPrevPage(){
   loadPolyMarkets();
 }
 
-function polyLiveConfirmOpen(details, onAccept){
-  const modal = document.getElementById('poly-live-confirm-modal');
-  const bodyEl = document.getElementById('poly-live-confirm-body');
-  const ttlEl = document.getElementById('poly-live-confirm-ttl');
-  if(!modal || !bodyEl || !ttlEl) return;
-
-  // Close any existing modal
-  polyLiveConfirmClose('replaced');
-
-  const slug = details?.slug || '';
-  const side = details?.outcome_side || '';
-  const snap = details?.snapshot_price_cents;
-  const priceCap = details?.price_cap_cents;
-  const bankPct = details?.bank_pct;
-  const minBuy = details?.min_buy_usd;
-  const maxBuy = details?.max_buy_usd;
-  const amountUsd = details?.amount_usd;
-  const estShares = details?.est_shares;
-  const priceThresholdUsd = details?.price_threshold_usd;
-
-  const msg =
-    `Auto-prediction finished. Place LIVE limit order?\n\n`
-    + `Market: ${slug}\n`
-    + `Side: ${side}\n`
-    + `Snapshot ask: ${snap !== null && snap !== undefined ? (snap + '¢') : '—'}\n`
-    + `Limit price: ${priceCap}¢ (hard max 52¢)\n`
-    + `Limit price (USD): ${priceThresholdUsd !== null && priceThresholdUsd !== undefined ? priceThresholdUsd.toFixed(4) : '—'}\n\n`
-    + `Order amount: ${amountUsd !== null && amountUsd !== undefined ? ('$' + Number(amountUsd).toFixed(2)) : '—'}\n`
-    + `Est shares @ limit: ${estShares !== null && estShares !== undefined ? Number(estShares).toFixed(4) : '—'}\n\n`
-    + `Sizing: bank_pct=${bankPct}  min=$${minBuy}  max=$${maxBuy}\n\n`
-    + `If not confirmed within 60 seconds, NO order will be placed.`;
-
-  bodyEl.textContent = msg;
-  modal.classList.remove('hidden');
-
-  try{
-    const soundOk = polyPlayNotifSound();
-    if(document.hidden){
-      polyDesktopNotify('Confirm Live Order', `Market: ${slug} | Side: ${side} | Amount: ${amountUsd !== null && amountUsd !== undefined ? ('$' + Number(amountUsd).toFixed(2)) : '—'}`);
-      if(!soundOk){
-        polyDesktopNotify('Confirm Live Order', 'Open the tab once to enable sound notifications.');
-      }
-    }
-  }catch(e){}
-
-  polyLiveConfirmState = { createdAt: Date.now(), onAccept };
-
-  let ttl = 60;
-  ttlEl.textContent = String(ttl);
-  polyLiveConfirmTtlTimer = setInterval(() => {
-    ttl -= 1;
-    if(ttlEl) ttlEl.textContent = String(Math.max(0, ttl));
-    if(ttl <= 0){
-      polyLiveConfirmClose('expired');
-    }
-  }, 1000);
-
-  polyLiveConfirmTimer = setTimeout(() => {
-    polyLiveConfirmClose('expired');
-  }, 60000);
-}
-
-function polyLiveConfirmClose(reason){
-  const modal = document.getElementById('poly-live-confirm-modal');
-  if(modal) modal.classList.add('hidden');
-  if(polyLiveConfirmTimer){ clearTimeout(polyLiveConfirmTimer); polyLiveConfirmTimer = null; }
-  if(polyLiveConfirmTtlTimer){ clearInterval(polyLiveConfirmTtlTimer); polyLiveConfirmTtlTimer = null; }
-  polyLiveConfirmState = null;
-}
-
-function polyLiveConfirmAccept(){
-  const st = polyLiveConfirmState;
-  polyLiveConfirmClose('accepted');
-  try{ if(st && typeof st.onAccept === 'function') st.onAccept(); }catch(e){}
-}
-
-function polyLiveConfirmCancel(){
-  polyLiveConfirmClose('canceled');
-}
-
-async function polyPlaceLiveOrderAfterPrediction(slug, prediction, batch_id, requireConfirm){
+async function polyPlaceLiveOrderAfterPrediction(slug, prediction, batch_id){
   try{
     // Live trading is allowed only for FUTURE markets.
     const nowUtc = Math.floor(Date.now() / 1000);
@@ -450,28 +364,6 @@ async function polyPlaceLiveOrderAfterPrediction(slug, prediction, batch_id, req
     const snapshot_price = snapCents !== null ? (snapCents/100.0) : price_threshold;
     if(snapCents === null){
       console.warn('[live_buy] snapshot_price_cents missing; falling back to threshold', {slug, outcome_side, polySelectedPriceCents, polyLastBestAskCents});
-    }
-
-    if(requireConfirm){
-      const sizing = await polyComputeOrderAmountUsd(s);
-      const amountUsd = sizing?.amount_usd;
-      const estShares = (amountUsd && price_threshold) ? (Number(amountUsd) / Number(price_threshold)) : null;
-      // non-blocking: open modal; actual POST happens only on accept
-      polyLiveConfirmOpen({
-        slug,
-        outcome_side,
-        snapshot_price_cents: snapCents,
-        price_cap_cents,
-        price_threshold_usd: price_threshold,
-        bank_pct: s.bank_pct,
-        min_buy_usd: s.min_buy_usd,
-        max_buy_usd: s.max_buy_usd,
-        amount_usd: amountUsd,
-        est_shares: estShares,
-      }, async () => {
-        await polyPlaceLiveOrderAfterPrediction(slug, prediction, batch_id, false);
-      });
-      return {success:true, pending:true};
     }
 
     const payload = {
@@ -712,7 +604,8 @@ function startLiveMarketPoll(){
       // If active market changes, the previous one just ended -> trigger autopredict.
       // This is what makes the UI "know" that a new future market prediction should be run.
       if(polyLastActiveTs !== null && polyActiveTs !== null && polyActiveTs !== polyLastActiveTs){
-        try{ await polyAutopredictTrigger(polyLastActiveTs); }catch(e){}
+        // Autopredict disabled on timers; keeping only list refresh.
+        // try{ await polyAutopredictTrigger(polyLastActiveTs); }catch(e){}
         // Always refresh markets list so badges/icons update even if user is on another market.
         polyScheduleMarketsRefresh('active_ts_changed');
       }
@@ -955,7 +848,7 @@ async function polyAutopredictRunForSlug(slug, marketTs){
             // Ensure selected market context (for outcome mapping)
             try{ if(!polySelectedMarketSlug || polySelectedMarketSlug !== slug){ await selectPolyMarket(slug); } }catch(e){}
             console.log('[auto-trade] open confirm modal', {slug, summary, bid});
-            await polyPlaceLiveOrderAfterPrediction(slug, summary, bid, !!polyNeedConfirmation);
+            await polyPlaceLiveOrderAfterPrediction(slug, summary, bid);
           } else {
             console.log('[auto-trade] skip: duplicate batch_id', {slug, summary, bid});
           }
@@ -1099,12 +992,13 @@ function updatePolyCountdown(marketTs, intervalSeconds){
     countdownEl.innerHTML = '<span class="text-red-400 font-semibold">00:00</span>';
     stopPolyCountdown();
     // Trigger autopredict when the active market ends (so UI can predict upcoming future markets)
-    try{
-      const endedTs = Number(marketTs) || null;
-      if(endedTs && endedTs !== polyAutopredictLastTriggeredForEndedTs){
-        polyAutopredictTrigger(endedTs);
-      }
-    }catch(e){}
+    // Autopredict disabled on timers.
+    // try{
+    //   const endedTs = Number(marketTs) || null;
+    //   if(endedTs && endedTs !== polyAutopredictLastTriggeredForEndedTs){
+    //     polyAutopredictTrigger(endedTs);
+    //   }
+    // }catch(e){}
     // Refresh markets and show resolved outcome if available
     loadPolyMarkets();
     if(polySelectedMarket && polySelectedMarket.slug){
@@ -1163,7 +1057,8 @@ async function loadPolyMarkets(){
       polyEmulateDown = !!s.emulate_down;
       polyNeedConfirmation = (s.need_confirmation === undefined || s.need_confirmation === null) ? true : !!s.need_confirmation;
       if(polyLastActiveTs !== null && polyActiveTs !== null && polyActiveTs !== polyLastActiveTs){
-        try{ await polyAutopredictTrigger(polyLastActiveTs); }catch(e){}
+        // Autopredict disabled on timers.
+        // try{ await polyAutopredictTrigger(polyLastActiveTs); }catch(e){}
       }
       polyLastActiveTs = polyActiveTs;
     }catch(e){polyActiveTs=null;}
@@ -1191,7 +1086,7 @@ async function loadPolyMarkets(){
     try{
       const s = polyGetLiveTradeSettings();
       const nowUtc = Math.floor(Date.now()/1000);
-      if(s.auto_place && Array.isArray(data) && !polyLiveConfirmState){
+      if(s.auto_place && Array.isArray(data)){
         for(const m of data){
           if(!m || !m.slug) continue;
           const ts = m.ts ? Number(m.ts) : null;
@@ -1214,7 +1109,7 @@ async function loadPolyMarkets(){
           polyLastConfirmPromptKey = promptKey;
 
           try{ if(!polySelectedMarketSlug || polySelectedMarketSlug !== m.slug){ await selectPolyMarket(m.slug); } }catch(e){}
-          await polyPlaceLiveOrderAfterPrediction(m.slug, pred, null, !!polyNeedConfirmation);
+          await polyPlaceLiveOrderAfterPrediction(m.slug, pred, null);
           break;
         }
       }

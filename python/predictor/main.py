@@ -6,6 +6,15 @@ import logging
 
 # Configuration: Set to False to enable /api/tasks/status logs, True to filter them out
 FILTER_TASKS_STATUS_LOGS = True
+SUPPRESSED_PATHS = (
+    "/api/tasks/status",
+    "/favicon.ico",
+    "/api/poly/orderbook",
+    "/api/poly/status",
+    "/api/poly/pred_updates",
+    "/api/poly/markets",
+    "/api/poly/live/orders",
+)
 
 class AccessLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
@@ -15,8 +24,11 @@ class AccessLogFilter(logging.Filter):
         try:
             if hasattr(record, "args") and len(record.args) >= 3:
                 path = record.args[2]
-                if "/api/tasks/status" in path or "/favicon.ico" in path or "/api/poly/orderbook" in path and "/latest" in path:
-                    return False
+                for suppressed in SUPPRESSED_PATHS:
+                    if suppressed in path:
+                        if suppressed == "/api/poly/orderbook" and "/latest" not in path:
+                            continue
+                        return False
         except Exception:
             pass
 

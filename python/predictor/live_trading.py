@@ -51,6 +51,27 @@ def get_cached_collateral_balance_usd() -> Optional[float]:
     return _last_collateral_balance_usd
 
 
+def _parse_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_fill_metrics(resp: Optional[Dict[str, Any]]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    if not isinstance(resp, dict):
+        return None, None, None
+    taking = _parse_float(resp.get("takingAmount"))
+    making = _parse_float(resp.get("makingAmount"))
+    avg_cents: Optional[float] = None
+    if taking is not None and taking > 0 and making is not None:
+        net_spent = making
+        avg_cents = (net_spent / taking) * 100.0
+    return taking, making, avg_cents
+
+
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
@@ -428,17 +449,21 @@ async def buy_after_prediction(
                     success, order_id, status, error_msg)
 
         # Record order in DB
+        fill_shares, fill_spent_usd, fill_avg_cents = _extract_fill_metrics(clob_resp)
+
         order_row_id = await db.execute(
             """
             INSERT INTO poly_live_orders
               (slug, asset_id, outcome_side, side, order_type, price, amount,
+               fill_shares, fill_total_spent_usd, fill_avg_price_cents,
                clob_order_id, clob_status, clob_error_msg, clob_response_json,
                prediction_batch_id, template_id)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 slug, asset_id, outcome_side, "BUY", "FOK",
                 worst_price, amount_usd,
+                fill_shares, fill_spent_usd, fill_avg_cents,
                 order_id, status, error_msg,
                 json.dumps(clob_resp, default=str),
                 batch_id, template_id,
@@ -450,7 +475,10 @@ async def buy_after_prediction(
 
         # If order was matched, update position
         if success and status in ("matched", "live"):
-            estimated_shares = size_shares
+            actual_shares = float(fill_shares) if fill_shares is not None else size_shares
+            actual_cost = float(fill_spent_usd) if fill_spent_usd is not None else float(amount_usd)
+            actual_avg_price = float(fill_avg_cents) / 100.0 if fill_avg_cents is not None else float(worst_price)
+
             try:
                 existing = await db.fetchone(
                     "SELECT id, shares, total_cost FROM poly_live_positions "
@@ -459,8 +487,8 @@ async def buy_after_prediction(
                 )
                 if existing:
                     pos_id, shares0, cost0 = existing
-                    shares_new = float(shares0 or 0) + float(estimated_shares)
-                    cost_new = float(cost0 or 0) + float(amount_usd)
+                    shares_new = float(shares0 or 0) + float(actual_shares)
+                    cost_new = float(cost0 or 0) + float(actual_cost)
                     avg_new = cost_new / shares_new if shares_new > 0 else 0
                     await db.execute(
                         "UPDATE poly_live_positions SET shares=%s,total_cost=%s,avg_price=%s,last_order_id=%s WHERE id=%s",
@@ -470,9 +498,9 @@ async def buy_after_prediction(
                 else:
                     pos_id = await db.execute(
                         "INSERT INTO poly_live_positions (slug, asset_id, outcome_side, shares, avg_price, total_cost, closed, last_order_id) VALUES (%s,%s,%s,%s,%s,%s,0,%s)",
-                        (slug, asset_id, outcome_side, float(estimated_shares), worst_price, float(amount_usd), order_id),
+                        (slug, asset_id, outcome_side, float(actual_shares), actual_avg_price, float(actual_cost), order_id),
                     )
-                    position_info = {"id": pos_id, "shares": float(estimated_shares), "total_cost": float(amount_usd), "avg_price": worst_price}
+                    position_info = {"id": pos_id, "shares": float(actual_shares), "total_cost": float(actual_cost), "avg_price": actual_avg_price}
             except Exception as e:
                 logger.error("Position update failed (non-fatal): %s", e)
 
@@ -529,17 +557,21 @@ async def buy_after_prediction(
                 success, order_id, status, error_msg)
 
     # Record order in DB
+    fill_shares, fill_spent_usd, fill_avg_cents = _extract_fill_metrics(clob_resp)
+
     order_row_id = await db.execute(
         """
         INSERT INTO poly_live_orders
           (slug, asset_id, outcome_side, side, order_type, price, amount,
+           fill_shares, fill_total_spent_usd, fill_avg_price_cents,
            clob_order_id, clob_status, clob_error_msg, clob_response_json,
            prediction_batch_id, template_id)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         (
             slug, asset_id, outcome_side, "BUY", "GTC",
             price_threshold, amount_usd,
+            fill_shares, fill_spent_usd, fill_avg_cents,
             order_id, status, error_msg,
             json.dumps(clob_resp, default=str),
             batch_id, template_id,
@@ -557,8 +589,9 @@ async def buy_after_prediction(
 
     # If order was matched, update position
     if success and status in ("matched", "live"):
-        # Estimate shares bought: amount / price
-        estimated_shares = size_shares
+        actual_shares = float(fill_shares) if fill_shares is not None else size_shares
+        actual_cost = float(fill_spent_usd) if fill_spent_usd is not None else float(amount_usd)
+        actual_avg_price = float(fill_avg_cents) / 100.0 if fill_avg_cents is not None else float(snapshot_price)
 
         try:
             # Try to update existing open position
@@ -570,8 +603,8 @@ async def buy_after_prediction(
 
             if existing:
                 pos_id, old_shares, old_cost = existing
-                new_shares = old_shares + estimated_shares
-                new_cost = old_cost + amount_usd
+                new_shares = old_shares + actual_shares
+                new_cost = old_cost + actual_cost
                 new_avg = new_cost / new_shares if new_shares > 0 else 0
                 await db.execute(
                     "UPDATE poly_live_positions SET shares=%s, avg_price=%s, total_cost=%s, updated_at=NOW() "
@@ -583,7 +616,7 @@ async def buy_after_prediction(
                 position_info = {"id": pos_id, "shares": new_shares, "avg_price": new_avg, "total_cost": new_cost}
             else:
                 # Create new position
-                avg_price = snapshot_price
+                avg_price = actual_avg_price
                 pos_id = await db.execute(
                     """
                     INSERT INTO poly_live_positions
@@ -594,14 +627,14 @@ async def buy_after_prediction(
                     """,
                     (
                         slug, asset_id, outcome_side,
-                        estimated_shares, avg_price, amount_usd,
-                        "open", snapshot_price * 100,
+                        actual_shares, avg_price, actual_cost,
+                        "open", (avg_price or snapshot_price) * 100,
                         prediction_direction, batch_id, template_id,
                     ),
                 )
                 logger.info("Position created: id=%s  shares=%.4f  avg=%.4f  cost=%.2f",
-                            pos_id, estimated_shares, avg_price, amount_usd)
-                position_info = {"id": pos_id, "shares": estimated_shares, "avg_price": avg_price, "total_cost": amount_usd}
+                            pos_id, actual_shares, avg_price, actual_cost)
+                position_info = {"id": pos_id, "shares": actual_shares, "avg_price": avg_price, "total_cost": actual_cost}
 
         except Exception as e:
             logger.error("Failed to update position in DB: %s", e, exc_info=True)

@@ -625,16 +625,30 @@ function polyMarketsNextPage(){
 function polyRenderMarketsPageButtons(){
   const container = document.getElementById('poly-markets-page-buttons');
   if(!container){ return; }
+  const MAX_BUTTONS = 6;
   let maxPage = polyMarketsKnownMaxPage;
   if(!polyMarketsReachedLastPage){
-    maxPage = Math.max(maxPage, polyMarketsPage + 2);
+    maxPage = Math.max(maxPage, polyMarketsPage + 3);
   }
   maxPage = Math.max(maxPage, polyMarketsPage);
-  const start = Math.max(1, polyMarketsPage - 2);
+
+  let start = Math.max(1, polyMarketsPage - Math.floor(MAX_BUTTONS / 2));
+  let end = start + MAX_BUTTONS - 1;
+  if(end > maxPage){
+    end = maxPage;
+    start = Math.max(1, end - MAX_BUTTONS + 1);
+  }
+
   let html = '';
-  for(let p = start; p <= maxPage; p++){
+  if(start > 1){
+    html += `<button type="button" class="text-[11px] px-2 py-1 rounded bg-slate-800 text-slate-300 hover:bg-slate-700" onclick="polyGoToMarketsPage(1)">« 1</button>`;
+  }
+  for(let p = start; p <= end; p++){
     const active = p === polyMarketsPage;
     html += `<button type="button" class="text-[11px] px-2 py-1 rounded ${active ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}" onclick="polyGoToMarketsPage(${p})">${p}</button>`;
+  }
+  if(end < maxPage){
+    html += `<button type="button" class="text-[11px] px-2 py-1 rounded bg-slate-800 text-slate-300 hover:bg-slate-700" onclick="polyGoToMarketsPage(${maxPage})">${maxPage} »</button>`;
   }
   container.innerHTML = html;
 }

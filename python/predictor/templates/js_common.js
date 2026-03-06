@@ -303,12 +303,14 @@ function switchTab(tab){
 }
 
 // ===== WALLET =====
+const WALLET_ORDERS_PER_PAGE = 3;
+let walletOrdersCache = [];
+let walletOrdersPage = 1;
+
 async function loadWallet(){
   const balEl = document.getElementById('wallet-balance');
-  const posEl = document.getElementById('wallet-positions');
   const ordEl = document.getElementById('wallet-orders');
   if(balEl) balEl.textContent = 'Loading...';
-  if(posEl) posEl.textContent = 'Loading...';
   if(ordEl) ordEl.textContent = 'Loading...';
   try{
     const res = await fetch(API + '/api/poly/live/wallet?limit=25');
@@ -316,19 +318,76 @@ async function loadWallet(){
     renderWallet(data);
   }catch(e){
     if(balEl) balEl.textContent = 'Wallet load error';
-    if(posEl) posEl.textContent = 'Wallet load error';
     if(ordEl) ordEl.textContent = 'Wallet load error';
   }
 }
 
+function walletRenderOrders(container){
+  if(!container){ return; }
+  const orders = Array.isArray(walletOrdersCache) ? walletOrdersCache : [];
+  if(!orders.length){
+    container.innerHTML = '<div class="text-slate-500 text-xs">No recent orders</div>';
+    return;
+  }
+
+  const maxPage = Math.max(1, Math.ceil(orders.length / WALLET_ORDERS_PER_PAGE));
+  walletOrdersPage = Math.min(Math.max(1, walletOrdersPage), maxPage);
+  const start = (walletOrdersPage - 1) * WALLET_ORDERS_PER_PAGE;
+  const pageItems = orders.slice(start, start + WALLET_ORDERS_PER_PAGE);
+
+  let html = '<div class="flex flex-wrap gap-2">';
+  pageItems.forEach(o => {
+    const fullId = o.clob_order_id || '';
+    const shortId = fullId ? fullId.slice(0, 8) : '-';
+    const idHtml = fullId
+      ? `<span class="flex items-center gap-1"><b>${shortId}</b><button onclick="navigator.clipboard.writeText('${fullId}')" title="Copy full ID" style="background:none;border:none;color:#60a5fa;cursor:pointer;padding:0;font-size:12px;line-height:1">📋</button></span>`
+      : '-';
+    html += `<div class="p-2 rounded" style="background:#0f172a;border:1px solid #334155;width:240px;min-width:240px;max-width:240px">
+      <div class="flex items-center justify-between">
+        <div class="text-xs font-semibold">${o.side} ${o.outcome_side || ''}</div>
+        <div class="text-[11px] text-slate-500">${o.clob_status || ''}</div>
+      </div>
+      <div class="text-[11px] text-slate-400">${o.slug}</div>
+      <div class="grid grid-cols-3 gap-2 text-[11px] mt-1">
+        <div>price: <b>${(o.price||0).toFixed(4)}</b></div>
+        <div>amt: <b>${(o.amount||0).toFixed(2)}</b></div>
+        <div>id: ${idHtml}</div>
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+
+  if(maxPage > 1){
+    const MAX_BUTTONS = 3;
+    let start = Math.max(1, walletOrdersPage - Math.floor(MAX_BUTTONS / 2));
+    let end = start + MAX_BUTTONS - 1;
+    if(end > maxPage){
+      end = maxPage;
+      start = Math.max(1, end - MAX_BUTTONS + 1);
+    }
+
+    html += '<div class="flex flex-wrap gap-1 mt-3">';
+    for(let p = start; p <= end; p++){
+      const active = p === walletOrdersPage;
+      html += `<button type="button" class="px-2 py-1 rounded text-[11px] ${active ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}" onclick="walletSetOrdersPage(${p})">${p}</button>`;
+    }
+    html += '</div>';
+  }
+
+  container.innerHTML = html;
+}
+
+function walletSetOrdersPage(page){
+  walletOrdersPage = parseInt(page, 10) || 1;
+  walletRenderOrders(document.getElementById('wallet-orders'));
+}
+
 function renderWallet(data){
   const balEl = document.getElementById('wallet-balance');
-  const posEl = document.getElementById('wallet-positions');
   const ordEl = document.getElementById('wallet-orders');
-  if(!balEl || !posEl || !ordEl) return;
+  if(!balEl || !ordEl) return;
 
   const balance = data?.balance || {};
-  const positions = Array.isArray(data?.positions) ? data.positions : [];
   const orders = Array.isArray(data?.orders) ? data.orders : [];
 
   // Helper to normalize USDC balance (same as js_poly.js)
@@ -378,64 +437,8 @@ function renderWallet(data){
   };
   balEl.innerHTML = friendlyBalance || '<div class="text-slate-500 text-xs">No balance data.</div>';
 
-  if(!positions.length){
-    posEl.innerHTML = '<div class="text-slate-500 text-xs">No open positions</div>';
-  } else {
-    let html = '<div class="space-y-2">';
-    positions.forEach(p=>{
-      const resolved = (p.resolved_outcome||'').toUpperCase();
-      const side = (p.outcome_side||'').toUpperCase();
-      let badge = '';
-      if(resolved && side){
-        if(resolved === side){
-          badge = `<span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-green-900 text-green-300">WIN</span>`;
-        } else {
-          badge = `<span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-900 text-red-300">LOST</span>`;
-        }
-      }
-      html += `<div class="p-2 rounded" style="background:#0f172a;border:1px solid #334155">
-        <div class="flex items-center justify-between">
-          <div class="text-xs font-semibold">${p.slug}${badge}</div>
-          <div class="text-[11px] text-slate-500">${side}</div>
-        </div>
-        <div class="text-[11px] text-slate-400">${side}</div>
-        <div class="grid grid-cols-3 gap-2 text-[11px] mt-1">
-          <div>shares: <b>${(p.shares||0).toFixed(4)}</b></div>
-          <div>avg: <b>${(p.avg_price||0).toFixed(4)}</b></div>
-          <div>cost: <b>$${(p.total_cost||0).toFixed(2)}</b></div>
-        </div>
-      </div>`;
-    });
-    html += '</div>';
-    posEl.innerHTML = html;
-  }
-
-  if(!orders.length){
-    ordEl.innerHTML = '<div class="text-slate-500 text-xs">No recent orders</div>';
-  } else {
-    let html = '<div class="space-y-2">';
-    orders.forEach(o=>{
-      const fullId = o.clob_order_id || '';
-      const shortId = fullId ? fullId.slice(0, 8) : '-';
-      const idHtml = fullId
-        ? `<span class="flex items-center gap-1"><b>${shortId}</b><button onclick="navigator.clipboard.writeText('${fullId}')" title="Copy full ID" style="background:none;border:none;color:#60a5fa;cursor:pointer;padding:0;font-size:12px;line-height:1">📋</button></span>`
-        : '-';
-      html += `<div class="p-2 rounded" style="background:#0f172a;border:1px solid #334155">
-        <div class="flex items-center justify-between">
-          <div class="text-xs font-semibold">${o.side} ${o.outcome_side || ''}</div>
-          <div class="text-[11px] text-slate-500">${o.clob_status || ''}</div>
-        </div>
-        <div class="text-[11px] text-slate-400">${o.slug}</div>
-        <div class="grid grid-cols-3 gap-2 text-[11px] mt-1">
-          <div>price: <b>${(o.price||0).toFixed(4)}</b></div>
-          <div>amt: <b>${(o.amount||0).toFixed(2)}</b></div>
-          <div>id: ${idHtml}</div>
-        </div>
-      </div>`;
-    });
-    html += '</div>';
-    ordEl.innerHTML = html;
-  }
+  walletOrdersCache = orders.slice();
+  walletRenderOrders(ordEl);
 }
 
 // ===== BACKTEST =====

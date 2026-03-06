@@ -16,8 +16,20 @@ let polyAutopredictLastTriggeredForEndedTs = null;
 
 let polyAutopredictStateLoaded = false;
 
-let polyMarketsPage = 1;
+const POLY_MARKETS_PAGE_KEY = 'poly_markets_page_v1';
+function _loadStoredMarketsPage(){
+  try{
+    const raw = localStorage.getItem(POLY_MARKETS_PAGE_KEY);
+    const num = parseInt(raw || '1', 10);
+    if(Number.isFinite(num) && num >= 1) return num;
+  }catch(e){/* ignore */}
+  return 1;
+}
+
+let polyMarketsPage = _loadStoredMarketsPage();
 const POLY_MARKETS_PER_PAGE = 20;
+let polyMarketsKnownMaxPage = polyMarketsPage;
+let polyMarketsReachedLastPage = false;
 
 let polyMarketsCache = null;
 let polyMarketsWithPosCache = null;
@@ -84,6 +96,11 @@ let polyPredUpdatesPollTimer = null;
 let polyPredUpdatesInFlight = false;
 
 let polyEmulateDown = false;
+
+let polyBetSizeRequestPollTimer = null;
+let polyBetSizePendingState = null;
+let polyBetSizePollInFlight = false;
+let polyBetSizeCountdownTimer = null;
 
 function polyGetPredUpdatesCursor(){
   try{
@@ -204,6 +221,7 @@ async function polyLoadLiveTradeSettings(){
     const data = await res.json();
     const normalized = polyPersistLiveTradeSettings(data);
     polyApplyLiveTradeSettingsToUI(normalized);
+    setTimeout(() => { try{ polyFetchBetSizeRequestState(); }catch(e){} }, 0);
     return normalized;
   }catch(e){
     console.error('polyLoadLiveTradeSettings error:', e);
@@ -252,9 +270,29 @@ async function polySaveLiveTradeSettings(){
     });
     if(!res.ok) throw new Error(`save failed (${res.status})`);
     const saved = await res.json();
+    const status = (saved && saved.status) ? saved.status : 'saved';
+    if(status === 'pending'){
+      polyHandleBetSizeRequestState(saved);
+      if(msgEl) msgEl.innerHTML = '<span class="text-amber-300">Ожидание подтверждения…</span>';
+      return;
+    }
+    if(status === 'saved' && saved.settings){
+      const normalized = polyPersistLiveTradeSettings(saved.settings);
+      polyApplyLiveTradeSettingsToUI(normalized);
+      polyHandleBetSizeRequestState({status:'none'});
+      if(msgEl) msgEl.innerHTML = '<span class="text-green-300">Сохранено</span>';
+      return;
+    }
+    if(status === 'pending_request' && saved.request){
+      polyHandleBetSizeRequestState(saved);
+      if(msgEl) msgEl.innerHTML = '<span class="text-amber-300">Запрос уже в ожидании</span>';
+      return;
+    }
+    // fallback: treat as settings payload
     const normalized = polyPersistLiveTradeSettings(saved);
     polyApplyLiveTradeSettingsToUI(normalized);
-    if(msgEl) msgEl.innerHTML = '<span class="text-green-300">Saved</span>';
+    polyHandleBetSizeRequestState({status:'none'});
+    if(msgEl) msgEl.innerHTML = '<span class="text-green-300">Обновлено</span>';
   }catch(e){
     console.error('polySaveLiveTradeSettings error:', e);
     const fallback = polyPersistLiveTradeSettings(payload);
@@ -263,11 +301,154 @@ async function polySaveLiveTradeSettings(){
   }
 }
 
+function polySetBetSizePendingState(state){
+  polyBetSizePendingState = state || null;
+}
+
+function polyStopBetSizeRequestPoll(){
+  if(polyBetSizeRequestPollTimer){
+    clearInterval(polyBetSizeRequestPollTimer);
+    polyBetSizeRequestPollTimer = null;
+  }
+  polyBetSizePollInFlight = false;
+}
+
+function polyEnsureBetSizeRequestPoll(){
+  if(polyBetSizeRequestPollTimer || !polyBetSizePendingState) return;
+  polyBetSizeRequestPollTimer = setInterval(() => {
+    try{ polyFetchBetSizeRequestState(); }catch(e){}
+  }, 5000);
+}
+
+function polyStartBetSizeCountdown(ttl){
+  const countdownEl = document.getElementById('poly-live-confirm-countdown');
+  if(polyBetSizeCountdownTimer){
+    clearInterval(polyBetSizeCountdownTimer);
+    polyBetSizeCountdownTimer = null;
+  }
+  if(!countdownEl || !Number.isFinite(ttl) || ttl <= 0){
+    if(countdownEl) countdownEl.textContent = '';
+    return;
+  }
+  let remaining = Math.max(0, Math.floor(ttl));
+  const render = () => {
+    if(!countdownEl) return;
+    countdownEl.textContent = `${remaining}s`;
+  };
+  render();
+  polyBetSizeCountdownTimer = setInterval(() => {
+    remaining -= 1;
+    if(remaining <= 0){
+      clearInterval(polyBetSizeCountdownTimer);
+      polyBetSizeCountdownTimer = null;
+      render();
+      return;
+    }
+    render();
+  }, 1000);
+}
+
+function polyRenderBetSizePendingMessage(state){
+  const msgEl = document.getElementById('poly-live-settings-msg');
+  const bannerEl = document.getElementById('poly-live-confirm-banner');
+  const detailsEl = document.getElementById('poly-live-confirm-details');
+  if(!msgEl) return;
+  if(!state){
+    msgEl.innerHTML = '';
+    if(bannerEl) bannerEl.classList.add('hidden');
+    if(detailsEl) detailsEl.textContent = '';
+    polyStartBetSizeCountdown(0);
+    return;
+  }
+  const status = state.status || 'pending';
+  if(status === 'pending'){
+    msgEl.innerHTML = '<span class="text-amber-300">Ожидание подтверждения (до 60 секунд)…</span>';
+    if(bannerEl) bannerEl.classList.remove('hidden');
+    if(detailsEl){
+      const req = state.requested_bet_size ? Number(state.requested_bet_size) : null;
+      const prev = state.previous_bet_size ? Number(state.previous_bet_size) : null;
+      const delta = (req!==null && prev!==null) ? (req - prev) : null;
+      const deltaStr = delta !== null ? ` (${delta>=0?'+':''}${delta.toFixed(2)})` : '';
+      detailsEl.textContent = `Новый размер: ${req?.toFixed ? req.toFixed(2) : req || '?'} $${deltaStr}`;
+    }
+    polyStartBetSizeCountdown(state.expires_in_sec ?? 60);
+  }else if(status === 'approved'){
+    msgEl.innerHTML = '<span class="text-green-300">Размер ставки обновлён</span>';
+    if(bannerEl) bannerEl.classList.add('hidden');
+    if(detailsEl) detailsEl.textContent = '';
+    polyStartBetSizeCountdown(0);
+  }else if(status === 'rejected'){
+    msgEl.innerHTML = '<span class="text-red-300">Запрос отклонён</span>';
+    if(bannerEl) bannerEl.classList.add('hidden');
+    if(detailsEl) detailsEl.textContent = '';
+    polyStartBetSizeCountdown(0);
+  }else if(status === 'expired'){
+    msgEl.innerHTML = '<span class="text-red-300">Запрос отменён: нет подтверждения</span>';
+    if(bannerEl) bannerEl.classList.add('hidden');
+    if(detailsEl) detailsEl.textContent = '';
+    polyStartBetSizeCountdown(0);
+  }else{
+    msgEl.innerHTML = '';
+    if(bannerEl) bannerEl.classList.add('hidden');
+    if(detailsEl) detailsEl.textContent = '';
+    polyStartBetSizeCountdown(0);
+  }
+}
+
+function polyHandleBetSizeRequestState(payload){
+  if(!payload || payload.status === 'none' || !payload.request){
+    polySetBetSizePendingState(null);
+    polyStopBetSizeRequestPoll();
+    polyRenderBetSizePendingMessage(null);
+    return;
+  }
+  const req = payload.request || {};
+  req.status = req.status || payload.status;
+  const status = req.status || 'pending';
+  polySetBetSizePendingState(req);
+  polyRenderBetSizePendingMessage(req);
+  if(status === 'pending'){
+    polyEnsureBetSizeRequestPoll();
+  }else{
+    polyStopBetSizeRequestPoll();
+    if(status === 'approved'){
+      setTimeout(() => { try{ polyLoadLiveTradeSettings(); }catch(e){} }, 200);
+    }
+  }
+}
+
+async function polyFetchBetSizeRequestState(){
+  if(polyBetSizePollInFlight) return;
+  polyBetSizePollInFlight = true;
+  try{
+    const res = await fetch(API + '/api/poly/live/trade_settings/request');
+    if(res.ok){
+      const data = await res.json();
+      polyHandleBetSizeRequestState(data);
+    }
+  }catch(e){
+    // ignore
+  }
+  polyBetSizePollInFlight = false;
+}
+
 const POLY_LAST_MARKET_KEY = 'poly_last_selected_market_slug_v1';
 
-function polyMarketsPrevPage(){
-  polyMarketsPage = Math.max(1, polyMarketsPage - 1);
+function polyPersistMarketsPage(page){
+  try{ localStorage.setItem(POLY_MARKETS_PAGE_KEY, String(page)); }catch(e){/* ignore */}
+}
+
+function polyGoToMarketsPage(page){
+  const nextPage = Math.max(1, parseInt(page, 10) || 1);
+  if(nextPage === polyMarketsPage) return;
+  polyMarketsPage = nextPage;
+  polyPersistMarketsPage(polyMarketsPage);
   loadPolyMarkets();
+}
+
+function polyMarketsPrevPage(){
+  if(polyMarketsPage <= 1) return;
+  polyGoToMarketsPage(polyMarketsPage - 1);
 }
 
 async function polyPlaceLiveOrderAfterPrediction(slug, prediction, batch_id){
@@ -284,18 +465,19 @@ async function polyPlaceLiveOrderAfterPrediction(slug, prediction, batch_id){
     const bet_size_usd = Number.isFinite(Number(s.bet_size_usd)) ? Number(s.bet_size_usd) : POLY_LIVE_TRADE_DEFAULTS.bet_size_usd;
     const price_cap_cents = Math.min(52, Math.max(1, Number(s.price_cap_cents||52)));
     const price_threshold = price_cap_cents / 100.0;
+    console.log('[live_buy] settings', {bet_size_usd, price_cap_cents, price_threshold});
 
     // map prediction to outcome asset
     const pair = findUpDownOutcomes(polySelectedMarket);
     if(!pair){
-      console.warn('[live_buy] skip: missing up/down outcomes', {slug, prediction});
+      console.warn('[live_buy] skip: missing up/down outcomes', {slug, prediction, market: polySelectedMarket});
       return {success:false, error:'Need UP/DOWN outcomes'};
     }
     const pred = String(prediction||'').toUpperCase();
     const outcome_side = (pred === 'DOWN') ? 'DOWN' : 'UP';
     const o = (outcome_side === 'DOWN') ? pair.down : pair.up;
     if(!o || !o.asset_id){
-      console.warn('[live_buy] skip: outcome asset_id not found', {slug, outcome_side});
+      console.warn('[live_buy] skip: outcome asset_id not found', {slug, outcome_side, pair});
       return {success:false, error:'Outcome asset_id not found'};
     }
 
@@ -436,8 +618,25 @@ async function loadLiveOrders(){
 }
 
 function polyMarketsNextPage(){
-  polyMarketsPage = polyMarketsPage + 1;
-  loadPolyMarkets();
+  if(polyMarketsReachedLastPage) return;
+  polyGoToMarketsPage(polyMarketsPage + 1);
+}
+
+function polyRenderMarketsPageButtons(){
+  const container = document.getElementById('poly-markets-page-buttons');
+  if(!container){ return; }
+  let maxPage = polyMarketsKnownMaxPage;
+  if(!polyMarketsReachedLastPage){
+    maxPage = Math.max(maxPage, polyMarketsPage + 2);
+  }
+  maxPage = Math.max(maxPage, polyMarketsPage);
+  const start = Math.max(1, polyMarketsPage - 2);
+  let html = '';
+  for(let p = start; p <= maxPage; p++){
+    const active = p === polyMarketsPage;
+    html += `<button type="button" class="text-[11px] px-2 py-1 rounded ${active ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}" onclick="polyGoToMarketsPage(${p})">${p}</button>`;
+  }
+  container.innerHTML = html;
 }
 
 async function renderPolyMarkets(){
@@ -448,10 +647,14 @@ async function renderPolyMarkets(){
   const prevBtn = document.getElementById('poly-markets-prev');
   const nextBtn = document.getElementById('poly-markets-next');
   if(prevBtn) prevBtn.disabled = polyMarketsPage <= 1;
-  if(nextBtn) nextBtn.disabled = data.length < POLY_MARKETS_PER_PAGE;
+  if(nextBtn) nextBtn.disabled = polyMarketsReachedLastPage;
 
   const pgEl = document.getElementById('poly-markets-page');
-  if(pgEl) pgEl.textContent = `Page ${polyMarketsPage}`;
+  if(pgEl){
+    const suffix = polyMarketsReachedLastPage ? ' (last page)' : '';
+    pgEl.textContent = `Page ${polyMarketsPage}${suffix}`;
+  }
+  polyRenderMarketsPageButtons();
 
   if(!data.length){
     el.innerHTML = '<div class="text-slate-500 text-xs">No markets.</div>';
@@ -526,9 +729,6 @@ async function renderPolyMarkets(){
     const dot = isActive ? '<span title="active" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:6px"></span>' : '';
     const posDot = marketsWithPos.has(m.slug) ? '<span title="has position" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#22c55e;margin-right:6px"></span>' : '';
     const isSelected = polySelectedMarketSlug === m.slug;
-    let predTint = '';
-    if(m.pred_badge === 'green') predTint = 'style="background:rgba(34,197,94,0.08)"';
-    else if(m.pred_badge === 'red') predTint = 'style="background:rgba(239,68,68,0.08)"';
     const selectedClass = isSelected ? 'bg-blue-900' : '';
 
     const hasSuccessfulBuy = !!ordersBySlug[m.slug];
@@ -536,7 +736,7 @@ async function renderPolyMarkets(){
       ? '<span title="has successful buy order" style="display:inline-block;width:6px;height:6px;background:#fbbf24;border:1px solid rgba(251,191,36,0.5);margin-right:6px;vertical-align:middle"></span>'
       : '';
 
-    html += `<tr ${predTint} class="cursor-pointer ${selectedClass}" data-slug="${m.slug}" onclick="selectPolyMarket('${m.slug}')">`
+    html += `<tr class="cursor-pointer ${selectedClass}" data-slug="${m.slug}" onclick="selectPolyMarket('${m.slug}')">`
       + `<td class="text-xs text-slate-400" style="white-space:nowrap">${dot}${posDot}${buyIndicator}${dateStr} <span class="font-mono text-blue-300">${slugSuffix}</span></td>`
       + `<td>${stHtml}</td>`
       + '</tr>';
@@ -583,8 +783,11 @@ function startLiveMarketPoll(){
       const res = await fetch(API+`/api/poly/markets?limit=${POLY_MARKETS_PER_PAGE}&offset=0`);
       const data = await res.json();
       if(!Array.isArray(data) || !data.length) return;
-      polyMarketsCache = data;
-      renderPolyMarkets();
+
+      if(polyMarketsPage === 1){
+        polyMarketsCache = data;
+        renderPolyMarkets();
+      }
 
       const liveMarket = data.find(m => polyActiveTs !== null && (m.ts||0) === polyActiveTs && !m.closed);
       if(liveMarket){
@@ -1041,12 +1244,18 @@ async function loadPolyMarkets(){
     const marketsWithPosRaw = await posRes.json();
     const marketsWithPos = new Set(Array.isArray(marketsWithPosRaw) ? marketsWithPosRaw : []);
     if(!Array.isArray(data)||!data.length){
+      polyMarketsReachedLastPage = true;
+      polyRenderMarketsPageButtons();
       el.textContent='No markets found';
       return;
     }
+    polyMarketsReachedLastPage = data.length < POLY_MARKETS_PER_PAGE;
+    polyMarketsKnownMaxPage = Math.max(polyMarketsKnownMaxPage, polyMarketsPage + (polyMarketsReachedLastPage ? 0 : 1));
+    polyPersistMarketsPage(polyMarketsPage);
     polyMarketsCache=data;
     polyMarketsWithPosCache = marketsWithPos;
     renderPolyMarkets();
+    polyRenderMarketsPageButtons();
 
     // Fallback: if a FUTURE market just gained a defined prediction (UP/DOWN) within the last 60s,
     // show confirmation even if the prediction was produced server-side (not by this UI tab).
@@ -1525,6 +1734,10 @@ function polyShowPredDetails(){
 function polyHidePredDetails(){
   const popup = document.getElementById('poly-pred-popup');
   if(popup) popup.classList.add('hidden');
+  // Clear bet size confirmation status when the Live Trade Settings panel is hidden
+  polySetBetSizePendingState(null);
+  polyStopBetSizeRequestPoll();
+  polyRenderBetSizePendingMessage(null);
 }
 
 async function polyLoadPredictionDetails(slug){

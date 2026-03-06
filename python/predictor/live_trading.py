@@ -34,9 +34,40 @@ trading_client = PolymarketClient()
 
 MAX_LIMIT_PRICE_USD = 0.53
 
+_last_collateral_balance_usd: Optional[float] = None
+
+
+def _set_cached_collateral_balance_usd(value: Optional[float]) -> None:
+    global _last_collateral_balance_usd
+    if value is None:
+        return
+    try:
+        _last_collateral_balance_usd = float(value)
+    except Exception:
+        pass
+
+
+def get_cached_collateral_balance_usd() -> Optional[float]:
+    return _last_collateral_balance_usd
+
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
+
+
+async def refresh_collateral_balance(loop: Optional[asyncio.AbstractEventLoop] = None) -> Optional[float]:
+    """Fetch collateral balance from Polymarket and update the cached value."""
+    loop = loop or asyncio.get_event_loop()
+    try:
+        balance_allowance = await loop.run_in_executor(None, trading_client.get_balance_allowance)
+    except Exception as exc:
+        logger.warning("refresh_collateral_balance: failed to fetch balance_allowance: %s", exc)
+        return None
+
+    value = _extract_collateral_balance_usd(balance_allowance)
+    if value is None:
+        logger.debug("refresh_collateral_balance: unable to parse collateral balance from response")
+    return value
 
 
 def _extract_collateral_balance_usd(balance_allowance: Any) -> Optional[float]:
@@ -81,6 +112,7 @@ def _extract_collateral_balance_usd(balance_allowance: Any) -> Optional[float]:
                     try:
                         v = _norm_usdc(coll[k])
                         if v is not None:
+                            _set_cached_collateral_balance_usd(v)
                             return v
                     except Exception:
                         pass
@@ -91,6 +123,7 @@ def _extract_collateral_balance_usd(balance_allowance: Any) -> Optional[float]:
                     try:
                         nv = _norm_usdc(v)
                         if nv is not None:
+                            _set_cached_collateral_balance_usd(nv)
                             return nv
                     except Exception:
                         pass
@@ -98,6 +131,7 @@ def _extract_collateral_balance_usd(balance_allowance: Any) -> Optional[float]:
         if isinstance(coll, (int, float, str)):
             nv = _norm_usdc(coll)
             if nv is not None:
+                _set_cached_collateral_balance_usd(nv)
                 return nv
     except Exception:
         return None

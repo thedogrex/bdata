@@ -29,7 +29,10 @@
             <button id="poly-markets-prev" onclick="polyMarketsPrevPage()" class="btn btn-slate text-xs">Prev</button>
             <button id="poly-markets-next" onclick="polyMarketsNextPage()" class="btn btn-slate text-xs">Next</button>
           </div>
-          <div id="poly-markets-page" class="text-xs text-slate-500"></div>
+          <div class="flex flex-col items-end gap-1">
+            <div id="poly-markets-page" class="text-xs text-slate-500"></div>
+            <div id="poly-markets-page-buttons" class="flex gap-1"></div>
+          </div>
         </div>
         <div id="poly-markets" class="text-sm text-slate-400">Loading...</div>
       </div>
@@ -144,6 +147,13 @@
                       <button onclick="polySaveLiveTradeSettings()" class="btn btn-primary text-xs">Save</button>
                     </div>
                     <div id="poly-live-settings-msg" class="text-[11px] text-slate-500 mt-2"></div>
+                    <div id="poly-live-confirm-banner" class="hidden mt-3 rounded-md border border-amber-500/60 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-200 flex flex-col gap-1">
+                      <div class="flex items-center justify-between text-[12px] font-semibold">
+                        <span>Ожидаем подтверждение</span>
+                        <span id="poly-live-confirm-countdown" class="font-mono text-[12px]">60с</span>
+                      </div>
+                      <div id="poly-live-confirm-details" class="text-[11px] text-amber-100/80"></div>
+                    </div>
                   </div>
                 </div>
 

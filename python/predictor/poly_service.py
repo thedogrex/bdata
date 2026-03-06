@@ -1,8 +1,9 @@
 import asyncio
 import json
+import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -10,12 +11,29 @@ import requests
 from db import DbProvider
 
 import app.config as config
+from predictor import telegram_bot
 from predictor.poly_client import PolymarketClient, MarketData
 
 
 db = DbProvider()
+logger = logging.getLogger("poly_service")
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[%(name)s %(levelname)s %(asctime)s] %(message)s", datefmt="%H:%M:%S"))
+    logger.addHandler(_handler)
+logger.setLevel(logging.INFO)
 
 MAX_PRICE_CAP_CENTS = 53
+BET_SIZE_CONFIRM_TTL_SEC = 60
+MSK_UTC_OFFSET_HOURS = 3
+DAILY_START_HOUR_MSK = 8
+DAILY_REPORT_MINUTE_MSK = 5
+
+_current_bet_size_request: Optional[Dict[str, Any]] = None
+_request_cleanup_deadline: Optional[datetime] = None
+_daily_balance_date: Optional[date] = None
+_daily_balance_start_usd: Optional[float] = None
+_last_balance_report_day: Optional[date] = None
 
 DEFAULT_LIVE_TRADE_SETTINGS = {
     "auto_place": False,
@@ -26,6 +44,335 @@ DEFAULT_LIVE_TRADE_SETTINGS = {
 
 def _now_ts() -> int:
     return int(time.time())
+
+
+def _utcnow() -> datetime:
+    return datetime.utcnow()
+
+
+def _new_request_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _current_request_status() -> Optional[str]:
+    global _current_bet_size_request
+    if not _current_bet_size_request:
+        return None
+    status = _current_bet_size_request.get("status")
+    if status in ("approved", "rejected", "expired"):
+        return status
+    expires_at: Optional[datetime] = _current_bet_size_request.get("expires_at")
+    if expires_at and expires_at < _utcnow():
+        _current_bet_size_request["status"] = "expired"
+        _current_bet_size_request.setdefault("resolved_at", _utcnow())
+        return "expired"
+    return status or "pending"
+
+
+def _schedule_cleanup(seconds: int = 30) -> None:
+    global _request_cleanup_deadline
+    _request_cleanup_deadline = _utcnow() + timedelta(seconds=max(1, int(seconds)))
+
+
+def _cleanup_request_if_needed(force: bool = False) -> None:
+    global _current_bet_size_request, _request_cleanup_deadline
+    if not _current_bet_size_request:
+        _request_cleanup_deadline = None
+        return
+    status = _current_request_status()
+    if status == "pending" and not force:
+        return
+    deadline = _request_cleanup_deadline
+    if not deadline:
+        if status in ("approved", "rejected", "expired"):
+            _schedule_cleanup(5)
+            deadline = _request_cleanup_deadline
+        else:
+            return
+    if force or (deadline and deadline <= _utcnow()):
+        _current_bet_size_request = None
+        _request_cleanup_deadline = None
+
+
+def _reset_request_if_done() -> None:
+    _cleanup_request_if_needed(force=True)
+
+
+def _get_cached_balance_display() -> str:
+    from predictor import live_trading
+
+    bal = live_trading.get_cached_collateral_balance_usd()
+    if bal is None:
+        return "н/д"
+    return f"{bal:.2f}"
+
+
+def _msk_now() -> datetime:
+    return datetime.utcnow() + timedelta(hours=MSK_UTC_OFFSET_HOURS)
+
+
+def _balance_day_for_time(now_msk: Optional[datetime] = None) -> date:
+    now = now_msk or _msk_now()
+    day = now.date()
+    if now.hour < DAILY_START_HOUR_MSK:
+        day = day - timedelta(days=1)
+    return day
+
+
+async def _ensure_daily_balance_state(current_balance: Optional[float]) -> None:
+    global _daily_balance_date, _daily_balance_start_usd
+
+    day = _balance_day_for_time()
+    if _daily_balance_date == day and _daily_balance_start_usd is not None:
+        return
+
+    row = await db.fetchone(
+        "SELECT start_balance_usd FROM poly_daily_balance_digest WHERE digest_date=%s",
+        (day,),
+    )
+
+    if row and row[0] is not None:
+        _daily_balance_date = day
+        _daily_balance_start_usd = float(row[0])
+        return
+
+    if current_balance is None:
+        return
+
+    start_value = float(current_balance)
+    if row:
+        await db.execute(
+            "UPDATE poly_daily_balance_digest SET start_balance_usd=%s WHERE digest_date=%s",
+            (start_value, day),
+        )
+    else:
+        await db.execute(
+            "INSERT INTO poly_daily_balance_digest (digest_date, start_balance_usd) VALUES (%s, %s)",
+            (day, start_value),
+        )
+
+    _daily_balance_date = day
+    _daily_balance_start_usd = start_value
+
+
+async def _get_start_balance_for_day(day: date) -> Optional[float]:
+    row = await db.fetchone(
+        "SELECT start_balance_usd FROM poly_daily_balance_digest WHERE digest_date=%s",
+        (day,),
+    )
+    if not row or row[0] is None:
+        return None
+    return float(row[0])
+
+
+async def _was_report_sent(day: date) -> bool:
+    row = await db.fetchone(
+        "SELECT report_sent_at FROM poly_daily_balance_digest WHERE digest_date=%s",
+        (day,),
+    )
+    return bool(row and row[0])
+
+
+async def _mark_report_sent(day: date) -> None:
+    await db.execute(
+        """
+        INSERT INTO poly_daily_balance_digest (digest_date, start_balance_usd, report_sent_at)
+        VALUES (%s, %s, UTC_TIMESTAMP())
+        ON DUPLICATE KEY UPDATE report_sent_at=UTC_TIMESTAMP()
+        """,
+        (day, None),
+    )
+
+
+async def _maybe_send_daily_balance_report() -> None:
+    global _last_balance_report_day
+
+    now_msk = _msk_now()
+    if now_msk.hour < DAILY_START_HOUR_MSK or (
+        now_msk.hour == DAILY_START_HOUR_MSK and now_msk.minute < DAILY_REPORT_MINUTE_MSK
+    ):
+        return
+
+    current_day = _balance_day_for_time(now_msk)
+    report_day = current_day - timedelta(days=1)
+    if _last_balance_report_day == report_day:
+        return
+
+    if await _was_report_sent(report_day):
+        _last_balance_report_day = report_day
+        return
+
+    prev_start = await _get_start_balance_for_day(report_day)
+    current_start = await _get_start_balance_for_day(current_day)
+    if prev_start is None or current_start is None:
+        return
+
+    delta = current_start - prev_start
+    date_label = report_day.strftime("%d.%m.%Y")
+    text = (
+        f"Дневной отчёт ({date_label} МСК)\n"
+        f"Старт предыдущего дня: {prev_start:.2f}$\n"
+        f"Старт сегодняшнего дня: {current_start:.2f}$\n"
+        f"Δ за день: {delta:+.2f}$"
+    )
+    try:
+        await telegram_bot.notify_info_chats(text)
+        await _mark_report_sent(report_day)
+        _last_balance_report_day = report_day
+    except Exception as exc:
+        logger.warning("Failed to send daily balance report: %s", exc)
+
+
+def get_bet_size_request_state() -> Optional[Dict[str, Any]]:
+    _cleanup_request_if_needed()
+    status = _current_request_status()
+    if not status:
+        return None
+    req = dict(_current_bet_size_request or {})
+    if not req:
+        return None
+    expires_at = req.get("expires_at")
+    ttl_sec = None
+    if isinstance(expires_at, datetime):
+        ttl_sec = max(0, int((expires_at - _utcnow()).total_seconds()))
+    return {
+        "id": req.get("id"),
+        "status": status,
+        "requested_bet_size": req.get("requested_bet_size"),
+        "previous_bet_size": req.get("previous_bet_size"),
+        "expires_in_sec": ttl_sec,
+        "requested_at": req.get("requested_at").isoformat() if isinstance(req.get("requested_at"), datetime) else None,
+        "actor": req.get("actor"),
+        "resolved_at": req.get("resolved_at").isoformat() if isinstance(req.get("resolved_at"), datetime) else None,
+        "reason": req.get("reason"),
+    }
+
+
+async def _notify_admin_request(req: Dict[str, Any]) -> None:
+    balance_display = req.get("balance_display", "н/д")
+    text = (
+        f"Текущий баланс: {balance_display}$\n"
+        f"Вы хотите поменять размер ставки на {req.get('requested_bet_size'):,.2f}$?"
+    )
+    keyboard = telegram_bot.build_bet_size_keyboard(req["id"])
+    await telegram_bot.notify_admin(text, reply_markup=keyboard)
+
+
+async def _notify_info_change(bet_size: float, balance_display: str) -> None:
+    text = (
+        f"Текущий баланс: {balance_display}$\n"
+        f"Размер ставки был изменён на {bet_size:.2f}$"
+    )
+    await telegram_bot.notify_info_chats(text)
+
+
+def _has_pending_request() -> bool:
+    status = _current_request_status()
+    return status == "pending"
+
+
+async def request_bet_size_change(auto_place: bool, bet_size_usd: float, price_cap_cents: int) -> Dict[str, Any]:
+    global _current_bet_size_request
+
+    current_settings = await get_live_trade_settings()
+    prev_bet = float(current_settings.get("bet_size_usd", DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"]))
+    bet_changed = float(bet_size_usd) != float(prev_bet)
+
+    if not bet_changed:
+        saved = await save_live_trade_settings(
+            auto_place=auto_place,
+            bet_size_usd=bet_size_usd,
+            price_cap_cents=price_cap_cents,
+        )
+        _reset_request_if_done()
+        return {"status": "saved", "settings": saved}
+
+    if _has_pending_request():
+        return {"status": "pending", "request": get_bet_size_request_state()}
+    _cleanup_request_if_needed(force=True)
+
+    request_id = _new_request_id()
+    expires_at = _utcnow() + timedelta(seconds=BET_SIZE_CONFIRM_TTL_SEC)
+    req = {
+        "id": request_id,
+        "requested_bet_size": float(bet_size_usd),
+        "previous_bet_size": prev_bet,
+        "status": "pending",
+        "requested_at": _utcnow(),
+        "expires_at": expires_at,
+        "actor": None,
+        "auto_place": bool(auto_place),
+        "price_cap_cents": int(price_cap_cents),
+        "balance_display": _get_cached_balance_display(),
+    }
+    _current_bet_size_request = req
+    try:
+        await _notify_admin_request(req)
+    except Exception as exc:
+        logger.error("Failed to notify admin: %s", exc)
+    return {
+        "status": "pending",
+        "request": get_bet_size_request_state(),
+    }
+
+
+async def approve_bet_size_request(request_id: str, actor: Optional[str] = None) -> Dict[str, Any]:
+    global _current_bet_size_request
+    if not _current_bet_size_request or _current_bet_size_request.get("id") != request_id:
+        return {"status": "missing"}
+    if _current_request_status() != "pending":
+        status = _current_request_status()
+        return {"status": status or "unknown"}
+
+    _current_bet_size_request["status"] = "approved"
+    _current_bet_size_request["actor"] = actor
+    _current_bet_size_request["resolved_at"] = _utcnow()
+    await save_live_trade_settings(
+        auto_place=_current_bet_size_request.get("auto_place", False),
+        bet_size_usd=float(_current_bet_size_request["requested_bet_size"]),
+        price_cap_cents=int(_current_bet_size_request.get("price_cap_cents", DEFAULT_LIVE_TRADE_SETTINGS["price_cap_cents"])),
+    )
+    try:
+        await _notify_info_change(
+            float(_current_bet_size_request["requested_bet_size"]),
+            _current_bet_size_request.get("balance_display", "н/д"),
+        )
+    except Exception as exc:
+        logger.error("Failed to send info notification: %s", exc)
+
+    _schedule_cleanup()
+    resp = get_bet_size_request_state() or {"status": "approved"}
+    return resp
+
+
+async def reject_bet_size_request(request_id: str, actor: Optional[str] = None, reason: str | None = None) -> Dict[str, Any]:
+    global _current_bet_size_request
+    if not _current_bet_size_request or _current_bet_size_request.get("id") != request_id:
+        return {"status": "missing"}
+    status = _current_request_status()
+    if status != "pending":
+        return {"status": status or "unknown"}
+
+    _current_bet_size_request["status"] = "rejected"
+    _current_bet_size_request["actor"] = actor
+    _current_bet_size_request["reason"] = reason
+    _current_bet_size_request["resolved_at"] = _utcnow()
+    _schedule_cleanup()
+    resp = get_bet_size_request_state() or {"status": "rejected"}
+    return resp
+
+
+async def cancel_bet_size_request() -> Dict[str, Any]:
+    global _current_bet_size_request
+    if not _current_bet_size_request:
+        return {"status": "missing"}
+    _current_bet_size_request["status"] = "rejected"
+    _current_bet_size_request["actor"] = "frontend"
+    _current_bet_size_request["resolved_at"] = _utcnow()
+    _current_bet_size_request.setdefault("reason", "cancelled_by_ui")
+    _schedule_cleanup()
+    resp = get_bet_size_request_state() or {"status": "rejected"}
+    return resp
 
 
 def _compute_timestamps(now: Optional[int] = None, count: int = 5) -> List[int]:
@@ -310,6 +657,8 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
     last_market_refresh = 0
     last_resolution_scan = 0
     last_active_missing_refresh = 0
+    last_balance_refresh = 0
+    last_daily_report_check = 0
     last_seen_active_ts: Optional[int] = None
     autopredicted_slugs: set = set()  # slugs we already auto-predicted
     autopredicted_ended_ts: set[int] = set()  # ended market ts we already processed
@@ -323,6 +672,30 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
             if current_time - last_market_refresh >= 60:
                 await refresh_tracked_markets()
                 last_market_refresh = current_time
+
+            # Daily balance report check (every 5 minutes 30 seconds).
+            if current_time - last_daily_report_check >= 330:
+                try:
+                    await _maybe_send_daily_balance_report()
+                except Exception as exc:
+                    logger.warning("[poll_loop] daily balance report check failed: %s", exc)
+                finally:
+                    last_daily_report_check = current_time
+
+            # Refresh cached collateral balance every 15 minutes to reuse in Telegram confirmations.
+            if current_time - last_balance_refresh >= 900:
+                try:
+                    from predictor import live_trading  # local import to avoid circular dep
+
+                    refreshed = await live_trading.refresh_collateral_balance()
+                    cached_balance = live_trading.get_cached_collateral_balance_usd()
+                    await _ensure_daily_balance_state(cached_balance)
+                    if refreshed is not None:
+                        logger.debug("[poll_loop] collateral balance refreshed: %.2f$", float(refreshed))
+                except Exception as exc:
+                    logger.warning("[poll_loop] failed to refresh collateral balance: %s", exc)
+                finally:
+                    last_balance_refresh = current_time
             
             # Get current active timestamp
             current_ts = _get_current_ts()
@@ -1356,29 +1729,36 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
         pred = str(prediction or "").upper()
         emulate_down = bool(getattr(config, "EMULATE_DOWN", False))
         if pred == "UNDEFINED" and emulate_down:
+            logger.info("[auto_trade] emulate DOWN for undefined prediction", {"slug": slug})
             pred = "DOWN"
         if pred not in ("UP", "DOWN"):
+            logger.info("[auto_trade] skip: invalid prediction", {"slug": slug, "prediction": pred})
             return
 
         live_settings = await get_live_trade_settings()
         if not live_settings.get("auto_place"):
+            logger.info("[auto_trade] skip: auto_place disabled", {"slug": slug})
             return
 
         # Trade only future markets
         m_row = await db.fetchone("SELECT ts, closed FROM poly_markets WHERE slug=%s", (slug,))
         if not m_row:
+            logger.info("[auto_trade] skip: market metadata missing", {"slug": slug})
             return
         market_ts = int(m_row[0]) if m_row[0] is not None else 0
         closed = int(m_row[1]) if len(m_row) > 1 and m_row[1] is not None else 0
         if closed:
+            logger.info("[auto_trade] skip: market already closed", {"slug": slug})
             return
         now_utc = int(time.time())
         if not (market_ts and now_utc < market_ts):
+            logger.info("[auto_trade] skip: market not in future", {"slug": slug, "market_ts": market_ts, "now": now_utc})
             return
 
         # Resolve outcome asset_id for side
         o_rows = await db.fetchall("SELECT asset_id, name FROM poly_outcomes WHERE slug=%s", (slug,))
         if not o_rows:
+            logger.info("[auto_trade] skip: no outcomes found", {"slug": slug})
             return
         up_id = None
         down_id = None
@@ -1395,6 +1775,7 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
 
         asset_id = down_id if pred == "DOWN" else up_id
         if not asset_id:
+            logger.info("[auto_trade] skip: missing asset_id for outcome", {"slug": slug, "prediction": pred})
             return
 
         # Import here to avoid circular imports
@@ -1406,7 +1787,18 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
         price_cap_cents = max(1, min(MAX_PRICE_CAP_CENTS, price_cap_cents))
         price_threshold = price_cap_cents / 100.0
 
-        await live_trading.buy_after_prediction(
+        logger.info(
+            "[auto_trade] placing order",
+            {
+                "slug": slug,
+                "prediction": pred,
+                "bet_size_usd": bet_size_usd,
+                "price_cap_cents": price_cap_cents,
+                "asset_id": asset_id,
+            },
+        )
+
+        result = await live_trading.buy_after_prediction(
             slug=slug,
             asset_id=str(asset_id),
             outcome_side=pred,
@@ -1415,11 +1807,12 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
             snapshot_price=0.0,
             price_threshold=price_threshold,
             bank_usd=None,
-            bet_size_usd=bet_size_usd,
             batch_id=None,
             template_id=None,
         )
-    except Exception:
+        logger.info("[auto_trade] order result", {"slug": slug, "result": result})
+    except Exception as e:
+        logger.exception("[auto_trade] exception", exc_info=e)
         return
 
 
@@ -2609,12 +3002,13 @@ async def get_kelly_simulation(
                 continue
 
             shares, spent, avg_fill_c = _fill_book(levels, bet)
-            fee = spent * fr
 
             if is_correct:
+                fee = spent * fr
                 profit = shares - spent - fee
             else:
-                profit = -spent - fee
+                fee = 0.0
+                profit = -spent
 
             trade_row[f"{label}_bet"]    = round(spent, 2)
             trade_row[f"{label}_shares"] = round(shares, 2)

@@ -1,4 +1,5 @@
 import os
+import json
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -40,3 +41,21 @@ EMULATE_DOWN: bool = _env_bool("EMULATE_DOWN", False)
 NEED_CONFIRMATION: bool = _env_bool("NEED_CONFIRMATION", True)
 
 BUY_MARKET: bool = _env_bool("BUY_MARKET", True)
+
+
+TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_ADMIN_CHAT_ID: str = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+TELEGRAM_PRINT_CHAT_ID: bool = _env_bool("TELEGRAM_PRINT_CHAT_ID", False)
+
+def _env_json_list(name: str) -> list[str]:
+    raw = os.getenv(name, "[]")
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [str(x) for x in data]
+    except Exception:
+        pass
+    # Support comma-separated fallback
+    return [s.strip() for s in raw.split(',') if s.strip()]
+
+TELEGRAM_INFO_CHAT_IDS: list[str] = _env_json_list("TELEGRAM_INFO_CHAT_IDS")

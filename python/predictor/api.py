@@ -4,7 +4,7 @@ import asyncio
 import pathlib
 import traceback
 from typing import Optional
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -26,6 +26,7 @@ from predictor.bruteforce import run_bruteforce, resume_bruteforce, get_default_
 from predictor.task_manager import task_mgr
 from predictor import poly_service
 from predictor import live_trading
+from predictor import telegram_bot
 import app.config as config
 
 app = FastAPI(title="Candle Predictor & Backtester", version="3.0.0")
@@ -179,6 +180,7 @@ async def startup_event():
     global poly_stop_event
     poly_stop_event = asyncio.Event()
     asyncio.create_task(poly_service.poll_loop(poly_stop_event, orderbook_interval_sec=3))
+    telegram_bot.start_polling()
 
 
 @app.on_event("shutdown")
@@ -186,6 +188,7 @@ async def shutdown_event():
     global poly_stop_event
     if poly_stop_event is not None:
         poly_stop_event.set()
+    await telegram_bot.stop_polling()
 
 
 @app.get("/api/poly/markets")
@@ -353,11 +356,24 @@ async def api_poly_get_live_trade_settings():
 
 @app.post("/api/poly/live/trade_settings")
 async def api_poly_save_live_trade_settings(req: LiveTradeSettingsRequest):
-    return await poly_service.save_live_trade_settings(
+    return await poly_service.request_bet_size_change(
         auto_place=req.auto_place,
         bet_size_usd=req.bet_size_usd,
         price_cap_cents=req.price_cap_cents,
     )
+
+
+@app.get("/api/poly/live/trade_settings/request")
+async def api_poly_bet_size_request_state():
+    state = poly_service.get_bet_size_request_state()
+    if not state:
+        return {"status": "none"}
+    return {"status": state.get("status", "pending"), "request": state}
+
+
+@app.post("/api/poly/live/trade_settings/cancel")
+async def api_poly_cancel_bet_size_request():
+    return await poly_service.cancel_bet_size_request()
 
 
 @app.get("/api/poly/prediction/{slug}")
@@ -916,3 +932,5 @@ async def admin_reload():
     global _admin_html_cache
     _admin_html_cache = None
     return {"status": "cache cleared — next GET / will rebuild"}
+
+

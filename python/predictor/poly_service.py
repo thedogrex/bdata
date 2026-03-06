@@ -15,6 +15,14 @@ from predictor.poly_client import PolymarketClient, MarketData
 
 db = DbProvider()
 
+MAX_PRICE_CAP_CENTS = 53
+
+DEFAULT_LIVE_TRADE_SETTINGS = {
+    "auto_place": False,
+    "bet_size_usd": 5.0,
+    "price_cap_cents": 52,
+}
+
 
 def _now_ts() -> int:
     return int(time.time())
@@ -483,6 +491,72 @@ async def save_settings(autopredict: bool, strategy: str, params: Optional[dict]
         (int(autopredict), strategy, params_json, int(window_size)),
     )
     return await get_settings()
+
+
+def _normalize_live_trade_settings(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    merged = dict(DEFAULT_LIVE_TRADE_SETTINGS)
+    if data:
+        merged.update({k: data.get(k) for k in merged.keys() if data.get(k) is not None})
+
+    bet_size = float(merged.get("bet_size_usd", DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"]) or DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"])
+    bet_size = max(0.0, bet_size)
+    price_cap = int(merged.get("price_cap_cents", DEFAULT_LIVE_TRADE_SETTINGS["price_cap_cents"]) or DEFAULT_LIVE_TRADE_SETTINGS["price_cap_cents"])
+    price_cap = max(1, min(MAX_PRICE_CAP_CENTS, price_cap))
+
+    return {
+        "auto_place": bool(merged.get("auto_place", False)),
+        "bet_size_usd": bet_size,
+        "price_cap_cents": price_cap,
+    }
+
+
+async def get_live_trade_settings() -> Dict[str, Any]:
+    row = await db.fetchone(
+        "SELECT auto_place, bet_size_usd, price_cap_cents FROM poly_live_trade_settings WHERE id='default'"
+    )
+    if not row:
+        return dict(DEFAULT_LIVE_TRADE_SETTINGS)
+    auto_place, bet_size, price_cap = row
+    return _normalize_live_trade_settings(
+        {
+            "auto_place": bool(auto_place),
+            "bet_size_usd": bet_size,
+            "price_cap_cents": price_cap,
+        }
+    )
+
+
+async def save_live_trade_settings(
+    auto_place: bool,
+    bet_size_usd: float,
+    price_cap_cents: int,
+) -> Dict[str, Any]:
+    normalized = _normalize_live_trade_settings(
+        {
+            "auto_place": auto_place,
+            "bet_size_usd": bet_size_usd,
+            "price_cap_cents": price_cap_cents,
+        }
+    )
+
+    await db.execute(
+        """
+        INSERT INTO poly_live_trade_settings
+            (id, auto_place, bet_size_usd, price_cap_cents)
+        VALUES ('default', %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            auto_place=VALUES(auto_place),
+            bet_size_usd=VALUES(bet_size_usd),
+            price_cap_cents=VALUES(price_cap_cents)
+        """,
+        (
+            int(bool(normalized["auto_place"])),
+            float(normalized["bet_size_usd"]),
+            int(normalized["price_cap_cents"]),
+        ),
+    )
+
+    return await get_live_trade_settings()
 
 
 async def list_markets(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
@@ -1286,6 +1360,10 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
         if pred not in ("UP", "DOWN"):
             return
 
+        live_settings = await get_live_trade_settings()
+        if not live_settings.get("auto_place"):
+            return
+
         # Trade only future markets
         m_row = await db.fetchone("SELECT ts, closed FROM poly_markets WHERE slug=%s", (slug,))
         if not m_row:
@@ -1322,18 +1400,22 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
         # Import here to avoid circular imports
         from predictor import live_trading
 
+        bet_size_usd = float(live_settings.get("bet_size_usd", DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"]) or DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"])
+        bet_size_usd = max(0.0, bet_size_usd)
+        price_cap_cents = int(live_settings.get("price_cap_cents", 52) or 52)
+        price_cap_cents = max(1, min(MAX_PRICE_CAP_CENTS, price_cap_cents))
+        price_threshold = price_cap_cents / 100.0
+
         await live_trading.buy_after_prediction(
             slug=slug,
             asset_id=str(asset_id),
             outcome_side=pred,
             prediction_direction=pred,
-            amount_usd=0.0,
+            amount_usd=bet_size_usd,
             snapshot_price=0.0,
-            price_threshold=0.52,
+            price_threshold=price_threshold,
             bank_usd=None,
-            bank_pct=0.05,
-            min_buy_usd=3.0,
-            max_buy_usd=20.0,
+            bet_size_usd=bet_size_usd,
             batch_id=None,
             template_id=None,
         )

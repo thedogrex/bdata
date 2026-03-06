@@ -73,7 +73,11 @@ function polyDesktopNotify(title, body){
 const POLY_PRED_SETTINGS_KEY = 'poly_pred_settings_v1';
 
 const POLY_LIVE_TRADE_SETTINGS_KEY = 'poly_live_trade_settings_v1';
-const POLY_MAX_BANK_PCT = 0.12;
+const POLY_LIVE_TRADE_DEFAULTS = {
+  bet_size_usd: 5.0,
+  price_cap_cents: 52,
+  auto_place: false,
+};
 const POLY_PRED_UPDATES_CURSOR_KEY = 'poly_pred_updates_cursor_v1';
 
 let polyPredUpdatesPollTimer = null;
@@ -101,6 +105,7 @@ async function polyPollPredUpdates(){
   try{
     const s = polyGetLiveTradeSettings();
     if(!s.auto_place){
+      console.warn('[pred_updates] auto_place disabled, skipping poll tick');
       polyPredUpdatesInFlight = false;
       return;
     }
@@ -118,6 +123,7 @@ async function polyPollPredUpdates(){
 
     const updates = Array.isArray(data?.updates) ? data.updates : [];
     if(!updates.length){
+      console.log('[pred_updates] no updates available');
       polyPredUpdatesInFlight = false;
       return;
     }
@@ -158,146 +164,103 @@ function polyStartPredUpdatesPoll(){
   }, 5000);
 }
 
+function polyNormalizeLiveTradeSettings(raw){
+  const merged = {...POLY_LIVE_TRADE_DEFAULTS};
+  if(raw && typeof raw === 'object'){
+    const bet = raw.bet_size_usd ?? raw.betSizeUsd;
+    const cap = raw.price_cap_cents ?? raw.priceCapCents;
+    if(bet !== undefined) merged.bet_size_usd = Number(bet);
+    if(cap !== undefined) merged.price_cap_cents = Number(cap);
+    if(raw.auto_place !== undefined || raw.autoPlace !== undefined){
+      merged.auto_place = !!(raw.auto_place ?? raw.autoPlace);
+    }
+  }
+  merged.bet_size_usd = Number.isFinite(merged.bet_size_usd) ? Math.max(0, merged.bet_size_usd) : POLY_LIVE_TRADE_DEFAULTS.bet_size_usd;
+  merged.price_cap_cents = Number.isFinite(merged.price_cap_cents) ? Math.min(Math.max(merged.price_cap_cents, 1), 53) : POLY_LIVE_TRADE_DEFAULTS.price_cap_cents;
+  merged.auto_place = !!merged.auto_place;
+  return merged;
+}
+
+function polyPersistLiveTradeSettings(settings){
+  const normalized = polyNormalizeLiveTradeSettings(settings);
+  try{ localStorage.setItem(POLY_LIVE_TRADE_SETTINGS_KEY, JSON.stringify(normalized)); }catch(e){}
+  return normalized;
+}
+
 function polyGetLiveTradeSettings(){
-  const defaults = {
-    bank_pct: 0.05,
-    min_buy_usd: 3.0,
-    max_buy_usd: 20.0,
-    price_cap_cents: 52,
-    auto_place: false,
-  };
   try{
     const raw = localStorage.getItem(POLY_LIVE_TRADE_SETTINGS_KEY);
-    if(!raw) return defaults;
-    const obj = JSON.parse(raw);
-    const pct = (typeof obj.bank_pct === 'number') ? obj.bank_pct : defaults.bank_pct;
-    return {
-      bank_pct: Math.min(Math.max(pct, 0), POLY_MAX_BANK_PCT),
-      min_buy_usd: (typeof obj.min_buy_usd === 'number') ? obj.min_buy_usd : defaults.min_buy_usd,
-      max_buy_usd: (typeof obj.max_buy_usd === 'number') ? obj.max_buy_usd : defaults.max_buy_usd,
-      price_cap_cents: (typeof obj.price_cap_cents === 'number') ? obj.price_cap_cents : defaults.price_cap_cents,
-      auto_place: !!obj.auto_place,
-    };
+    if(!raw) return POLY_LIVE_TRADE_DEFAULTS;
+    return polyNormalizeLiveTradeSettings(JSON.parse(raw));
   }catch(e){
-    return defaults;
+    return POLY_LIVE_TRADE_DEFAULTS;
   }
 }
 
-async function polyFetchCollateralBankUsd(){
+async function polyLoadLiveTradeSettings(){
   try{
-    const res = await fetch(API + '/api/poly/live/wallet?limit=0');
+    const res = await fetch(API + '/api/poly/live/trade_settings');
+    if(!res.ok) throw new Error('live trade settings fetch failed');
     const data = await res.json();
-    const coll = data?.balance?.collateral;
-    if(!coll) return null;
-
-    const normUsdc = (x) => {
-      if(x === undefined || x === null) return null;
-      if(typeof x === 'number'){
-        if(!Number.isFinite(x)) return null;
-        // Heuristic: many APIs return USDC in base units (6 decimals).
-        // Example: 40363058 -> $40.363058 (divide by 1000000)
-        if(Number.isInteger(x) && Math.abs(x) >= 1000000) return x / 1e6;
-        return x;
-      }
-      if(typeof x === 'string'){
-        const s = x.trim();
-        if(!s) return null;
-        // If it's an integer-like string and big enough, treat as base units.
-        if(/^[0-9]+$/.test(s)){
-          const n = parseInt(s, 10);
-          if(Number.isFinite(n) && Math.abs(n) >= 1000000) return n / 1e6;
-          return Number.isFinite(n) ? n : null;
-        }
-        const v = parseFloat(s);
-        if(!Number.isFinite(v)) return null;
-        return v;
-      }
-      return null;
-    };
-
-    if(typeof coll === 'number') return normUsdc(coll);
-    if(typeof coll === 'string'){
-      return normUsdc(coll);
-    }
-    if(typeof coll === 'object'){
-      for(const k of ['availableBalance','available_balance','balance','totalBalance','total_balance','amount','value']){
-        if(coll[k] !== undefined && coll[k] !== null){
-          const v = normUsdc(coll[k]);
-          if(v !== null && Number.isFinite(v)) return v;
-        }
-      }
-    }
-    return null;
+    const normalized = polyPersistLiveTradeSettings(data);
+    polyApplyLiveTradeSettingsToUI(normalized);
+    return normalized;
   }catch(e){
+    console.error('polyLoadLiveTradeSettings error:', e);
+    polyApplyLiveTradeSettingsToUI();
     return null;
   }
 }
 
-function polyClamp(v, lo, hi){
-  return Math.max(lo, Math.min(hi, v));
-}
+// Legacy helpers removed: bet sizing is now fixed dollar amount only.
 
-async function polyComputeOrderAmountUsd(settings){
-  const bankPct = Number(settings?.bank_pct ?? 0.05);
-  if(bankPct > POLY_MAX_BANK_PCT){
-    throw new Error(`bank_pct cannot exceed ${(POLY_MAX_BANK_PCT*100).toFixed(0)}%`);
-  }
-  const minBuy = Number(settings?.min_buy_usd ?? 3.0);
-  const maxBuy = Number(settings?.max_buy_usd ?? 20.0);
-  const bank = await polyFetchCollateralBankUsd();
-  if(bank === null || !Number.isFinite(bank)){
-    // fallback: still show min (matches backend safe fallback)
-    return { bank_usd: null, amount_usd: minBuy };
-  }
-  const raw = bank * bankPct;
-  const amt = polyClamp(raw, minBuy, maxBuy);
-  return { bank_usd: bank, amount_usd: amt };
-}
-
-function polyApplyLiveTradeSettingsToUI(){
-  const s = polyGetLiveTradeSettings();
-  const pctEl = document.getElementById('poly-live-bank-pct');
-  const minEl = document.getElementById('poly-live-min-buy');
-  const maxEl = document.getElementById('poly-live-max-buy');
+function polyApplyLiveTradeSettingsToUI(settings){
+  const s = settings ? polyNormalizeLiveTradeSettings(settings) : polyGetLiveTradeSettings();
+  const betEl = document.getElementById('poly-live-bet-size');
   const capEl = document.getElementById('poly-live-price-cap-cents');
   const autoEl = document.getElementById('poly-live-auto');
-  if(pctEl) pctEl.value = String(s.bank_pct);
-  if(minEl) minEl.value = String(s.min_buy_usd);
-  if(maxEl) maxEl.value = String(s.max_buy_usd);
+  if(betEl) betEl.value = String(s.bet_size_usd);
   if(capEl) capEl.value = String(s.price_cap_cents);
   if(autoEl) autoEl.checked = !!s.auto_place;
 }
 
-function polySaveLiveTradeSettings(){
-  const pctEl = document.getElementById('poly-live-bank-pct');
-  const minEl = document.getElementById('poly-live-min-buy');
-  const maxEl = document.getElementById('poly-live-max-buy');
+async function polySaveLiveTradeSettings(){
+  const betEl = document.getElementById('poly-live-bet-size');
   const capEl = document.getElementById('poly-live-price-cap-cents');
   const autoEl = document.getElementById('poly-live-auto');
   const msgEl = document.getElementById('poly-live-settings-msg');
 
-  const bank_pct = parseFloat(pctEl?.value || '0.05');
-  const min_buy_usd = parseFloat(minEl?.value || '3');
-  const max_buy_usd = parseFloat(maxEl?.value || '20');
+  const bet_size_usd = parseFloat(betEl?.value || '5');
   const price_cap_cents = parseFloat(capEl?.value || '52');
   const auto_place = !!autoEl?.checked;
 
-  if(!(bank_pct >= 0 && bank_pct <= POLY_MAX_BANK_PCT)){
-    if(msgEl) msgEl.innerHTML = `<span class="text-red-300">Bank % must be between 0 and ${(POLY_MAX_BANK_PCT*100).toFixed(0)}%</span>`;
+  if(!(price_cap_cents > 0 && price_cap_cents <= 53)){
+    if(msgEl) msgEl.innerHTML = '<span class="text-red-300">Price cap must be 1..53 cents</span>';
     return;
   }
-  if(!(price_cap_cents > 0 && price_cap_cents <= 52)){
-    if(msgEl) msgEl.innerHTML = '<span class="text-red-300">Price cap must be 1..52 cents</span>';
-    return;
-  }
-  if(!(min_buy_usd >= 0 && max_buy_usd >= min_buy_usd)){
-    if(msgEl) msgEl.innerHTML = '<span class="text-red-300">Invalid min/max buy</span>';
+  if(!(bet_size_usd >= 0)){
+    if(msgEl) msgEl.innerHTML = '<span class="text-red-300">Bet size must be non-negative</span>';
     return;
   }
 
-  const obj = {bank_pct, min_buy_usd, max_buy_usd, price_cap_cents, auto_place};
-  try{ localStorage.setItem(POLY_LIVE_TRADE_SETTINGS_KEY, JSON.stringify(obj)); }catch(e){}
-  if(msgEl) msgEl.innerHTML = '<span class="text-green-300">Saved</span>';
+  const payload = {bet_size_usd, price_cap_cents, auto_place};
+  try{
+    const res = await fetch(API + '/api/poly/live/trade_settings', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if(!res.ok) throw new Error(`save failed (${res.status})`);
+    const saved = await res.json();
+    const normalized = polyPersistLiveTradeSettings(saved);
+    polyApplyLiveTradeSettingsToUI(normalized);
+    if(msgEl) msgEl.innerHTML = '<span class="text-green-300">Saved</span>';
+  }catch(e){
+    console.error('polySaveLiveTradeSettings error:', e);
+    const fallback = polyPersistLiveTradeSettings(payload);
+    polyApplyLiveTradeSettingsToUI(fallback);
+    if(msgEl) msgEl.innerHTML = '<span class="text-red-300">Save failed, cached locally</span>';
+  }
 }
 
 const POLY_LAST_MARKET_KEY = 'poly_last_selected_market_slug_v1';
@@ -313,22 +276,28 @@ async function polyPlaceLiveOrderAfterPrediction(slug, prediction, batch_id){
     const nowUtc = Math.floor(Date.now() / 1000);
     const mTs = polySelectedMarket?.ts ? Number(polySelectedMarket.ts) : null;
     if(!mTs || !(nowUtc < mTs)){
+      console.warn('[live_buy] skip: market not future', {slug, prediction});
       return {success:false, error:'Live trading is allowed only for future markets'};
     }
 
     const s = polyGetLiveTradeSettings();
+    const bet_size_usd = Number.isFinite(Number(s.bet_size_usd)) ? Number(s.bet_size_usd) : POLY_LIVE_TRADE_DEFAULTS.bet_size_usd;
     const price_cap_cents = Math.min(52, Math.max(1, Number(s.price_cap_cents||52)));
     const price_threshold = price_cap_cents / 100.0;
 
     // map prediction to outcome asset
     const pair = findUpDownOutcomes(polySelectedMarket);
     if(!pair){
+      console.warn('[live_buy] skip: missing up/down outcomes', {slug, prediction});
       return {success:false, error:'Need UP/DOWN outcomes'};
     }
     const pred = String(prediction||'').toUpperCase();
     const outcome_side = (pred === 'DOWN') ? 'DOWN' : 'UP';
     const o = (outcome_side === 'DOWN') ? pair.down : pair.up;
-    if(!o || !o.asset_id) return {success:false, error:'Outcome asset_id not found'};
+    if(!o || !o.asset_id){
+      console.warn('[live_buy] skip: outcome asset_id not found', {slug, outcome_side});
+      return {success:false, error:'Outcome asset_id not found'};
+    }
 
     // Use last synchronized best ask (prefer backend refreshed quote for confirm display)
     let snapCents = (polySelectedPriceCents !== null && Number.isFinite(Number(polySelectedPriceCents)))
@@ -371,12 +340,10 @@ async function polyPlaceLiveOrderAfterPrediction(slug, prediction, batch_id){
       asset_id: o.asset_id,
       outcome_side,
       prediction_direction: outcome_side,
-      amount_usd: 0.0,
+      amount_usd: bet_size_usd,
       snapshot_price,
       price_threshold,
-      bank_pct: s.bank_pct,
-      min_buy_usd: s.min_buy_usd,
-      max_buy_usd: s.max_buy_usd,
+      bet_size_usd,
       batch_id: batch_id || null,
     };
     console.log('[live_buy] request payload', payload);
@@ -650,7 +617,7 @@ async function loadAutopredictState(){
     autopredictEnabled = !!data.autopredict;
     updateAutopredictUI();
   }catch(e){ console.error('loadAutopredictState error:', e); }
-
+  await polyLoadLiveTradeSettings();
 }
 
 function polySetDetailTab(tab, isEnded = null){

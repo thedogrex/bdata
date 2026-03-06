@@ -126,24 +126,14 @@
                   <div class="p-3 rounded-lg" style="background:#1e293b;border:1px solid #334155">
                     <div class="grid grid-cols-2 gap-2 mb-2">
                       <div>
-                        <label class="block text-xs text-slate-400 mb-1">Bank % per order</label>
-                        <input id="poly-live-bank-pct" type="number" step="0.01" min="0" max="1" class="w-full text-xs" placeholder="0.05">
-                        <div class="text-[11px] text-slate-500 mt-1">Example: 0.05 = 5% of bank</div>
+                        <label class="block text-xs text-slate-400 mb-1">Bet size ($)</label>
+                        <input id="poly-live-bet-size" type="number" step="0.5" min="0" max="9999" class="w-full text-xs" placeholder="5">
+                        <div class="text-[11px] text-slate-500 mt-1">Fixed dollar amount per order</div>
                       </div>
                       <div>
                         <label class="block text-xs text-slate-400 mb-1">Limit price cap (¢)</label>
-                        <input id="poly-live-price-cap-cents" type="number" step="1" min="1" max="52" class="w-full text-xs" placeholder="52">
-                        <div class="text-[11px] text-slate-500 mt-1">Hard max: 52¢</div>
-                      </div>
-                    </div>
-                    <div class="grid grid-cols-2 gap-2 mb-2">
-                      <div>
-                        <label class="block text-xs text-slate-400 mb-1">Min buy ($)</label>
-                        <input id="poly-live-min-buy" type="number" step="0.5" min="0" max="9999" class="w-full text-xs" placeholder="3">
-                      </div>
-                      <div>
-                        <label class="block text-xs text-slate-400 mb-1">Max buy ($)</label>
-                        <input id="poly-live-max-buy" type="number" step="0.5" min="0" max="9999" class="w-full text-xs" placeholder="20">
+                        <input id="poly-live-price-cap-cents" type="number" step="1" min="1" max="53" class="w-full text-xs" placeholder="52">
+                        <div class="text-[11px] text-slate-500 mt-1">Hard max: 53¢</div>
                       </div>
                     </div>
                     <div class="flex items-center justify-between mt-2">

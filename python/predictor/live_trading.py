@@ -32,7 +32,7 @@ if not logger.handlers:
 db = DbProvider()
 trading_client = PolymarketClient()
 
-MAX_LIMIT_PRICE_USD = 0.52
+MAX_LIMIT_PRICE_USD = 0.53
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -49,16 +49,17 @@ def _extract_collateral_balance_usd(balance_allowance: Any) -> Optional[float]:
             return None
         def _norm_usdc(x: Any) -> Optional[float]:
             try:
-                # Strings like '37926149' or ints >= 1e6 are base units (USDC 6 decimals)
                 if isinstance(x, str):
                     sx = x.strip()
+                    if not sx:
+                        return None
                     if sx.isdigit():
                         iv = int(sx)
-                        return float(iv) / 1e6 if abs(iv) >= 1_000_000 else float(iv)
+                        return float(iv) / 1e6
                     fv = float(sx)
-                    return fv
+                    return float(fv)
                 if isinstance(x, int):
-                    return float(x) / 1e6 if abs(x) >= 1_000_000 else float(x)
+                    return float(x) / 1e6
                 if isinstance(x, float):
                     return float(x)
             except Exception:
@@ -264,7 +265,7 @@ async def buy_after_prediction(
         prediction_direction: 'UP' or 'DOWN' (what model predicted)
         amount_usd:           Dollar amount to spend
         snapshot_price:       Current best ask / snapshot price
-        price_threshold:      Max acceptable price (default 0.52)
+        price_threshold:      Max acceptable price (default 0.52, hard cap 0.53)
         batch_id:             Prediction batch ID for linking
         template_id:          Template ID that triggered this
 
@@ -275,17 +276,34 @@ async def buy_after_prediction(
     computed_from_bank = False
     if amount_usd is None or float(amount_usd) <= 0:
         computed_from_bank = True
+        fetched_bank = False
         if bank_usd is None:
             try:
                 bal = trading_client.get_balance_allowance()
                 bank_usd = _extract_collateral_balance_usd(bal) or 0.0
-            except Exception:
+                fetched_bank = True
+                logger.info("  fetched collateral balance from CLOB: %.6f", float(bank_usd))
+            except Exception as e:
+                logger.warning("  failed to fetch collateral balance: %s", e)
                 bank_usd = 0.0
+        bank_val = float(bank_usd or 0.0)
+        bank_pct_val = float(bank_pct or 0.0)
+        raw_amount = bank_val * bank_pct_val
         amount_usd = compute_buy_amount_usd(
-            bank_usd=bank_usd,
-            bank_pct=bank_pct,
+            bank_usd=bank_val,
+            bank_pct=bank_pct_val,
             min_usd=min_buy_usd,
             max_usd=max_buy_usd,
+        )
+        logger.info(
+            "  sizing: bank_usd=%.6f%s pct=%.4f raw=%.6f min=%.2f max=%.2f -> amount=%.2f",
+            bank_val,
+            " (fetched)" if fetched_bank else "",
+            bank_pct_val,
+            raw_amount,
+            float(min_buy_usd),
+            float(max_buy_usd),
+            float(amount_usd),
         )
 
     if float(price_threshold) > MAX_LIMIT_PRICE_USD:
@@ -305,10 +323,11 @@ async def buy_after_prediction(
         snapshot_price,
         price_threshold,
     )
-    if computed_from_bank:
+    if computed_from_bank and not fetched_bank:
+        # Already logged detailed sizing above when fetched_bank True; keep legacy log for provided bank values.
         logger.info(
-            "  sizing: bank_usd=%.2f  pct=%.4f  min=%.2f  max=%.2f",
-            float(bank_usd or 0.0), float(bank_pct), float(min_buy_usd), float(max_buy_usd)
+            "  sizing (provided bank): bank_usd=%.2f  pct=%.4f  min=%.2f  max=%.2f -> amount=%.2f",
+            float(bank_usd or 0.0), float(bank_pct), float(min_buy_usd), float(max_buy_usd), float(amount_usd)
         )
 
     # Refresh market + best ask right before placing order (do not rely on UI cached snapshot).

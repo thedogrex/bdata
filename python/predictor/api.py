@@ -97,6 +97,12 @@ class SettingsRequest(BaseModel):
     window_size: int = 1000
 
 
+class LiveTradeSettingsRequest(BaseModel):
+    auto_place: bool = False
+    bet_size_usd: float = 5.0
+    price_cap_cents: int = 52
+
+
 class SimTradeRequest(BaseModel):
     slug: str
     asset_id: str
@@ -337,6 +343,20 @@ async def api_poly_save_settings(req: SettingsRequest):
         strategy=req.strategy,
         params=req.params,
         window_size=req.window_size,
+    )
+
+
+@app.get("/api/poly/live/trade_settings")
+async def api_poly_get_live_trade_settings():
+    return await poly_service.get_live_trade_settings()
+
+
+@app.post("/api/poly/live/trade_settings")
+async def api_poly_save_live_trade_settings(req: LiveTradeSettingsRequest):
+    return await poly_service.save_live_trade_settings(
+        auto_place=req.auto_place,
+        bet_size_usd=req.bet_size_usd,
+        price_cap_cents=req.price_cap_cents,
     )
 
 
@@ -814,8 +834,8 @@ async def startup_live_trading():
 @app.post("/api/poly/live/buy")
 async def api_live_buy(req: LiveBuyRequest):
     """Buy an outcome token after prediction."""
-    if float(req.price_threshold) > 0.52:
-        return {"success": False, "error": "price_threshold must be <= 0.52"}
+    if float(req.price_threshold) > 0.53:
+        return {"success": False, "error": "price_threshold must be <= 0.53"}
     return await live_trading.buy_after_prediction(
         slug=req.slug,
         asset_id=req.asset_id,

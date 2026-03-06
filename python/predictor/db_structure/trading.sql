@@ -1,11 +1,11 @@
 -- phpMyAdmin SQL Dump
--- version 5.2.1
+-- version 5.2.3
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1:3306
--- Generation Time: Feb 21, 2026 at 02:21 AM
--- Server version: 9.1.0
--- PHP Version: 8.3.14
+-- Generation Time: Mar 06, 2026 at 08:44 AM
+-- Server version: 8.4.7
+-- PHP Version: 8.3.28
 
 SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
 START TRANSACTION;
@@ -50,12 +50,12 @@ CREATE TABLE IF NOT EXISTS `backtest_horizons` (
   `fit_time_sec` float NOT NULL DEFAULT '0',
   `predict_time_sec` float NOT NULL DEFAULT '0',
   `monthly_json` text,
-  `daily_json` text,
+  `daily_json` longtext,
   `confidence_json` text,
   PRIMARY KEY (`id`),
   KEY `idx_run` (`run_id`),
   KEY `idx_accuracy` (`accuracy_pct` DESC)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=18297 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- --------------------------------------------------------
 
@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS `backtest_runs` (
   KEY `idx_strategy` (`strategy`),
   KEY `idx_created` (`created_at`),
   KEY `idx_bruteforce` (`bruteforce_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=18297 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- --------------------------------------------------------
 
@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS `bruteforce_sessions` (
   PRIMARY KEY (`id`),
   KEY `idx_status` (`status`),
   KEY `idx_best` (`best_accuracy` DESC)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=33 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- --------------------------------------------------------
 
@@ -141,7 +141,94 @@ CREATE TABLE IF NOT EXISTS `c_5m` (
   `taker_quota_volume` float NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `saqx` (`open_time`)
-) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+) ENGINE=MyISAM AUTO_INCREMENT=546568 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `poly_live_orders`
+--
+
+DROP TABLE IF EXISTS `poly_live_orders`;
+CREATE TABLE IF NOT EXISTS `poly_live_orders` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `slug` varchar(255) NOT NULL COMMENT 'Market slug',
+  `asset_id` varchar(128) NOT NULL COMMENT 'CLOB token ID',
+  `outcome_side` varchar(8) DEFAULT NULL COMMENT 'UP or DOWN',
+  `side` varchar(8) NOT NULL COMMENT 'BUY or SELL',
+  `order_type` varchar(16) NOT NULL DEFAULT 'FOK' COMMENT 'FOK, GTC, GTD, FAK',
+  `price` double NOT NULL COMMENT 'Price per share (0..1)',
+  `amount` double NOT NULL COMMENT 'Dollar amount (BUY) or shares (SELL)',
+  `clob_order_id` varchar(128) DEFAULT NULL COMMENT 'Order ID returned by CLOB',
+  `clob_status` varchar(32) DEFAULT NULL COMMENT 'live, matched, delayed, unmatched, error',
+  `clob_error_msg` text COMMENT 'Error message if any',
+  `clob_response_json` json DEFAULT NULL COMMENT 'Full CLOB API response',
+  `prediction_batch_id` varchar(64) DEFAULT NULL COMMENT 'Link to poly_pred_runs batch',
+  `template_id` int DEFAULT NULL COMMENT 'Prediction template that triggered this order',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_slug` (`slug`),
+  KEY `idx_asset` (`asset_id`),
+  KEY `idx_clob_order` (`clob_order_id`),
+  KEY `idx_batch` (`prediction_batch_id`),
+  KEY `idx_created` (`created_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=149 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `poly_live_positions`
+--
+
+DROP TABLE IF EXISTS `poly_live_positions`;
+CREATE TABLE IF NOT EXISTS `poly_live_positions` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `slug` varchar(255) NOT NULL COMMENT 'Market slug',
+  `asset_id` varchar(128) NOT NULL COMMENT 'CLOB token ID',
+  `outcome_side` varchar(8) DEFAULT NULL COMMENT 'UP or DOWN',
+  `shares` double NOT NULL DEFAULT '0' COMMENT 'Current share count',
+  `avg_price` double NOT NULL DEFAULT '0' COMMENT 'Volume-weighted avg entry price',
+  `total_cost` double NOT NULL DEFAULT '0' COMMENT 'Total USD spent (cost basis)',
+  `status` varchar(16) NOT NULL DEFAULT 'open' COMMENT 'open, closed, resolved',
+  `resolved_outcome` varchar(16) DEFAULT NULL COMMENT 'Final market outcome if resolved',
+  `pnl` double DEFAULT NULL COMMENT 'Realised P&L once closed/resolved',
+  `snapshot_price_cents` double DEFAULT NULL COMMENT 'Snapshot ask price used for the buy',
+  `prediction_direction` varchar(8) DEFAULT NULL COMMENT 'UP or DOWN — what the model predicted',
+  `prediction_batch_id` varchar(64) DEFAULT NULL COMMENT 'Link to poly_pred_runs batch',
+  `template_id` int DEFAULT NULL COMMENT 'Prediction template that triggered this position',
+  `opened_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `closed_at` datetime DEFAULT NULL,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_position` (`slug`,`asset_id`,`status`),
+  KEY `idx_slug` (`slug`),
+  KEY `idx_status` (`status`),
+  KEY `idx_opened` (`opened_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=15 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `poly_live_trade_settings`
+--
+
+DROP TABLE IF EXISTS `poly_live_trade_settings`;
+CREATE TABLE IF NOT EXISTS `poly_live_trade_settings` (
+  `id` varchar(32) NOT NULL DEFAULT 'default',
+  `auto_place` tinyint(1) NOT NULL DEFAULT '0',
+  `bet_size_usd` double NOT NULL DEFAULT '5',
+  `price_cap_cents` int NOT NULL DEFAULT '52',
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+--
+-- Dumping data for table `poly_live_trade_settings`
+--
+
+INSERT INTO `poly_live_trade_settings` (`id`, `auto_place`, `bet_size_usd`, `price_cap_cents`, `updated_at`) VALUES
+('default', 1, 7, 52, '2026-03-06 07:47:23');
 
 -- --------------------------------------------------------
 
@@ -152,6 +239,8 @@ CREATE TABLE IF NOT EXISTS `c_5m` (
 DROP TABLE IF EXISTS `poly_markets`;
 CREATE TABLE IF NOT EXISTS `poly_markets` (
   `slug` varchar(255) NOT NULL,
+  `condition_id` varchar(66) DEFAULT NULL,
+  `parent_collection_id` varchar(66) DEFAULT NULL,
   `ts` int NOT NULL,
   `end_date` varchar(64) DEFAULT NULL,
   `question` text,
@@ -163,9 +252,11 @@ CREATE TABLE IF NOT EXISTS `poly_markets` (
   `last_resolution_check_ts` int DEFAULT NULL,
   `prediction_outcome` varchar(16) DEFAULT NULL,
   `prediction_ts` int DEFAULT NULL,
+  `pred_votes` longtext,
   PRIMARY KEY (`slug`),
   KEY `idx_ts` (`ts`),
-  KEY `idx_closed` (`closed`)
+  KEY `idx_closed` (`closed`),
+  KEY `idx_condition` (`condition_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- --------------------------------------------------------
@@ -189,7 +280,7 @@ CREATE TABLE IF NOT EXISTS `poly_orderbook_snapshots` (
   PRIMARY KEY (`id`),
   KEY `idx_asset_ts` (`asset_id`,`ts`),
   KEY `idx_slug_ts` (`slug`,`ts`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=379740 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- --------------------------------------------------------
 
@@ -202,12 +293,93 @@ CREATE TABLE IF NOT EXISTS `poly_outcomes` (
   `id` int NOT NULL AUTO_INCREMENT,
   `slug` varchar(255) NOT NULL,
   `asset_id` varchar(128) NOT NULL,
+  `index_set` int UNSIGNED NOT NULL DEFAULT '0',
+  `payout_vector` tinyint DEFAULT NULL,
   `name` varchar(255) NOT NULL,
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_outcome` (`slug`,`asset_id`),
-  KEY `idx_asset` (`asset_id`)
+  KEY `idx_asset` (`asset_id`),
+  KEY `idx_slug_index` (`slug`,`index_set`)
+) ENGINE=InnoDB AUTO_INCREMENT=44512 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `poly_predictions`
+--
+
+DROP TABLE IF EXISTS `poly_predictions`;
+CREATE TABLE IF NOT EXISTS `poly_predictions` (
+  `slug` varchar(255) NOT NULL,
+  `prediction_ts` int NOT NULL,
+  `payload_json` longtext NOT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`slug`),
+  KEY `idx_prediction_ts` (`prediction_ts`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `poly_pred_runs`
+--
+
+DROP TABLE IF EXISTS `poly_pred_runs`;
+CREATE TABLE IF NOT EXISTS `poly_pred_runs` (
+  `id` bigint UNSIGNED NOT NULL AUTO_INCREMENT,
+  `slug` varchar(255) NOT NULL,
+  `batch_id` char(36) NOT NULL,
+  `template_id` int UNSIGNED DEFAULT NULL,
+  `template_name` varchar(100) DEFAULT NULL,
+  `strategy` varchar(50) DEFAULT NULL,
+  `params_json` longtext,
+  `window_size` int DEFAULT NULL,
+  `horizon` tinyint UNSIGNED DEFAULT NULL,
+  `quantum` tinyint UNSIGNED NOT NULL DEFAULT '0',
+  `quantum_scenario` varchar(10) DEFAULT NULL,
+  `prediction` varchar(10) DEFAULT NULL,
+  `probability` double DEFAULT NULL,
+  `started_at` datetime(3) NOT NULL,
+  `finished_at` datetime(3) DEFAULT NULL,
+  `duration_ms` int UNSIGNED DEFAULT NULL,
+  `error` text,
+  `result_json` longtext,
+  PRIMARY KEY (`id`),
+  KEY `idx_slug` (`slug`),
+  KEY `idx_batch` (`batch_id`),
+  KEY `idx_slug_started` (`slug`,`started_at`),
+  KEY `idx_template` (`template_id`)
+) ENGINE=InnoDB AUTO_INCREMENT=1229 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `poly_pred_templates`
+--
+
+DROP TABLE IF EXISTS `poly_pred_templates`;
+CREATE TABLE IF NOT EXISTS `poly_pred_templates` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) COLLATE utf8mb4_general_ci NOT NULL,
+  `strategy` varchar(50) COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'rsi_mean_reversion',
+  `params_json` text COLLATE utf8mb4_general_ci,
+  `window_size` int NOT NULL DEFAULT '1000',
+  `horizon` int NOT NULL DEFAULT '1',
+  `active` tinyint NOT NULL DEFAULT '1',
+  `sort_order` int NOT NULL DEFAULT '0',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=MyISAM AUTO_INCREMENT=7 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `poly_pred_templates`
+--
+
+INSERT INTO `poly_pred_templates` (`id`, `name`, `strategy`, `params_json`, `window_size`, `horizon`, `active`, `sort_order`, `created_at`, `updated_at`) VALUES
+(6, 'RSI H2', 'rsi_mean_reversion', '{\n  \"rsi_period\": 6,\n  \"rsi_oversold\": 25,\n  \"rsi_overbought\": 65,\n  \"bb_low\": 0.1,\n  \"bb_high\": 0.85,\n  \"window_size\": 600\n}', 600, 2, 1, 0, '2026-03-03 01:13:44', '2026-03-05 14:19:29');
 
 -- --------------------------------------------------------
 
@@ -226,6 +398,13 @@ CREATE TABLE IF NOT EXISTS `poly_settings` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+--
+-- Dumping data for table `poly_settings`
+--
+
+INSERT INTO `poly_settings` (`id`, `autopredict`, `strategy`, `params_json`, `window_size`, `updated_at`) VALUES
+('default', 1, 'rsi_mean_reversion', NULL, 1000, '2026-03-03 17:51:25');
+
 -- --------------------------------------------------------
 
 --
@@ -239,9 +418,8 @@ CREATE TABLE IF NOT EXISTS `poly_sim_trades` (
   `slug` varchar(255) NOT NULL,
   `asset_id` varchar(128) NOT NULL,
   `side` varchar(8) NOT NULL,
-  `outcome_side` varchar(8) DEFAULT NULL,
+  `outcome_side` varchar(8) NOT NULL DEFAULT 'NONE',
   `qty` double NOT NULL,
-  `requested_price_cents` double DEFAULT NULL,
   `fill_price_cents` double NOT NULL,
   `snapshot_ts` int DEFAULT NULL,
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -249,17 +427,11 @@ CREATE TABLE IF NOT EXISTS `poly_sim_trades` (
   KEY `idx_ts` (`ts`),
   KEY `idx_asset` (`asset_id`),
   KEY `idx_slug` (`slug`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 --
 -- Constraints for dumped tables
 --
-
---
--- Constraints for table `backtest_horizons`
---
-ALTER TABLE `backtest_horizons`
-  ADD CONSTRAINT `backtest_horizons_ibfk_1` FOREIGN KEY (`run_id`) REFERENCES `backtest_runs` (`id`) ON DELETE CASCADE;
 
 --
 -- Constraints for table `poly_orderbook_snapshots`
@@ -272,6 +444,12 @@ ALTER TABLE `poly_orderbook_snapshots`
 --
 ALTER TABLE `poly_outcomes`
   ADD CONSTRAINT `poly_outcomes_ibfk_1` FOREIGN KEY (`slug`) REFERENCES `poly_markets` (`slug`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `poly_predictions`
+--
+ALTER TABLE `poly_predictions`
+  ADD CONSTRAINT `fk_poly_predictions_slug` FOREIGN KEY (`slug`) REFERENCES `poly_markets` (`slug`) ON DELETE CASCADE;
 COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;

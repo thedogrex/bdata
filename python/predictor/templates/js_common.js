@@ -336,16 +336,14 @@ function renderWallet(data){
     if(x === undefined || x === null) return null;
     if(typeof x === 'number'){
       if(!Number.isFinite(x)) return null;
-      if(Number.isInteger(x) && Math.abs(x) >= 1000000) return x / 1e6;
-      return x;
+      return Number.isInteger(x) ? x / 1e6 : x;
     }
     if(typeof x === 'string'){
       const s = x.trim();
       if(!s) return null;
       if(/^[0-9]+$/.test(s)){
         const n = parseInt(s, 10);
-        if(Number.isFinite(n) && Math.abs(n) >= 1000000) return n / 1e6;
-        return Number.isFinite(n) ? n : null;
+        return Number.isFinite(n) ? n / 1e6 : null;
       }
       const v = parseFloat(s);
       if(!Number.isFinite(v)) return null;
@@ -2111,7 +2109,33 @@ function analyticsKellyRenderTable(d){
   };
   const sb = d.start_bank || 100;
 
-  let html = `<h3 class="font-semibold mb-3">All Simulated Trades (${trades.length})</h3>
+  const calcAvgFill = (fillKey, sharesKey) => {
+    let totalShares = 0;
+    let weightedCents = 0;
+    trades.forEach(t => {
+      if(t.skipped) return;
+      const shares = Number(t[sharesKey] || 0);
+      const fill = Number(t[fillKey] || 0);
+      if(!isFinite(shares) || !isFinite(fill) || shares <= 0 || fill <= 0) return;
+      totalShares += shares;
+      weightedCents += shares * fill;
+    });
+    if(totalShares <= 0) return null;
+    return weightedCents / totalShares;
+  };
+
+  const hkAvgFill = calcAvgFill('hk_fill', 'hk_shares');
+  const fkAvgFill = calcAvgFill('fk_fill', 'fk_shares');
+  const avgFillText = (() => {
+    if(hkAvgFill == null && fkAvgFill == null) return '';
+    const fmt = (cents) => `${cents.toFixed(2)}¢ ($${(cents/100).toFixed(4)})`;
+    const parts = [];
+    if(hkAvgFill != null) parts.push(`<span class="text-slate-200">½K: <strong>${fmt(hkAvgFill)}</strong></span>`);
+    if(fkAvgFill != null) parts.push(`<span class="text-slate-200">Full K: <strong>${fmt(fkAvgFill)}</strong></span>`);
+    return `<div class="text-xs text-slate-400 mb-2">Средняя реальная стоимость выкупа · ${parts.join(' · ')}</div>`;
+  })();
+
+  let html = `${avgFillText}<h3 class="font-semibold mb-3">All Simulated Trades (${trades.length})</h3>
   <div style="overflow-x:auto"><table style="white-space:nowrap">
     <thead><tr>
       <th>#</th><th>Date</th><th>Pr Time</th><th>Market</th><th>Pred</th><th>✓</th>

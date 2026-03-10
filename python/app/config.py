@@ -46,6 +46,7 @@ BUY_MARKET: bool = _env_bool("BUY_MARKET", True)
 TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_ADMIN_CHAT_ID: str = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 TELEGRAM_PRINT_CHAT_ID: bool = _env_bool("TELEGRAM_PRINT_CHAT_ID", False)
+TELEGRAM_DAILY_REPORTS_ENABLED: bool = _env_bool("TELEGRAM_DAILY_REPORTS_ENABLED", False)
 
 def _env_json_list(name: str) -> list[str]:
     raw = os.getenv(name, "[]")

@@ -185,6 +185,8 @@ async def _mark_report_sent(day: date) -> None:
 
 
 async def _maybe_send_daily_balance_report() -> None:
+    if not config.TELEGRAM_DAILY_REPORTS_ENABLED:
+        return
     global _last_balance_report_day
 
     now_msk = _msk_now()
@@ -674,7 +676,7 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                 last_market_refresh = current_time
 
             # Daily balance report check (every 5 minutes 30 seconds).
-            if current_time - last_daily_report_check >= 330:
+            if config.TELEGRAM_DAILY_REPORTS_ENABLED and current_time - last_daily_report_check >= 330:
                 try:
                     await _maybe_send_daily_balance_report()
                 except Exception as exc:

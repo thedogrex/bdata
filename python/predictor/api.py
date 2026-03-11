@@ -886,6 +886,14 @@ async def api_live_wallet(limit: int = Query(25)):
     return await live_trading.wallet_summary(limit=limit)
 
 
+@app.get("/api/poly/live/order_flow")
+async def api_live_order_flow(
+    date_from: str | None = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
+    date_to: str | None = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
+):
+    return await live_trading.order_flow_analytics(date_from=date_from, date_to=date_to)
+
+
 _TEMPLATE_DIR = pathlib.Path(__file__).parent / "templates"
 
 

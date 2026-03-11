@@ -306,6 +306,157 @@ function switchTab(tab){
 const WALLET_ORDERS_PER_PAGE = 3;
 let walletOrdersCache = [];
 let walletOrdersPage = 1;
+let walletAnalyticsInitialized = false;
+let walletAnalyticsRange = {from: null, to: null};
+
+function walletFormatDateInput(d){
+  if(!(d instanceof Date)) return '';
+  const year = d.getFullYear();
+  const month = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${year}-${month}-${day}`;
+}
+
+function walletSetDateInputs(from, to){
+  const fromEl = document.getElementById('wallet-analytics-from');
+  const toEl = document.getElementById('wallet-analytics-to');
+  if(fromEl && from) fromEl.value = from;
+  if(toEl && to) toEl.value = to;
+  walletAnalyticsRange = {from: from || null, to: to || null};
+}
+
+function walletSetAnalyticsPreset(days){
+  const end = new Date();
+  const start = new Date();
+  start.setDate(end.getDate() - Math.max(0, parseInt(days,10)||0) + 1);
+  const from = walletFormatDateInput(start);
+  const to = walletFormatDateInput(end);
+  walletSetDateInputs(from, to);
+  loadWalletAnalytics();
+}
+
+function walletReadAnalyticsRange(){
+  const fromEl = document.getElementById('wallet-analytics-from');
+  const toEl = document.getElementById('wallet-analytics-to');
+  const from = fromEl && fromEl.value ? fromEl.value : walletAnalyticsRange.from;
+  const to = toEl && toEl.value ? toEl.value : walletAnalyticsRange.to;
+  if(from && to){
+    walletAnalyticsRange = {from, to};
+  }
+  return walletAnalyticsRange;
+}
+
+async function loadWalletAnalytics(){
+  const summaryEl = document.getElementById('wallet-analytics-summary');
+  const tableEl = document.getElementById('wallet-analytics-table');
+  const errEl = document.getElementById('wallet-analytics-error');
+  if(!summaryEl || !tableEl) return;
+  const range = walletReadAnalyticsRange();
+  if(errEl) errEl.classList.add('hidden');
+  summaryEl.innerHTML = '<div class="text-[11px] text-slate-400">Loading analytics…</div>';
+  tableEl.innerHTML = '';
+  try{
+    const params = new URLSearchParams();
+    if(range.from) params.append('date_from', range.from);
+    if(range.to) params.append('date_to', range.to);
+    const res = await fetch(API + '/api/poly/live/order_flow?' + params.toString());
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    walletRenderAnalyticsSummary(data, summaryEl);
+    walletRenderAnalyticsTable(data, tableEl);
+  }catch(err){
+    console.error('wallet analytics error', err);
+    if(summaryEl) summaryEl.innerHTML = '<div class="text-[11px] text-rose-300">Failed to load analytics.</div>';
+    if(errEl){
+      errEl.textContent = String(err);
+      errEl.classList.remove('hidden');
+    }
+  }
+}
+
+function walletRenderAnalyticsSummary(data, node){
+  if(!node) return;
+  const totals = data?.totals || {};
+  const range = data?.range || {};
+  const fmt = (v, digits = 2) => Number.isFinite(parseFloat(v)) ? parseFloat(v).toFixed(digits) : '-';
+  const winRate = totals.win_rate != null ? (totals.win_rate * 100).toFixed(1) + '%' : '—';
+  node.innerHTML = `
+    <div class="text-[11px] text-slate-400 mb-2">Range: ${range.start || '-'} → ${range.end || '-'}</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div class="p-2 rounded bg-slate-900/50 border border-slate-800">
+        <div class="text-[10px] uppercase tracking-wide text-slate-500">Orders</div>
+        <div class="text-lg font-semibold text-slate-100">${totals.total_orders || 0}</div>
+        <div class="text-[11px] text-slate-500">Resolved: ${totals.resolved_orders || 0} · Pending: ${totals.pending_orders || 0}</div>
+      </div>
+      <div class="p-2 rounded bg-slate-900/50 border border-slate-800">
+        <div class="text-[10px] uppercase tracking-wide text-slate-500">Accuracy</div>
+        <div class="text-lg font-semibold text-emerald-400">${winRate}</div>
+        <div class="text-[11px] text-slate-500">Wins: ${totals.win_count || 0} · Losses: ${totals.loss_count || 0}</div>
+      </div>
+      <div class="p-2 rounded bg-slate-900/50 border border-slate-800">
+        <div class="text-[10px] uppercase tracking-wide text-slate-500">Winning Shares</div>
+        <div class="text-lg font-semibold text-green-400">${fmt(totals.winning_shares)}</div>
+        <div class="text-[11px] text-slate-500">Cost: $${fmt(totals.winning_cost)}</div>
+      </div>
+      <div class="p-2 rounded bg-slate-900/50 border border-slate-800">
+        <div class="text-[10px] uppercase tracking-wide text-slate-500">Net Results</div>
+        <div class="text-lg font-semibold ${totals.winning_net >= 0 ? 'text-emerald-300' : 'text-rose-300'}">$${fmt(totals.winning_net)}</div>
+        <div class="text-[11px] text-slate-500">After cost · Losses: $${fmt(totals.losing_amount)} · <span class="${totals.net_winning_amount >= 0 ? 'text-emerald-300' : 'text-rose-300'}">Net: $${fmt(totals.net_winning_amount)}</span></div>
+      </div>
+    </div>
+  `;
+}
+
+function walletRenderAnalyticsTable(data, node){
+  if(!node) return;
+  const daily = Array.isArray(data?.daily) ? data.daily : [];
+  if(!daily.length){
+    node.innerHTML = '<div class="text-[11px] text-slate-500">No trades for this range.</div>';
+    return;
+  }
+  const rows = daily.map(d => {
+    const winRate = d.win_rate != null ? (d.win_rate * 100).toFixed(1) + '%' : '—';
+    const net = Number(d.net_winning_amount || 0);
+    const netClass = net >= 0 ? 'text-emerald-300' : 'text-rose-300';
+    return `
+      <tr class="border-b border-slate-800">
+        <td class="py-2 pr-3 whitespace-nowrap text-slate-200">${d.date}</td>
+        <td class="py-2 pr-3 text-center">${d.total_orders}</td>
+        <td class="py-2 pr-3 text-center">${d.resolved_orders}</td>
+        <td class="py-2 pr-3 text-center text-emerald-300">${d.win_count}</td>
+        <td class="py-2 pr-3 text-center text-rose-300">${d.loss_count}</td>
+        <td class="py-2 pr-3 text-center">${winRate}</td>
+        <td class="py-2 pr-3 text-center text-green-300">${Number(d.winning_shares || 0).toFixed(2)}</td>
+        <td class="py-2 pr-3 text-center">$${Number(d.winning_cost || 0).toFixed(2)}</td>
+        <td class="py-2 pr-3 text-center ${d.winning_net >= 0 ? 'text-emerald-300' : 'text-rose-300'}">$${Number(d.winning_net || 0).toFixed(2)}</td>
+        <td class="py-2 pr-3 text-center text-rose-300">$${Number(d.losing_amount || 0).toFixed(2)}</td>
+        <td class="py-2 pr-3 text-center ${netClass}">$${net.toFixed(2)}</td>
+      </tr>
+    `;
+  }).join('');
+  node.innerHTML = `
+    <div class="overflow-auto">
+      <table class="min-w-full text-[11px]">
+        <thead class="text-slate-400 text-[10px] uppercase tracking-wide">
+          <tr>
+            <th class="text-left py-2 pr-3">Date</th>
+            <th class="text-center py-2 pr-3">Orders</th>
+            <th class="text-center py-2 pr-3">Resolved</th>
+            <th class="text-center py-2 pr-3">Wins</th>
+            <th class="text-center py-2 pr-3">Losses</th>
+            <th class="text-center py-2 pr-3">Win%</th>
+            <th class="text-center py-2 pr-3">Win Shares</th>
+            <th class="text-center py-2 pr-3">Win Cost</th>
+            <th class="text-center py-2 pr-3">Win Net</th>
+            <th class="text-center py-2 pr-3">Losing Amount</th>
+            <th class="text-center py-2 pr-3">Net</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
 
 async function loadWallet(){
   const balEl = document.getElementById('wallet-balance');
@@ -316,6 +467,12 @@ async function loadWallet(){
     const res = await fetch(API + '/api/poly/live/wallet?limit=25');
     const data = await res.json();
     renderWallet(data);
+    if(!walletAnalyticsInitialized){
+      walletAnalyticsInitialized = true;
+      walletSetAnalyticsPreset(7);
+    }else{
+      loadWalletAnalytics();
+    }
   }catch(e){
     if(balEl) balEl.textContent = 'Wallet load error';
     if(ordEl) ordEl.textContent = 'Wallet load error';

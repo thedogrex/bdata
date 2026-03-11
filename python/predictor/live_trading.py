@@ -14,8 +14,9 @@ All CLOB operations are sync (py_clob_client) — run in executor.
 import asyncio
 import json
 import logging
+from collections import defaultdict
 from decimal import Decimal, ROUND_CEILING
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import app.config as config
@@ -688,6 +689,179 @@ async def wallet_summary(limit: int = 25) -> Dict[str, Any]:
         "balance": balance,
         "positions": positions,
         "orders": orders,
+    }
+
+
+def _parse_ymd(date_str: Optional[str]):
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+async def order_flow_analytics(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Aggregate order flow + prediction correctness per day."""
+
+    today = datetime.utcnow().date()
+    end_date = _parse_ymd(date_to) or today
+    start_date = _parse_ymd(date_from) or (end_date - timedelta(days=6))
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    day_cursor = start_date
+    day_map: Dict[str, Dict[str, Any]] = {}
+    while day_cursor <= end_date:
+        iso = day_cursor.isoformat()
+        day_map[iso] = {
+            "date": iso,
+            "total_orders": 0,
+            "resolved_orders": 0,
+            "pending_orders": 0,
+            "win_count": 0,
+            "loss_count": 0,
+            "total_amount": 0.0,
+            "winning_shares": 0.0,
+            "winning_cost": 0.0,
+            "winning_net": 0.0,
+            "losing_amount": 0.0,
+            "net_winning_amount": 0.0,
+            "win_rate": None,
+        }
+        day_cursor += timedelta(days=1)
+
+    sql = """
+        SELECT
+            DATE(o.created_at) AS day,
+            COUNT(*) AS total_orders,
+            SUM(CASE WHEN pm.resolved_outcome IN ('UP','DOWN') THEN 1 ELSE 0 END) AS resolved_orders,
+            SUM(
+                CASE
+                    WHEN pm.resolved_outcome IN ('UP','DOWN')
+                         AND UPPER(pm.resolved_outcome) = UPPER(o.outcome_side)
+                    THEN 1 ELSE 0
+                END
+            ) AS win_count,
+            SUM(
+                CASE
+                    WHEN pm.resolved_outcome IN ('UP','DOWN')
+                         AND UPPER(pm.resolved_outcome) <> UPPER(o.outcome_side)
+                    THEN 1 ELSE 0
+                END
+            ) AS loss_count,
+            SUM(COALESCE(o.amount, 0)) AS total_amount,
+            SUM(
+                CASE
+                    WHEN pm.resolved_outcome IN ('UP','DOWN')
+                         AND UPPER(pm.resolved_outcome) = UPPER(o.outcome_side)
+                    THEN COALESCE(o.fill_shares, 0)
+                    ELSE 0
+                END
+            ) AS winning_shares,
+            SUM(
+                CASE
+                    WHEN pm.resolved_outcome IN ('UP','DOWN')
+                         AND UPPER(pm.resolved_outcome) = UPPER(o.outcome_side)
+                    THEN COALESCE(o.amount, 0)
+                    ELSE 0
+                END
+            ) AS winning_cost,
+            SUM(
+                CASE
+                    WHEN pm.resolved_outcome IN ('UP','DOWN')
+                         AND UPPER(pm.resolved_outcome) <> UPPER(o.outcome_side)
+                    THEN COALESCE(o.amount, 0)
+                    ELSE 0
+                END
+            ) AS losing_amount
+        FROM poly_live_orders o
+        LEFT JOIN poly_markets pm ON pm.slug = o.slug
+        WHERE DATE(o.created_at) BETWEEN %s AND %s
+        GROUP BY day
+        ORDER BY day ASC
+    """
+
+    rows = await db.fetchall(sql, (start_date.isoformat(), end_date.isoformat()))
+
+    for row in rows:
+        day_val = row[0]
+        if hasattr(day_val, "isoformat"):
+            day_key = day_val.isoformat()
+        else:
+            day_key = str(day_val)
+        entry = day_map.get(day_key)
+        if not entry:
+            continue
+        total_orders = int(row[1] or 0)
+        resolved_orders = int(row[2] or 0)
+        win_count = int(row[3] or 0)
+        loss_count = int(row[4] or 0)
+        total_amount = float(row[5] or 0.0)
+        winning_shares = float(row[6] or 0.0)
+        winning_cost = float(row[7] or 0.0)
+        losing_amount = float(row[8] or 0.0)
+        winning_net = winning_shares - winning_cost
+        pending = max(total_orders - resolved_orders, 0)
+
+        entry.update(
+            {
+                "total_orders": total_orders,
+                "resolved_orders": resolved_orders,
+                "pending_orders": pending,
+                "win_count": win_count,
+                "loss_count": loss_count,
+                "total_amount": total_amount,
+                "winning_shares": winning_shares,
+                "winning_cost": winning_cost,
+                "winning_net": winning_net,
+                "losing_amount": losing_amount,
+                "net_winning_amount": winning_net - losing_amount,
+                "win_rate": (win_count / resolved_orders) if resolved_orders > 0 else None,
+            }
+        )
+
+    daily_rows = list(day_map.values())
+
+    totals = defaultdict(float)
+    totals_counts = defaultdict(int)
+
+    for entry in daily_rows:
+        for key in ("total_orders", "resolved_orders", "pending_orders", "win_count", "loss_count"):
+            totals_counts[key] += int(entry.get(key) or 0)
+        for key in ("total_amount", "losing_amount", "net_winning_amount"):
+            totals[key] += float(entry.get(key) or 0.0)
+        totals["winning_shares"] += float(entry.get("winning_shares") or 0.0)
+        totals["winning_cost"] += float(entry.get("winning_cost") or 0.0)
+        totals["winning_net"] += float(entry.get("winning_net") or 0.0)
+
+    resolved_total = totals_counts["resolved_orders"]
+    win_total = totals_counts["win_count"]
+    totals_summary = {
+        "total_orders": totals_counts["total_orders"],
+        "resolved_orders": resolved_total,
+        "pending_orders": totals_counts["pending_orders"],
+        "win_count": win_total,
+        "loss_count": totals_counts["loss_count"],
+        "win_rate": (win_total / resolved_total) if resolved_total > 0 else None,
+        "total_amount": totals["total_amount"],
+        "winning_shares": totals["winning_shares"],
+        "winning_cost": totals["winning_cost"],
+        "winning_net": totals["winning_net"],
+        "losing_amount": totals["losing_amount"],
+        "net_winning_amount": totals["net_winning_amount"],
+    }
+
+    return {
+        "range": {
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+        },
+        "daily": daily_rows,
+        "totals": totals_summary,
     }
 
 

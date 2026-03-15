@@ -1397,13 +1397,6 @@ async function showPolyMarket(slug){
       predPanel.style.display = '';
     }
 
-    // Quantum predict is only valid for markets AFTER the current active one
-    const isQuantumEligible = (polyActiveTs !== null && m.ts > polyActiveTs);
-    const btnQ = document.getElementById('poly-pred-quantum-btn');
-    if(btnQ){
-      btnQ.style.display = isQuantumEligible ? '' : 'none';
-    }
-
     const predPopup = document.getElementById('poly-pred-popup');
     if(predPopup) predPopup.classList.add('hidden');
     const predResult = document.getElementById('poly-pred-result');
@@ -1648,21 +1641,15 @@ async function polyLoadHistoryChart(slug, runs){
 }
 
 function buildPredMarkers(runs, candles){
-  // Build a map: candle_ts → {up, down, unk, quantum}
-  // Each run has market_ts (epoch seconds) — that's the candle ts for this market
-  // For non-quantum runs, count votes; for quantum runs, mark separately
+  // Build a map: candle_ts → {up, down, unk}
   const map = {};
   runs.forEach(r => {
     const ts = r.market_ts || (polySelectedMarket?.ts);
     if(!ts) return;
-    if(!map[ts]) map[ts] = {up:0, down:0, unk:0, quantum:0, ts: ts};
-    if(r.quantum){
-      map[ts].quantum++;
-    } else {
-      if(r.prediction === 'UP') map[ts].up++;
-      else if(r.prediction === 'DOWN') map[ts].down++;
-      else map[ts].unk++;
-    }
+    if(!map[ts]) map[ts] = {up:0, down:0, unk:0, ts: ts};
+    if(r.prediction === 'UP') map[ts].up++;
+    else if(r.prediction === 'DOWN') map[ts].down++;
+    else map[ts].unk++;
   });
   return Object.values(map);
 }
@@ -1673,7 +1660,7 @@ function renderPredHistory(runs){
   const batchMap = {};
   runs.forEach(r => {
     if(!batchMap[r.batch_id]){
-      batchMap[r.batch_id] = {batch_id: r.batch_id, started_at: r.started_at, quantum: r.quantum, rows: []};
+      batchMap[r.batch_id] = {batch_id: r.batch_id, started_at: r.started_at, rows: []};
       batches.push(batchMap[r.batch_id]);
     }
     batchMap[r.batch_id].rows.push(r);
@@ -1682,27 +1669,21 @@ function renderPredHistory(runs){
   let html = '<div style="display:flex;flex-direction:column;gap:8px">';
   batches.forEach(b => {
     const dt = b.started_at ? b.started_at.replace('T',' ').substring(0,19) : '—';
-    const isQ = b.quantum;
-    const qBadge = isQ ? '<span style="color:#8b5cf6;font-weight:700"> ⚛ QUANTUM</span>' : '';
-
-    // Compute vote summary for non-quantum
     let voteSummary = '';
-    if(!isQ){
-      let up=0, dn=0, unk=0;
-      b.rows.forEach(r => {
-        if(r.prediction==='UP') up++;
-        else if(r.prediction==='DOWN') dn++;
-        else unk++;
-      });
-      const c = up > dn ? '#22c55e' : (dn > up ? '#ef4444' : '#94a3b8');
-      voteSummary = ` <span style="color:${c};font-weight:700">`
-        + (up > 0 ? `▲${up} ` : '') + (dn > 0 ? `▼${dn} ` : '') + (unk > 0 ? `?${unk}` : '')
-        + `</span>`;
-    }
+    let up=0, dn=0, unk=0;
+    b.rows.forEach(r => {
+      if(r.prediction==='UP') up++;
+      else if(r.prediction==='DOWN') dn++;
+      else unk++;
+    });
+    const c = up > dn ? '#22c55e' : (dn > up ? '#ef4444' : '#94a3b8');
+    voteSummary = ` <span style="color:${c};font-weight:700">`
+      + (up > 0 ? `▲${up} ` : '') + (dn > 0 ? `▼${dn} ` : '') + (unk > 0 ? `?${unk}` : '')
+      + `</span>`;
 
     html += `<details style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:6px 8px">`;
     html += `<summary class="cursor-pointer" style="list-style:none;display:flex;align-items:center;justify-content:space-between">`;
-    html += `<span><span class="text-slate-400">${dt}</span>${qBadge}${voteSummary}</span>`;
+    html += `<span><span class="text-slate-400">${dt}</span>${voteSummary}</span>`;
     html += `<span class="text-slate-600 text-xs">${b.rows.length} row(s)</span>`;
     html += `</summary>`;
 
@@ -1712,7 +1693,7 @@ function renderPredHistory(runs){
       const predArrow = r.prediction==='UP' ? '▲' : (r.prediction==='DOWN' ? '▼' : '—');
       const prob = r.probability !== null ? Math.round(r.probability*100)+'%' : '';
       const dur = r.duration_ms !== null ? `${r.duration_ms}ms` : '';
-      const scBadge = r.quantum_scenario ? `<span style="color:#8b5cf6;font-size:10px"> [${r.quantum_scenario}]</span>` : '';
+      const scBadge = '';
       const errBadge = r.error ? `<span style="color:#ef4444"> ERR: ${r.error.substring(0,60)}</span>` : '';
       html += `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:4px;background:#0f172a">`;
       html += `<span style="min-width:90px;color:#94a3b8;font-size:10px">${r.template_name||'?'}${scBadge}</span>`;
@@ -2116,7 +2097,7 @@ async function polyPopulateStrategySelect(){
 
 // --- Batch Predict ---
 
-async function runPolyBatchPredict(quantum){
+async function runPolyBatchPredict(){
   if(!polySelectedMarket || !polySelectedMarket.slug){
     const inlineEl = document.getElementById('poly-pred-result-inline');
     if(inlineEl) inlineEl.innerHTML='<span class="text-red-400 text-xs">Select a market first.</span>';
@@ -2130,19 +2111,15 @@ async function runPolyBatchPredict(quantum){
   }
 
   const btnR = document.getElementById('poly-pred-run-btn');
-  const btnQ = document.getElementById('poly-pred-quantum-btn');
   const resultEl = document.getElementById('poly-pred-result');
   const inlineEl = document.getElementById('poly-pred-result-inline');
   const analyseSection = document.getElementById('poly-pred-analyse-section');
 
   if(btnR) btnR.disabled = true;
-  if(btnQ) btnQ.disabled = true;
-  const activeBtn = quantum ? btnQ : btnR;
+  const activeBtn = btnR;
   const origHtml = activeBtn ? activeBtn.innerHTML : '';
-  if(activeBtn) activeBtn.innerHTML = quantum
-    ? '<span style="font-size:14px">⏳</span> QUANTUM...'
-    : '<span style="font-size:14px">⏳</span> PREDICTING...';
-  if(inlineEl) inlineEl.innerHTML = `<span class="text-slate-400 text-xs">Running ${activeCount} template(s)${quantum?' (quantum)':''}...</span>`;
+  if(activeBtn) activeBtn.innerHTML = '<span style="font-size:14px">⏳</span> PREDICTING...';
+  if(inlineEl) inlineEl.innerHTML = `<span class="text-slate-400 text-xs">Running ${activeCount} template(s)...</span>`;
   if(resultEl) resultEl.innerHTML = '<span class="text-slate-400">Running batch prediction...</span>';
   if(analyseSection) analyseSection.classList.remove('hidden');
 
@@ -2159,7 +2136,6 @@ async function runPolyBatchPredict(quantum){
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
         slug: polySelectedMarket.slug,
-        quantum: !!quantum,
         table: 'c_5m'
       })
     });
@@ -2171,11 +2147,7 @@ async function runPolyBatchPredict(quantum){
       if(resultEl) resultEl.innerHTML = `<div class="p-3 rounded-lg" style="background:#7f1d1d;border:1px solid #ef4444"><span class="text-red-300 font-semibold">Error:</span> <span class="text-red-200">${data.error}</span></div>`;
       if(inlineEl) inlineEl.innerHTML = `<span class="text-red-400 text-xs">${data.error}</span>`;
     } else if(data.results && data.results.length){
-      if(quantum){
-        renderQuantumResults(data.results, inlineEl, resultEl);
-      } else {
-        renderRegularResults(data.results, inlineEl, resultEl, polyLastPredBatchId);
-      }
+      renderRegularResults(data.results, inlineEl, resultEl, polyLastPredBatchId);
     } else {
       if(resultEl) resultEl.innerHTML = '<span class="text-slate-400">No results returned.</span>';
     }
@@ -2186,7 +2158,6 @@ async function runPolyBatchPredict(quantum){
   }
 
   if(btnR){ btnR.disabled = false; btnR.innerHTML = '<span style="font-size:14px">✨</span> PREDICT'; }
-  if(btnQ){ btnQ.disabled = false; btnQ.innerHTML = '<span style="font-size:14px">⚛</span> QUANTUM'; }
 }
 
 function renderRegularResults(results, inlineEl, resultEl, batchId){
@@ -2255,61 +2226,6 @@ function renderRegularResults(results, inlineEl, resultEl, batchId){
   if(resultEl) resultEl.innerHTML = html;
 
   // Manual predictions (button click) MUST NOT place live orders.
-}
-
-function renderQuantumResults(results, inlineEl, resultEl){
-  // Inline summary
-  if(inlineEl) inlineEl.innerHTML =
-    `<span style="color:#8b5cf6;font-weight:700;font-size:14px">⚛ QUANTUM</span> `
-    + `<span class="text-slate-400 text-xs">(${results.length} templates)</span>`
-    + `<button onclick="polyShowPredDetails()" class="btn btn-slate text-xs" style="margin-left:8px">Details</button>`;
-
-  let html = '<div style="display:flex;flex-direction:column;gap:10px">';
-  results.forEach(r => {
-    const d = r.result;
-    if(!d) return;
-    if(d.error){
-      html += `<div class="p-2 rounded" style="background:#1c1917;border:1px solid #ef4444">`;
-      html += `<div class="text-xs font-semibold text-slate-300">${r.template_name} <span class="text-slate-500">H${r.horizon}</span></div>`;
-      html += `<div class="text-xs text-red-400">${d.error}</div></div>`;
-      return;
-    }
-    const scenarios = d.scenarios || {};
-    const green = scenarios.green || {};
-    const red = scenarios.red || {};
-
-    html += `<div class="p-3 rounded-lg" style="background:#1e293b;border:1px solid #6d28d9">`;
-    html += `<div class="text-xs font-bold text-slate-200 mb-2">${r.template_name} <span class="text-slate-500 font-mono">H${r.horizon}</span></div>`;
-
-    // Two-column layout: green scenario | red scenario
-    html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">`;
-
-    // Green scenario
-    const gColor = green.prediction === 'UP' ? '#22c55e' : (green.prediction === 'DOWN' ? '#ef4444' : '#94a3b8');
-    const gArrow = green.prediction === 'UP' ? '\u25b2' : (green.prediction === 'DOWN' ? '\u25bc' : '\u2014');
-    const gProb = Math.round((green.probability || 0) * 100);
-    html += `<div class="p-2 rounded" style="background:#052e16;border:1px solid #22c55e50">`;
-    html += `<div class="text-xs text-green-400 font-semibold mb-1">If next candle is GREEN \u25b2</div>`;
-    html += `<div style="color:${gColor};font-weight:800;font-size:16px">${gArrow} ${green.prediction||'?'} <span class="text-sm font-normal text-slate-400">${gProb}%</span></div>`;
-    html += `</div>`;
-
-    // Red scenario
-    const rColor = red.prediction === 'UP' ? '#22c55e' : (red.prediction === 'DOWN' ? '#ef4444' : '#94a3b8');
-    const rArrow = red.prediction === 'UP' ? '\u25b2' : (red.prediction === 'DOWN' ? '\u25bc' : '\u2014');
-    const rProb = Math.round((red.probability || 0) * 100);
-    html += `<div class="p-2 rounded" style="background:#1c0a0a;border:1px solid #ef444450">`;
-    html += `<div class="text-xs text-red-400 font-semibold mb-1">If next candle is RED \u25bc</div>`;
-    html += `<div style="color:${rColor};font-weight:800;font-size:16px">${rArrow} ${red.prediction||'?'} <span class="text-sm font-normal text-slate-400">${rProb}%</span></div>`;
-    html += `</div>`;
-
-    html += `</div>`; // grid
-    if(d.has_market_candle !== undefined){
-      html += `<div class="text-xs text-slate-500 mt-1">Market candle ${d.has_market_candle ? 'exists' : 'missing (synthesized)'}</div>`;
-    }
-    html += `</div>`;
-  });
-  html += '</div>';
-  if(resultEl) resultEl.innerHTML = html;
 }
 
 function polyBuildDiagHtml(data){
@@ -2484,8 +2400,6 @@ function drawCandleChart(canvas, candles, marketTs, markers){
         icon = '\u25b2'; iconColor = '#22c55e'; // green triangle up
       } else if(m.down > m.up && m.down > m.unk){
         icon = '\u25bc'; iconColor = '#ef4444'; // red triangle down
-      } else if(total === 0 && m.quantum > 0){
-        icon = '\u269b'; iconColor = '#8b5cf6'; // purple atom for quantum-only
       } else {
         icon = '?'; iconColor = '#f59e0b'; // yellow question mark
       }

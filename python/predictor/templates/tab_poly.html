@@ -57,14 +57,11 @@
           </div>
           <div id="poly-market-detail" class="text-sm text-slate-400"></div>
 
-          <!-- Prediction bar: PREDICT + QUANTUM buttons + gear, grouped -->
+          <!-- Prediction bar: PREDICT button + history/settings -->
           <div id="poly-predict-panel" class="mb-3">
             <div class="inline-flex items-center rounded-lg" style="background:#1e293b;border:1px solid #334155;padding:3px 4px;gap:5px">
-              <button id="poly-pred-run-btn" onclick="runPolyBatchPredict(false)" class="text-xs font-bold px-3 py-1.5 rounded-md" style="background:linear-gradient(135deg,#6366f1,#a855f7,#ec4899);color:#fff;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px">
+              <button id="poly-pred-run-btn" onclick="runPolyBatchPredict()" class="text-xs font-bold px-3 py-1.5 rounded-md" style="background:linear-gradient(135deg,#6366f1,#a855f7,#ec4899);color:#fff;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px">
                 <span style="font-size:14px">✨</span> PREDICT
-              </button>
-              <button id="poly-pred-quantum-btn" onclick="runPolyBatchPredict(true)" class="text-xs font-bold px-3 py-1.5 rounded-md" style="background:linear-gradient(135deg,#06b6d4,#8b5cf6);color:#fff;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px" title="Quantum: simulate green/red candle scenarios">
-                <span style="font-size:14px">⚛</span> QUANTUM
               </button>
               <button id="poly-pred-history-btn" onclick="polyTogglePredHistory()" class="text-slate-400 hover:text-white px-1.5 py-1 rounded" style="font-size:13px;background:transparent;border:none;cursor:pointer" title="Prediction History">🕐</button>
               <button id="poly-pred-gear-btn" onclick="polyTogglePredSettings()" class="text-slate-400 hover:text-white px-1.5 py-1 rounded" style="font-size:15px;background:transparent;border:none;cursor:pointer" title="Templates & Settings">⚙</button>
@@ -298,25 +295,6 @@
             </div>
             <div id="poly-live-orders" class="text-xs text-slate-400">Loading...</div>
           </div>
-        </div>
-
-        <!-- Simulated Positions/Trades -->
-        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4" id="poly-positions-panel">
-          <div class="card p-4" style="background:#0f172a;border:1px solid #334155">
-            <div class="flex items-center justify-between mb-2">
-              <h3 class="font-semibold">Sim Positions</h3>
-              <button onclick="loadSimPositions()" class="btn btn-primary text-xs">Refresh</button>
-            </div>
-            <div id="poly-positions" class="text-xs text-slate-400">Loading...</div>
-          </div>
-        </div>
-
-        <div class="mt-4" id="poly-trades-panel">
-          <div class="flex items-center justify-between mb-2">
-            <h3 class="font-semibold">Sim Trades</h3>
-            <button onclick="loadSimTrades()" class="btn btn-primary text-xs">Refresh</button>
-          </div>
-          <div id="poly-trades" class="text-xs text-slate-400">Loading...</div>
         </div>
 
         <!-- Live Trade Confirmation Modal (auto predictions only) -->

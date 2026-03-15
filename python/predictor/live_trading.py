@@ -34,6 +34,10 @@ db = DbProvider()
 trading_client = PolymarketClient()
 
 MAX_LIMIT_PRICE_USD = 0.53
+MSK_UTC_OFFSET_HOURS = 3
+MSK_UTC_OFFSET = timedelta(hours=MSK_UTC_OFFSET_HOURS)
+MSK_UTC_OFFSET_SECONDS = int(MSK_UTC_OFFSET.total_seconds())
+MSK_TZ_NAME = "+03:00"
 
 _last_collateral_balance_usd: Optional[float] = None
 
@@ -734,9 +738,9 @@ async def order_flow_analytics(
         }
         day_cursor += timedelta(days=1)
 
-    sql = """
+    sql = f"""
         SELECT
-            DATE(o.created_at) AS day,
+            DATE(CONVERT_TZ(o.created_at, '+00:00', '{MSK_TZ_NAME}')) AS day,
             COUNT(*) AS total_orders,
             SUM(CASE WHEN pm.resolved_outcome IN ('UP','DOWN') THEN 1 ELSE 0 END) AS resolved_orders,
             SUM(
@@ -780,7 +784,8 @@ async def order_flow_analytics(
             ) AS losing_amount
         FROM poly_live_orders o
         LEFT JOIN poly_markets pm ON pm.slug = o.slug
-        WHERE DATE(o.created_at) BETWEEN %s AND %s
+        WHERE DATE(CONVERT_TZ(o.created_at, '+00:00', '{MSK_TZ_NAME}')) BETWEEN %s AND %s
+          AND COALESCE(o.fill_shares, 0) > 0
         GROUP BY day
         ORDER BY day ASC
     """
@@ -804,7 +809,7 @@ async def order_flow_analytics(
         winning_shares = float(row[6] or 0.0)
         winning_cost = float(row[7] or 0.0)
         losing_amount = float(row[8] or 0.0)
-        winning_net = winning_shares - winning_cost
+        winning_payout = winning_shares
         pending = max(total_orders - resolved_orders, 0)
 
         entry.update(
@@ -817,9 +822,9 @@ async def order_flow_analytics(
                 "total_amount": total_amount,
                 "winning_shares": winning_shares,
                 "winning_cost": winning_cost,
-                "winning_net": winning_net,
+                "winning_net": winning_payout - winning_cost,
                 "losing_amount": losing_amount,
-                "net_winning_amount": winning_net - losing_amount,
+                "net_winning_amount": winning_payout - winning_cost - losing_amount,
                 "win_rate": (win_count / resolved_orders) if resolved_orders > 0 else None,
             }
         )
@@ -897,9 +902,12 @@ async def list_orders(limit: int = 100, slug: Optional[str] = None) -> List[Dict
         "FROM poly_live_orders"
     )
     params: List[Any] = []
+    clauses = ["COALESCE(fill_shares, 0) > 0"]
     if slug:
-        sql += " WHERE slug=%s"
+        clauses.append("slug=%s")
         params.append(slug)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY created_at DESC LIMIT %s"
     params.append(limit)
     rows = await db.fetchall(sql, tuple(params))

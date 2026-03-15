@@ -410,44 +410,53 @@ function walletRenderAnalyticsSummary(data, node){
 function walletRenderAnalyticsTable(data, node){
   if(!node) return;
   const daily = Array.isArray(data?.daily) ? data.daily : [];
+  const totals = data?.totals || {};
+  const totalWinShares = Number(totals.winning_shares || 0);
+  const totalWinCost = Number(totals.winning_cost || 0);
+  const rangeAvgPrice = totalWinShares > 0 ? ((totalWinCost / totalWinShares) * 100).toFixed(3) : '—';
   if(!daily.length){
-    node.innerHTML = '<div class="text-[11px] text-slate-500">No trades for this range.</div>';
+    node.innerHTML = `
+      <div class="text-[11px] text-slate-400 mb-2">Range average win price: <span class="text-indigo-200">${rangeAvgPrice}</span></div>
+      <div class="text-[11px] text-slate-500">No trades for this range.</div>
+    `;
     return;
   }
   const rows = daily.map(d => {
     const winRate = d.win_rate != null ? (d.win_rate * 100).toFixed(1) + '%' : '—';
     const net = Number(d.net_winning_amount || 0);
     const netClass = net >= 0 ? 'text-emerald-300' : 'text-rose-300';
+    const winShares = Number(d.winning_shares || 0);
+    const winCost = Number(d.winning_cost || 0);
+    const avgPrice = winShares > 0 ? ((winCost / winShares) * 100).toFixed(3) : '—';
     return `
       <tr class="border-b border-slate-800">
         <td class="py-2 pr-3 whitespace-nowrap text-slate-200">${d.date}</td>
         <td class="py-2 pr-3 text-center">${d.total_orders}</td>
-        <td class="py-2 pr-3 text-center">${d.resolved_orders}</td>
         <td class="py-2 pr-3 text-center text-emerald-300">${d.win_count}</td>
         <td class="py-2 pr-3 text-center text-rose-300">${d.loss_count}</td>
         <td class="py-2 pr-3 text-center">${winRate}</td>
+        <td class="py-2 pr-3 text-center text-indigo-200">${avgPrice}</td>
         <td class="py-2 pr-3 text-center text-green-300">${Number(d.winning_shares || 0).toFixed(2)}</td>
-        <td class="py-2 pr-3 text-center">$${Number(d.winning_cost || 0).toFixed(2)}</td>
-        <td class="py-2 pr-3 text-center ${d.winning_net >= 0 ? 'text-emerald-300' : 'text-rose-300'}">$${Number(d.winning_net || 0).toFixed(2)}</td>
+        <td class="py-2 pr-3 text-center">$${winCost.toFixed(2)}</td>
         <td class="py-2 pr-3 text-center text-rose-300">$${Number(d.losing_amount || 0).toFixed(2)}</td>
         <td class="py-2 pr-3 text-center ${netClass}">$${net.toFixed(2)}</td>
       </tr>
     `;
   }).join('');
   node.innerHTML = `
+    <div class="text-[11px] text-slate-400 mb-2">Range average win price: <span class="text-indigo-200">${rangeAvgPrice}</span></div>
     <div class="overflow-auto">
       <table class="min-w-full text-[11px]">
         <thead class="text-slate-400 text-[10px] uppercase tracking-wide">
           <tr>
             <th class="text-left py-2 pr-3">Date</th>
             <th class="text-center py-2 pr-3">Orders</th>
-            <th class="text-center py-2 pr-3">Resolved</th>
             <th class="text-center py-2 pr-3">Wins</th>
             <th class="text-center py-2 pr-3">Losses</th>
             <th class="text-center py-2 pr-3">Win%</th>
+            <th class="text-center py-2 pr-3">Av.</th>
             <th class="text-center py-2 pr-3">Win Shares</th>
             <th class="text-center py-2 pr-3">Win Cost</th>
-            <th class="text-center py-2 pr-3">Win Net</th>
             <th class="text-center py-2 pr-3">Losing Amount</th>
             <th class="text-center py-2 pr-3">Net</th>
           </tr>

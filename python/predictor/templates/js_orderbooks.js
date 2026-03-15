@@ -6,6 +6,7 @@ let obHistView='chart'; // 'chart' or 'table'
 let obLiveInterval=null;
 let obHistoryData=[];
 let obChartData={}; // {outcomeName: [{ts, best_ask, asks}]}
+let obFillMarkers=[]; // [{ts, shares, avgPriceCents, outcome_side}]
 
 let obMarketsPage = 1;
 const OB_MARKETS_PER_PAGE = 20;
@@ -355,6 +356,36 @@ async function obLoadHistory(){
     allSnapshots.sort((a,b)=>b.ts - a.ts);
     obHistoryData = allSnapshots;
 
+    // Load fill events (buy orders with fills)
+    try{
+      const fillRes = await fetch(API + `/api/poly/live/orders?limit=500&slug=${encodeURIComponent(obSelectedMarket.slug)}`);
+      const fillsRaw = await fillRes.json();
+      obFillMarkers = (Array.isArray(fillsRaw) ? fillsRaw : [])
+        .filter(o => o && String(o.side||'').toUpperCase() === 'BUY' && Number(o.fill_shares||0) > 0)
+        .map(o => {
+          const shares = Number(o.fill_shares);
+          const amountUsd = Number(o.amount);
+          if(!Number.isFinite(shares) || shares <= 0 || !Number.isFinite(amountUsd)) return null;
+          const avgUsd = amountUsd / shares;
+          const avgCents = avgUsd * 100;
+          let createdTs = null;
+          if(o.created_at){
+            const rawTs = String(o.created_at).trim();
+            const tsStr = rawTs.toUpperCase().endsWith('Z') ? rawTs : rawTs + 'Z';
+            const parsed = Date.parse(tsStr);
+            if(!Number.isNaN(parsed)) createdTs = Math.floor(parsed / 1000);
+          }
+          return {
+            ts: createdTs,
+            shares,
+            avgPriceCents: avgCents,
+            outcome: String(o.outcome_side||'').toUpperCase(),
+            spentUsd: amountUsd
+          };
+        })
+        .filter(m => m && m.ts !== null);
+    }catch(e){ obFillMarkers = []; }
+
     obHistPage = 1;
 
     // Show correct panel before drawing to avoid squished canvas
@@ -422,6 +453,16 @@ function obDrawChart(){
         maxPrice=Math.max(maxPrice,p.best_ask);
       }
     });
+  });
+  const fillsForScale = Array.isArray(obFillMarkers) ? obFillMarkers : [];
+  fillsForScale.forEach(m => {
+    if(m && m.ts != null){
+      allTs.push(m.ts);
+    }
+    if(m && Number.isFinite(m.avgPriceCents)){
+      minPrice = Math.min(minPrice, m.avgPriceCents);
+      maxPrice = Math.max(maxPrice, m.avgPriceCents);
+    }
   });
   allTs = [...new Set(allTs)].sort((a,b)=>a-b);
   if(!allTs.length) return;
@@ -546,8 +587,9 @@ function obDrawChart(){
   });
 
   // --- Prediction markers on Ask Price chart ---
-  const PRED_MARKER_R = 13;
+  const PRED_MARKER_R = 8;
   const predMarkerHits = []; // [{cx, cy, batch_id, batchData, runs}] for hover
+  const fillMarkerHits = [];
   const marketStartTsForMarkers = (typeof obSelectedMarket !== 'undefined' && obSelectedMarket && obSelectedMarket.ts)
     ? obSelectedMarket.ts
     : null;
@@ -595,16 +637,14 @@ function obDrawChart(){
         // Vertical dashed line
         ctx.save();
         ctx.strokeStyle = iconColor;
-        ctx.globalAlpha = 0.25;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2, 3]);
+        ctx.globalAlpha = 0.22;
+        ctx.lineWidth = 0.8;
         ctx.beginPath(); ctx.moveTo(mx, paddingTop); ctx.lineTo(mx, markerY - PRED_MARKER_R); ctx.stroke();
-        ctx.setLineDash([]);
         ctx.globalAlpha = 1.0;
 
         // Circle border
         ctx.strokeStyle = iconColor;
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.2;
         ctx.globalAlpha = 0.7;
         ctx.beginPath(); ctx.arc(mx, markerY, PRED_MARKER_R, 0, Math.PI * 2); ctx.stroke();
 
@@ -616,14 +656,31 @@ function obDrawChart(){
 
         // Icon
         ctx.fillStyle = iconColor;
-        ctx.font = 'bold 13px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(icon, mx, markerY);
+        if(icon === '\u25b2' || icon === '\u25bc'){
+          const triHeight = 6;
+          const triWidth = 6;
+          ctx.beginPath();
+          if(icon === '\u25b2'){
+            ctx.moveTo(mx, markerY - triHeight/1.5);
+            ctx.lineTo(mx - triWidth/2, markerY + triHeight/2);
+            ctx.lineTo(mx + triWidth/2, markerY + triHeight/2);
+          }else{
+            ctx.moveTo(mx, markerY + triHeight/1.5);
+            ctx.lineTo(mx - triWidth/2, markerY - triHeight/2);
+            ctx.lineTo(mx + triWidth/2, markerY - triHeight/2);
+          }
+          ctx.closePath();
+          ctx.fill();
+        }else{
+          ctx.font = '8px sans-serif';
+          ctx.fillText(icon, mx, markerY);
+        }
 
         // Count
         if(total > 1){
-          ctx.font = 'bold 8px sans-serif';
+          ctx.font = 'bold 7px sans-serif';
           ctx.fillStyle = '#cbd5e1';
           ctx.textBaseline = 'alphabetic';
           ctx.fillText(String(total), mx + PRED_MARKER_R + 3, markerY + 4);
@@ -636,8 +693,64 @@ function obDrawChart(){
     }
   }catch(e){ /* polyPredRunsCache may not exist in non-poly context */ }
 
+  // Draw fill markers (executed buys)
+  try{
+    const fills = Array.isArray(obFillMarkers) ? obFillMarkers : [];
+    fills.forEach(m => {
+      if(m.ts == null || m.shares <= 0) return;
+      if(m.ts < tsMin || m.ts > tsMax) return;
+      if(!Number.isFinite(m.avgPriceCents)) return;
+      const mx = tsToX(m.ts);
+      const my = priceToY(m.avgPriceCents);
+      const radius = 7;
+      const halo = radius + 3;
+      const color = '#38bdf8';
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = '#0ea5e9';
+      ctx.beginPath();
+      ctx.moveTo(mx, my - halo);
+      ctx.lineTo(mx + halo, my);
+      ctx.lineTo(mx, my + halo);
+      ctx.lineTo(mx - halo, my);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath();
+      ctx.moveTo(mx, my - radius);
+      ctx.lineTo(mx + radius, my);
+      ctx.lineTo(mx, my + radius);
+      ctx.lineTo(mx - radius, my);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = '#bae6fd';
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`${m.shares.toFixed(2)} @ ${m.avgPriceCents.toFixed(2)}¢`, mx + 8, my - 4);
+      ctx.restore();
+
+      fillMarkerHits.push({
+        cx: mx,
+        cy: my,
+        r: radius,
+        shares: m.shares,
+        avgPriceCents: m.avgPriceCents,
+        outcome: m.outcome,
+        ts: m.ts,
+        spentUsd: m.spentUsd
+      });
+    });
+  }catch(e){/* ignore fill marker issues */}
+
   // Store chart metadata for hover
-  canvas._obChartMeta = {tsMin,tsMax,tsRange,chartW,chartH,paddingLeft,paddingTop,paddingBottom,paddingRight,totalW,totalH,minPrice,maxPrice,seriesNames,colors,tsToX,priceToY,predMarkerHits};
+  canvas._obChartMeta = {tsMin,tsMax,tsRange,chartW,chartH,paddingLeft,paddingTop,paddingBottom,paddingRight,totalW,totalH,minPrice,maxPrice,seriesNames,colors,tsToX,priceToY,predMarkerHits,fillMarkerHits};
 
   // Attach hover handler (once)
   if(!canvas._obHoverBound){
@@ -704,6 +817,32 @@ function obChartHover(e){
       if(tr.right > window.innerWidth) tooltip.style.left = (e.clientX - tr.width - 10) + 'px';
       if(tr.bottom > window.innerHeight) tooltip.style.top = (e.clientY - tr.height - 10) + 'px';
       return; // don't show ask tooltip when hovering a prediction marker
+    }
+  }
+
+  // --- Check fill marker hover ---
+  const fillHits = meta.fillMarkerHits || [];
+  for(const m of fillHits){
+    const dx = mx - m.cx, dy = my - m.cy;
+    if(Math.sqrt(dx*dx + dy*dy) <= m.r + 4){
+      const d = new Date(m.ts * 1000);
+      const dateStr = d.toLocaleDateString('ru-RU',{timeZone:'UTC'});
+      const timeStr = d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'UTC'});
+      const sideColor = m.outcome === 'UP' ? '#22c55e' : '#ef4444';
+      const spent = Number.isFinite(m.spentUsd) ? `$${Number(m.spentUsd).toFixed(2)}` : '—';
+      let html = '<div style="font-weight:700;font-size:13px;color:#38bdf8">Live Buy Filled</div>';
+      html += `<div style="font-size:11px;color:#94a3b8;margin-bottom:4px">${dateStr} ${timeStr} UTC</div>`;
+      html += `<div style="font-size:12px;margin-bottom:4px;color:${sideColor}">${m.outcome || '—'}</div>`;
+      html += `<div style="font-size:13px;color:#e2e8f0"><strong>${m.shares.toFixed(4)}</strong> shares @ <strong>${m.avgPriceCents.toFixed(2)}¢</strong></div>`;
+      html += `<div style="font-size:11px;color:#cbd5e1">Total: ${spent}</div>`;
+      tooltip.innerHTML = html;
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.clientX + 14) + 'px';
+      tooltip.style.top = (e.clientY - 10) + 'px';
+      const tr = tooltip.getBoundingClientRect();
+      if(tr.right > window.innerWidth) tooltip.style.left = (e.clientX - tr.width - 10) + 'px';
+      if(tr.bottom > window.innerHeight) tooltip.style.top = (e.clientY - tr.height - 10) + 'px';
+      return;
     }
   }
 

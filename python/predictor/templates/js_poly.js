@@ -2391,7 +2391,10 @@ function drawCandleChart(canvas, candles, marketTs, markers){
       if(idx === undefined) return;
       const cx = candleX(idx) + candleW / 2;
       const c = candles[idx];
-      const yBot = priceY(c.l) + 6;  // below the candle low
+      const yBot = priceY(c.l) + 1;  // below the candle low
+      const markerRadius = 0.8;
+      const triangleHalfWidth = 1.3;
+      const triangleHeight = 1.8;
 
       // Determine dominant direction
       const total = m.up + m.down + m.unk;
@@ -2408,23 +2411,40 @@ function drawCandleChart(canvas, candles, marketTs, markers){
       ctx.fillStyle = iconColor;
       ctx.globalAlpha = 0.18;
       ctx.beginPath();
-      ctx.arc(cx, yBot + 6, 7, 0, Math.PI * 2);
+      ctx.arc(cx, yBot + markerRadius, markerRadius, 0, Math.PI * 2);
       ctx.fill();
       ctx.globalAlpha = 1.0;
 
-      // Draw icon text
+      // Draw minimalist icon (custom triangles for up/down)
       ctx.fillStyle = iconColor;
-      ctx.font = 'bold 10px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(icon, cx, yBot + 6);
+      ctx.strokeStyle = iconColor;
+      if(icon === '\u25b2'){ // up triangle
+        ctx.beginPath();
+        ctx.moveTo(cx, yBot - triangleHeight);
+        ctx.lineTo(cx - triangleHalfWidth, yBot + triangleHalfWidth);
+        ctx.lineTo(cx + triangleHalfWidth, yBot + triangleHalfWidth);
+        ctx.closePath();
+        ctx.fill();
+      }else if(icon === '\u25bc'){ // down triangle
+        ctx.beginPath();
+        ctx.moveTo(cx, yBot + triangleHeight);
+        ctx.lineTo(cx - triangleHalfWidth, yBot - triangleHalfWidth);
+        ctx.lineTo(cx + triangleHalfWidth, yBot - triangleHalfWidth);
+        ctx.closePath();
+        ctx.fill();
+      }else{
+        ctx.font = '2.2px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(icon, cx, yBot);
+      }
 
       // Draw count label below icon
       if(total > 0){
-        ctx.font = '8px sans-serif';
+        ctx.font = '2px sans-serif';
         ctx.fillStyle = '#94a3b8';
         ctx.textBaseline = 'top';
-        ctx.fillText(String(total), cx, yBot + 14);
+        ctx.fillText(String(total), cx, yBot + 3);
       }
       ctx.textBaseline = 'alphabetic';
     });

@@ -34,6 +34,8 @@ db = DbProvider()
 trading_client = PolymarketClient()
 
 MAX_LIMIT_PRICE_USD = 0.53
+PRICE_RETRY_WINDOW_SEC = 180
+PRICE_RETRY_INTERVAL_SEC = 10
 MSK_UTC_OFFSET_HOURS = 3
 MSK_UTC_OFFSET = timedelta(hours=MSK_UTC_OFFSET_HOURS)
 MSK_UTC_OFFSET_SECONDS = int(MSK_UTC_OFFSET.total_seconds())
@@ -228,6 +230,49 @@ async def _cancel_after_timeout(order_id: str, order_row_id: Any, timeout_sec: i
     except Exception as e:
         logger.error("cancel_after_timeout failed: %s", e)
 
+
+async def _market_has_completed_buy(slug: str) -> bool:
+    if not slug:
+        return False
+    try:
+        row = await db.fetchone(
+            "SELECT 1 FROM poly_live_orders WHERE slug=%s AND COALESCE(fill_shares,0) > 0 LIMIT 1",
+            (slug,),
+        )
+        return bool(row)
+    except Exception as exc:
+        logger.error("market fill check failed for %s: %s", slug, exc)
+        # Fail safe: avoid double-buy if unsure
+        return True
+
+
+async def _wait_for_price_within_threshold(
+    slug: str,
+    asset_id: str,
+    price_threshold: float,
+) -> Optional[float]:
+    """Poll best ask every PRICE_RETRY_INTERVAL_SEC until it falls below threshold or timeout."""
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + PRICE_RETRY_WINDOW_SEC
+    attempt = 0
+    while loop.time() < deadline:
+        await asyncio.sleep(PRICE_RETRY_INTERVAL_SEC)
+        if await _market_has_completed_buy(slug):
+            logger.info("Market %s already filled while waiting for better price", slug)
+            return None
+        try:
+            refreshed = trading_client.get_best_ask(asset_id)
+            if refreshed is None:
+                continue
+            attempt += 1
+            current_price = float(refreshed)
+            logger.info("  price retry #%d: %.4f", attempt, current_price)
+            if current_price <= price_threshold:
+                return current_price
+        except Exception as exc:
+            logger.debug("price retry fetch failed: %s", exc)
+    return None
+
 # ---------------------------------------------------------------------------
 # Ensure tables exist (run once at startup)
 # ---------------------------------------------------------------------------
@@ -408,13 +453,36 @@ async def buy_after_prediction(
     if refreshed_best_ask is not None and float(refreshed_best_ask) > 0:
         snapshot_price = float(refreshed_best_ask)
 
+    if await _market_has_completed_buy(slug):
+        msg = f"Market {slug} already has a filled buy; skip duplicate order"
+        logger.warning(msg)
+        return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
     if snapshot_price is None or float(snapshot_price) <= 0:
         msg = f"Invalid snapshot_price {snapshot_price}; skip buy"
         logger.warning(msg)
         return {"success": False, "error": msg, "order_row_id": None, "position": None}
 
     if snapshot_price > price_threshold:
-        msg = f"Snapshot price {snapshot_price:.4f} exceeds threshold {price_threshold:.4f}; skip buy"
+        logger.info(
+            "  snapshot price %.4f above threshold %.4f — waiting up to %ss for better price",
+            snapshot_price,
+            price_threshold,
+            PRICE_RETRY_WINDOW_SEC,
+        )
+        awaited_price = await _wait_for_price_within_threshold(slug, asset_id, price_threshold)
+        if awaited_price is None:
+            msg = (
+                f"Snapshot price {snapshot_price:.4f} exceeds threshold {price_threshold:.4f} "
+                "and no better quote arrived within retry window"
+            )
+            logger.warning(msg)
+            return {"success": False, "error": msg, "order_row_id": None, "position": None}
+        snapshot_price = float(awaited_price)
+        logger.info("  price recovered to %.4f — proceeding with buy", snapshot_price)
+
+    if await _market_has_completed_buy(slug):
+        msg = f"Market {slug} received a fill before execution; skip duplicate order"
         logger.warning(msg)
         return {"success": False, "error": msg, "order_row_id": None, "position": None}
 
@@ -898,6 +966,7 @@ async def list_all_positions(limit: int = 100, slug: Optional[str] = None) -> Li
 async def list_orders(limit: int = 100, slug: Optional[str] = None) -> List[Dict[str, Any]]:
     sql = (
         "SELECT id, slug, asset_id, outcome_side, side, order_type, price, amount, "
+        "fill_shares, fill_total_spent_usd, fill_avg_price_cents, "
         "clob_order_id, clob_status, clob_error_msg, created_at "
         "FROM poly_live_orders"
     )
@@ -916,7 +985,8 @@ async def list_orders(limit: int = 100, slug: Optional[str] = None) -> List[Dict
         out.append({
             "id": r[0], "slug": r[1], "asset_id": r[2], "outcome_side": r[3],
             "side": r[4], "order_type": r[5], "price": r[6], "amount": r[7],
-            "clob_order_id": r[8], "clob_status": r[9], "clob_error_msg": r[10],
-            "created_at": str(r[11]) if r[11] else None,
+            "fill_shares": r[8], "fill_total_spent_usd": r[9], "fill_avg_price_cents": r[10],
+            "clob_order_id": r[11], "clob_status": r[12], "clob_error_msg": r[13],
+            "created_at": str(r[14]) if r[14] else None,
         })
     return out

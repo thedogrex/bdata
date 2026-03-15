@@ -551,7 +551,7 @@ function walletSetOrdersPage(page){
 function renderWallet(data){
   const balEl = document.getElementById('wallet-balance');
   const ordEl = document.getElementById('wallet-orders');
-  if(!balEl || !ordEl) return;
+  if(!balEl) return;
 
   const balance = data?.balance || {};
   const orders = Array.isArray(data?.orders) ? data.orders : [];
@@ -603,8 +603,10 @@ function renderWallet(data){
   };
   balEl.innerHTML = friendlyBalance || '<div class="text-slate-500 text-xs">No balance data.</div>';
 
-  walletOrdersCache = orders.slice();
-  walletRenderOrders(ordEl);
+  if(ordEl){
+    walletOrdersCache = orders.slice();
+    walletRenderOrders(ordEl);
+  }
 }
 
 // ===== BACKTEST =====
@@ -2278,30 +2280,30 @@ function analyticsKellyRenderTable(d){
   };
   const sb = d.start_bank || 100;
 
-  const calcAvgFill = (fillKey, sharesKey) => {
+  const calcAvgWinningCost = (betKey, sharesKey) => {
     let totalShares = 0;
-    let weightedCents = 0;
+    let totalCost = 0;
     trades.forEach(t => {
-      if(t.skipped) return;
+      if(t.skipped || !t.correct) return;
       const shares = Number(t[sharesKey] || 0);
-      const fill = Number(t[fillKey] || 0);
-      if(!isFinite(shares) || !isFinite(fill) || shares <= 0 || fill <= 0) return;
+      const cost = Number(t[betKey] || 0);
+      if(!isFinite(shares) || !isFinite(cost) || shares <= 0 || cost <= 0) return;
       totalShares += shares;
-      weightedCents += shares * fill;
+      totalCost += cost;
     });
     if(totalShares <= 0) return null;
-    return weightedCents / totalShares;
+    return (totalCost / totalShares) * 100; // cents per share
   };
 
-  const hkAvgFill = calcAvgFill('hk_fill', 'hk_shares');
-  const fkAvgFill = calcAvgFill('fk_fill', 'fk_shares');
+  const hkAvgFill = calcAvgWinningCost('hk_bet', 'hk_shares');
+  const fkAvgFill = calcAvgWinningCost('fk_bet', 'fk_shares');
   const avgFillText = (() => {
     if(hkAvgFill == null && fkAvgFill == null) return '';
     const fmt = (cents) => `${cents.toFixed(2)}¢ ($${(cents/100).toFixed(4)})`;
     const parts = [];
     if(hkAvgFill != null) parts.push(`<span class="text-slate-200">½K: <strong>${fmt(hkAvgFill)}</strong></span>`);
     if(fkAvgFill != null) parts.push(`<span class="text-slate-200">Full K: <strong>${fmt(fkAvgFill)}</strong></span>`);
-    return `<div class="text-xs text-slate-400 mb-2">Средняя реальная стоимость выкупа · ${parts.join(' · ')}</div>`;
+    return `<div class="text-xs text-slate-400 mb-2">Средняя реальная стоимость выкупа (только победы) · ${parts.join(' · ')}</div>`;
   })();
 
   let html = `${avgFillText}<h3 class="font-semibold mb-3">All Simulated Trades (${trades.length})</h3>
@@ -2365,8 +2367,8 @@ function analyticsRenderSummary(s){
     {label:'Total Predictions',    value: s.total_predictions,  sub:'individual template runs'},
     {label:'Correct Predictions',  value: s.correct_count !== undefined ? `${s.correct_count} / ${s.resolved_count}` : '—', sub:'of resolved markets'},
     {label:'Accuracy',             value: s.correct_pct!==null&&s.correct_pct!==undefined ? s.correct_pct+'%' : '—', sub:'% correct on resolved', accent: s.correct_pct!=null?(s.correct_pct>=55?'green':s.correct_pct>=50?'yellow':'red'):null},
-    {label:'Avg / Day',            value: s.avg_per_day,       sub:'predictions per active day'},
-    {label:'Avg / Hour',           value: s.avg_per_hour,      sub:'predictions per active hour'},
+    {label:'Avg / Day',            value: s.avg_per_day,       sub:'predicted markets per active day'},
+    {label:'Avg / Hour',           value: s.avg_per_hour,      sub:'predicted markets per active hour'},
   ];
   const accentColor={'green':'#22c55e','yellow':'#eab308','red':'#ef4444'};
   el.innerHTML = cards.map(c=>{

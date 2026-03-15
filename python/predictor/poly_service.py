@@ -26,6 +26,7 @@ logger.setLevel(logging.INFO)
 MAX_PRICE_CAP_CENTS = 53
 BET_SIZE_CONFIRM_TTL_SEC = 60
 MSK_UTC_OFFSET_HOURS = 3
+MSK_TZ_NAME = "+03:00"
 DAILY_START_HOUR_MSK = 8
 DAILY_REPORT_MINUTE_MSK = 5
 
@@ -2432,17 +2433,19 @@ async def get_predictions_analytics(
     ]
     params: list = []
 
+    msk_started = f"CONVERT_TZ(pr.started_at, '+00:00', '{MSK_TZ_NAME}')"
+
     if date_from:
-        where.append("DATE(pr.started_at) >= %s")
+        where.append(f"DATE({msk_started}) >= %s")
         params.append(date_from)
     if date_to:
-        where.append("DATE(pr.started_at) <= %s")
+        where.append(f"DATE({msk_started}) <= %s")
         params.append(date_to)
     if hour_from is not None:
-        where.append("HOUR(pr.started_at) >= %s")
+        where.append(f"HOUR({msk_started}) >= %s")
         params.append(int(hour_from))
     if hour_to is not None:
-        where.append("HOUR(pr.started_at) <= %s")
+        where.append(f"HOUR({msk_started}) <= %s")
         params.append(int(hour_to))
 
     where_sql = " AND ".join(where)
@@ -2455,8 +2458,8 @@ async def get_predictions_analytics(
             COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL THEN 1 ELSE 0 END), 0) AS resolved_count,
             COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL
                       AND pr.prediction = pm.resolved_outcome THEN 1 ELSE 0 END), 0) AS correct_count,
-            COUNT(DISTINCT DATE(pr.started_at))                          AS active_days,
-            COUNT(DISTINCT HOUR(pr.started_at))                          AS active_hours
+            COUNT(DISTINCT DATE({msk_started}))                          AS active_days,
+            COUNT(DISTINCT CONCAT(DATE({msk_started}), '-', LPAD(HOUR({msk_started}), 2, '0'))) AS active_day_hours
         FROM poly_pred_runs pr
         JOIN poly_markets pm ON pm.slug = pr.slug
         WHERE {where_sql}
@@ -2467,16 +2470,14 @@ async def get_predictions_analytics(
     resolved_count    = int(row[2] or 0) if row else 0
     correct_count     = int(row[3] or 0) if row else 0
     active_days       = int(row[4]) if row else 0
-    active_hours      = int(row[5]) if row else 0
+    active_hour_slots = int(row[5]) if row else 0
 
     correct_pct = round(correct_count / resolved_count * 100, 1) if resolved_count > 0 else None
-    avg_per_day  = round(total_predictions / active_days, 1)  if active_days  > 0 else 0
-    avg_per_hour = round(total_predictions / active_hours, 1) if active_hours > 0 else 0
 
     # ── Per-day breakdown ────────────────────────────────────────────────────
     day_q = f"""
         SELECT
-            DATE(pr.started_at)                                           AS day,
+            DATE({msk_started})                                           AS day,
             COUNT(*)                                                      AS predictions,
             COUNT(DISTINCT pm.slug)                                       AS markets,
             COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL THEN 1 ELSE 0 END), 0) AS resolved,
@@ -2485,7 +2486,7 @@ async def get_predictions_analytics(
         FROM poly_pred_runs pr
         JOIN poly_markets pm ON pm.slug = pr.slug
         WHERE {where_sql}
-        GROUP BY DATE(pr.started_at)
+        GROUP BY DATE({msk_started})
         ORDER BY day ASC
     """
     day_rows = await db.fetchall(day_q, params or None)
@@ -2505,7 +2506,7 @@ async def get_predictions_analytics(
     # ── Per-hour breakdown ───────────────────────────────────────────────────
     hour_q = f"""
         SELECT
-            HOUR(pr.started_at)                                           AS hr,
+            HOUR({msk_started})                                           AS hr,
             COUNT(*)                                                      AS predictions,
             COUNT(DISTINCT pm.slug)                                       AS markets,
             COALESCE(SUM(CASE WHEN pm.resolved_outcome IS NOT NULL THEN 1 ELSE 0 END), 0) AS resolved,
@@ -2514,7 +2515,7 @@ async def get_predictions_analytics(
         FROM poly_pred_runs pr
         JOIN poly_markets pm ON pm.slug = pr.slug
         WHERE {where_sql}
-        GROUP BY HOUR(pr.started_at)
+        GROUP BY HOUR({msk_started})
         ORDER BY hr ASC
     """
     hour_rows = await db.fetchall(hour_q, params or None)
@@ -2530,6 +2531,9 @@ async def get_predictions_analytics(
             "correct":     cor,
             "correct_pct": round(cor / res * 100, 1) if res > 0 else None,
         })
+
+    avg_per_day  = round(sum(d.get("markets", 0) for d in per_day) / len(per_day), 1) if per_day else 0
+    avg_per_hour = round(total_markets / active_hour_slots, 1) if active_hour_slots > 0 else 0
 
     # ── Per-template breakdown ────────────────────────────────────────────────
     tpl_q = f"""
@@ -2596,17 +2600,19 @@ async def get_ask_price_analysis(
     ]
     pred_params: list = []
 
+    msk_finished = f"CONVERT_TZ(pr.finished_at, '+00:00', '{MSK_TZ_NAME}')"
+
     if date_from:
-        pred_where.append("DATE(pr.finished_at) >= %s")
+        pred_where.append(f"DATE({msk_finished}) >= %s")
         pred_params.append(date_from)
     if date_to:
-        pred_where.append("DATE(pr.finished_at) <= %s")
+        pred_where.append(f"DATE({msk_finished}) <= %s")
         pred_params.append(date_to)
     if hour_from is not None:
-        pred_where.append("HOUR(pr.finished_at) >= %s")
+        pred_where.append(f"HOUR({msk_finished}) >= %s")
         pred_params.append(int(hour_from))
     if hour_to is not None:
-        pred_where.append("HOUR(pr.finished_at) <= %s")
+        pred_where.append(f"HOUR({msk_finished}) <= %s")
         pred_params.append(int(hour_to))
 
     where_sql = " AND ".join(pred_where)
@@ -2628,7 +2634,7 @@ async def get_ask_price_analysis(
     # ── Step 2: fetch first snapshot (asks_json) per prediction ──────────────
     # Join to the earliest snapshot within the window so we get price+size detail.
     snap_q = f"""
-        SELECT pr.id, obs.asks_json, obs.best_ask_cents, DATE(pr.finished_at) AS day
+        SELECT pr.id, obs.asks_json, obs.best_ask_cents, DATE({msk_finished}) AS day
         FROM poly_pred_runs pr
         JOIN poly_markets pm ON pm.slug = pr.slug
         JOIN poly_outcomes po
@@ -2818,17 +2824,19 @@ async def get_kelly_simulation(
     ]
     pred_params: list = []
 
+    msk_finished = f"CONVERT_TZ(pr.finished_at, '+00:00', '{MSK_TZ_NAME}')"
+
     if date_from:
-        pred_where.append("DATE(pr.finished_at) >= %s")
+        pred_where.append(f"DATE({msk_finished}) >= %s")
         pred_params.append(date_from)
     if date_to:
-        pred_where.append("DATE(pr.finished_at) <= %s")
+        pred_where.append(f"DATE({msk_finished}) <= %s")
         pred_params.append(date_to)
     if hour_from is not None:
-        pred_where.append("HOUR(pr.finished_at) >= %s")
+        pred_where.append(f"HOUR({msk_finished}) >= %s")
         pred_params.append(int(hour_from))
     if hour_to is not None:
-        pred_where.append("HOUR(pr.finished_at) <= %s")
+        pred_where.append(f"HOUR({msk_finished}) <= %s")
         pred_params.append(int(hour_to))
 
     where_sql = " AND ".join(pred_where)

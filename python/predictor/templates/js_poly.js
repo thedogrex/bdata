@@ -1101,7 +1101,8 @@ function clearPolySelection(){
   document.getElementById('poly-orderbook-up').innerHTML='<span class="text-slate-400">Select a market.</span>';
   document.getElementById('poly-orderbook-down').innerHTML='<span class="text-slate-400">Select a market.</span>';
   document.getElementById('poly-ob-status').textContent='';
-  document.getElementById('poly-sim-msg').textContent='';
+  const simMsg = document.getElementById('poly-sim-msg');
+  if(simMsg) simMsg.textContent='';
   const priceEl = document.getElementById('poly-sim-price');
   if(priceEl) priceEl.value = '';
   polySelectedPriceCents = null;
@@ -1349,7 +1350,8 @@ async function showPolyMarket(slug){
   polyPredRunsCache = [];
   document.getElementById('poly-orderbook-up').innerHTML='<span class="text-slate-400">Loading...</span>';
   document.getElementById('poly-orderbook-down').innerHTML='<span class="text-slate-400">Loading...</span>';
-  document.getElementById('poly-sim-msg').textContent='';
+  const simMsg = document.getElementById('poly-sim-msg');
+  if(simMsg) simMsg.textContent='';
   const buyBtn = document.getElementById('poly-sim-submit');
   if(buyBtn){buyBtn.disabled = true;}
   const priceEl = document.getElementById('poly-sim-price');
@@ -1531,7 +1533,8 @@ function polySetBuyPrice(priceCents, side){
   if(priceEl) priceEl.value = priceCents;
   const buyBtn = document.getElementById('poly-sim-submit');
   if(buyBtn) buyBtn.disabled = false;
-  document.getElementById('poly-sim-msg').textContent='';
+  const simMsg = document.getElementById('poly-sim-msg');
+  if(simMsg) simMsg.textContent='';
   // Re-render highlighting for selected row
   if(polySelectedMarket) updatePolyOrderBooks();
 }
@@ -2542,15 +2545,20 @@ function drawCandleChart(canvas, candles, marketTs, markers){
 
 async function submitSimTrade(){
   const msg=document.getElementById('poly-sim-msg');
+  if(!msg){ console.warn('submitSimTrade called without sim UI'); return; }
   msg.textContent='';
   if(!polySelectedOutcome){msg.textContent='Select an outcome first';return}
   if(!polySelectedMarket || !polySelectedMarket.slug){msg.textContent='Select a market first';return}
-  const priceVal = document.getElementById('poly-sim-price')?.value;
+  const priceInput = document.getElementById('poly-sim-price');
+  if(!priceInput){ console.warn('Sim price input missing'); return; }
+  const priceVal = priceInput.value;
   if(!priceVal){msg.textContent='Select a price from order book';return}
   if(!polySelectedSide){msg.textContent='Select a price from order book';return}
   const price = parseFloat(priceVal);
   if(!price || price <= 0){msg.textContent='Invalid price';return}
-  const qty=parseFloat(document.getElementById('poly-sim-qty').value)||0;
+  const qtyInput = document.getElementById('poly-sim-qty');
+  if(!qtyInput){ console.warn('Sim qty input missing'); return; }
+  const qty=parseFloat(qtyInput.value)||0;
   if(qty <= 0){msg.textContent='Qty must be > 0';return}
   try{
     const res=await fetch(API+'/api/poly/sim/trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({

@@ -405,32 +405,6 @@ async def api_candles_sync_status():
     return get_candle_sync_status()
 
 
-@app.post("/api/poly/sim/trade")
-async def api_poly_sim_trade(req: SimTradeRequest):
-    try:
-        return await poly_service.create_sim_trade(
-            req.slug, req.asset_id, "BUY", req.qty,
-            outcome_side=req.outcome_side, requested_price=req.price,
-        )
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-
-@app.get("/api/poly/sim/trades")
-async def api_poly_sim_trades(limit: int = Query(200)):
-    return await poly_service.list_sim_trades(limit=limit)
-
-
-@app.get("/api/poly/sim/positions")
-async def api_poly_sim_positions(slug: str | None = Query(None)):
-    return await poly_service.get_sim_positions(slug=slug)
-
-
-@app.get("/api/poly/sim/markets_with_positions")
-async def api_poly_sim_markets_with_positions():
-    return await poly_service.get_sim_markets_with_positions()
-
-
 @app.post("/api/backtest")
 async def api_run_backtest(req: BacktestRequest):
     """Queue a backtest task. Returns task_id immediately."""

@@ -4,6 +4,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timedelta, date
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -21,6 +22,8 @@ if not logger.handlers:
     _handler.setFormatter(logging.Formatter("[%(name)s %(levelname)s %(asctime)s] %(message)s", datefmt="%H:%M:%S"))
     logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
+
+PRED_DATA_LOG_DIR = Path(__file__).resolve().parent / "pred_data_logs"
 
 MAX_PRICE_CAP_CENTS = 53
 BET_SIZE_CONFIRM_TTL_SEC = 60
@@ -52,6 +55,65 @@ def _utcnow() -> datetime:
 
 def _new_request_id() -> str:
     return uuid.uuid4().hex
+
+
+def _maybe_log_prediction_window(
+    slug: str,
+    market_ts: int,
+    rows: List[Tuple[Any, ...]],
+    window_size: int,
+    table: str,
+    prediction_label: str,
+) -> None:
+    if not getattr(config, "LOG_PRED_DATA_FILES", False):
+        return
+
+    try:
+        PRED_DATA_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+        label_safe = (prediction_label or "undefined").strip().lower()
+        if label_safe not in {"up", "down", "undefined"}:
+            label_safe = "undefined"
+        prefix = f"{market_ts}_{label_safe}_"
+        prediction_index = 0
+        while (PRED_DATA_LOG_DIR / f"{prefix}{prediction_index}.json").exists():
+            prediction_index += 1
+
+        sorted_rows = sorted(rows, key=lambda r: int(r[0]), reverse=True)
+
+        candles_payload: List[Dict[str, Any]] = []
+        for idx, row in enumerate(sorted_rows):
+            open_time_us = int(row[0])
+            close_val = row[4]
+            try:
+                close_float = float(close_val) if close_val is not None else None
+            except (TypeError, ValueError):
+                close_float = None
+            candles_payload.append(
+                {
+                    "idx": idx,
+                    "ts": open_time_us // 1_000_000,
+                    "ts_us": open_time_us,
+                    "close": close_float,
+                }
+            )
+
+        payload = {
+            "slug": slug,
+            "market_ts": market_ts,
+            "prediction_index": prediction_index,
+            "window_size": window_size,
+            "table": table,
+            "prediction_label": prediction_label,
+            "candles_total": len(candles_payload),
+            "logged_at_ts": int(time.time()),
+            "candles": candles_payload,
+        }
+
+        log_path = PRED_DATA_LOG_DIR / f"{prefix}{prediction_index}.json"
+        log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        logger.warning("[pred_log] failed to persist prediction window", exc_info=True)
 
 
 def _current_request_status() -> Optional[str]:
@@ -1353,6 +1415,15 @@ async def predict_for_market(
     prob = float(prob_arr[0])
     label = "UP" if pred == 1 else ("DOWN" if pred == 0 else "UNDEFINED")
 
+    _maybe_log_prediction_window(
+        slug=slug,
+        market_ts=market_ts,
+        rows=rows,
+        window_size=window_size,
+        table=table,
+        prediction_label=label,
+    )
+
     # --- Diagnostics: show WHY this candle got this signal ---
     period = strategy.params.get("rsi_period", 14)
     rsi_col = f"rsi_{period}" if f"rsi_{period}" in df_predict.columns else "rsi_14"
@@ -1517,7 +1588,10 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
             return
         now_utc = int(time.time())
         if not (market_ts and now_utc < market_ts):
-            logger.info("[auto_trade] skip: market not in future", {"slug": slug, "market_ts": market_ts, "now": now_utc})
+            logger.info(
+                "[auto_trade] skip: market not in future",
+                {"slug": slug, "market_ts": market_ts, "now": now_utc},
+            )
             return
 
         # Resolve outcome asset_id for side
@@ -1574,6 +1648,7 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
             bank_usd=None,
             batch_id=None,
             template_id=None,
+            enable_price_wait=True,
         )
         logger.info("[auto_trade] order result", {"slug": slug, "result": result})
     except Exception as e:

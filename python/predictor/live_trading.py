@@ -33,8 +33,19 @@ if not logger.handlers:
 db = DbProvider()
 trading_client = PolymarketClient()
 
+_market_buy_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_market_lock(slug: Optional[str]) -> asyncio.Lock:
+    key = slug or "__default__"
+    lock = _market_buy_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _market_buy_locks[key] = lock
+    return lock
+
 MAX_LIMIT_PRICE_USD = 0.53
-PRICE_RETRY_WINDOW_SEC = 180
+PRICE_RETRY_WINDOW_SEC = 300
 PRICE_RETRY_INTERVAL_SEC = 10
 MSK_UTC_OFFSET_HOURS = 3
 MSK_UTC_OFFSET = timedelta(hours=MSK_UTC_OFFSET_HOURS)
@@ -359,6 +370,7 @@ async def buy_after_prediction(
     max_buy_usd: float = 20.0,
     batch_id: Optional[str] = None,
     template_id: Optional[int] = None,
+    enable_price_wait: bool = False,
 ) -> Dict[str, Any]:
     """
     Execute a limit buy on Polymarket CLOB after a prediction.
@@ -377,10 +389,17 @@ async def buy_after_prediction(
     Returns:
         Dict with order info and position info
     """
-    # Compute amount from bank if caller passed 0/None
-    computed_from_bank = False
-    if amount_usd is None or float(amount_usd) <= 0:
-        computed_from_bank = True
+    market_lock = _get_market_lock(slug)
+    if market_lock.locked():
+        logger.info("Market %s already has a buy in flight; waiting for lock", slug)
+    await market_lock.acquire()
+    logger.debug("Market %s buy lock acquired", slug)
+
+    try:
+        # Compute amount from bank if caller passed 0/None
+        computed_from_bank = False
+        if amount_usd is None or float(amount_usd) <= 0:
+            computed_from_bank = True
         fetched_bank = False
         if bank_usd is None:
             try:
@@ -410,6 +429,8 @@ async def buy_after_prediction(
             float(max_buy_usd),
             float(amount_usd),
         )
+    except Exception:
+        pass
 
     if float(price_threshold) > MAX_LIMIT_PRICE_USD:
         msg = f"Limit price {float(price_threshold):.4f} exceeds hard cap {MAX_LIMIT_PRICE_USD:.4f}"
@@ -463,7 +484,7 @@ async def buy_after_prediction(
         logger.warning(msg)
         return {"success": False, "error": msg, "order_row_id": None, "position": None}
 
-    if snapshot_price > price_threshold:
+    if enable_price_wait and snapshot_price > price_threshold:
         logger.info(
             "  snapshot price %.4f above threshold %.4f — waiting up to %ss for better price",
             snapshot_price,
@@ -491,6 +512,11 @@ async def buy_after_prediction(
         worst_price = float(min(float(price_threshold), float(MAX_LIMIT_PRICE_USD)))
         if worst_price <= 0:
             msg = f"Invalid worst_price {worst_price}; skip buy"
+            logger.warning(msg)
+            return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
+        if await _market_has_completed_buy(slug):
+            msg = f"Market {slug} received a fill while preparing order; skip duplicate buy"
             logger.warning(msg)
             return {"success": False, "error": msg, "order_row_id": None, "position": None}
 
@@ -603,6 +629,11 @@ async def buy_after_prediction(
     logger.info("  limit_price=%.4f (from snapshot)", limit_price)
 
     # Use limit buy at snapshot price. Shares derived from snapshot price.
+    if await _market_has_completed_buy(slug):
+        msg = f"Market {slug} received a fill while preparing limit order; skip duplicate buy"
+        logger.warning(msg)
+        return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
     size_shares = amount_usd / limit_price if limit_price > 0 else 0
     logger.debug("Computed size_shares=%.6f from amount_usd=%.2f and limit_price=%.6f", size_shares, amount_usd, limit_price)
     loop = asyncio.get_event_loop()
@@ -711,6 +742,11 @@ async def buy_after_prediction(
 
         except Exception as e:
             logger.error("Failed to update position in DB: %s", e, exc_info=True)
+
+
+    if market_lock.locked():
+        market_lock.release()
+        logger.debug("Market %s buy lock released", slug)
 
     return {
         "success": success,

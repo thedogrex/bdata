@@ -42,6 +42,7 @@ NEED_CONFIRMATION: bool = _env_bool("NEED_CONFIRMATION", True)
 
 BUY_MARKET: bool = _env_bool("BUY_MARKET", True)
 
+LOG_PRED_DATA_FILES: bool = _env_bool("LOG_PRED_DATA_FILES", False)
 
 TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_ADMIN_CHAT_ID: str = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")

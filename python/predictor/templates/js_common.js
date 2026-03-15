@@ -155,6 +155,7 @@ async function init(){
   loadDefaultGrid();
   startPolling();
   loadAutopredictState();
+  switchTab(getInitialTab());
 }
 
 function updateDesc(){
@@ -275,7 +276,34 @@ function ensureBacktestConfig(){
 
 // ===== TABS =====
 const TABS=['backtest','bruteforce','history','best','best_compare','poly','wallet','analytics'];
+
+function getInitialTab(){
+  let tabParam = null;
+  try{
+    const url = new URL(window.location.href);
+    tabParam = url.searchParams.get('tab');
+    if(!tabParam && url.hash){
+      tabParam = url.hash.replace('#','').trim();
+    }
+  }catch(e){ tabParam = null; }
+
+  if(tabParam && TABS.includes(tabParam)) return tabParam;
+
+  const activeBtn = document.querySelector('[id^="tab-"].tab-active');
+  if(activeBtn){
+    const id = activeBtn.id.replace('tab-','');
+    if(TABS.includes(id)) return id;
+  }
+  return 'backtest';
+}
+
 function switchTab(tab){
+  if(!TABS.includes(tab)) tab = 'backtest';
+  try{
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', tab);
+    history.replaceState(null, '', url);
+  }catch(e){/* ignore */}
   TABS.forEach(t=>{
     const panel=document.getElementById('panel-'+t);
     if(panel) panel.classList.toggle('hidden',t!==tab);
@@ -293,7 +321,7 @@ function switchTab(tab){
   if(tab==='history')loadHistory();
   if(tab==='best')loadBest();
   if(tab==='bruteforce')loadBfSessions();
-  if(tab==='poly'){loadPolyMarkets();loadSimTrades();loadSimPositions();}
+  if(tab==='poly'){loadPolyMarkets();}
   else{
     clearPolySelectionComplete();
     stopPolyOrderBookUpdates();

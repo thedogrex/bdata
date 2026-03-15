@@ -1091,16 +1091,20 @@ function clearPolySelection(){
   polySelectedOutcome=null;
   polySelectedOutcomeAssetId=null;
   stopPolyOrderBookUpdates();
-  document.getElementById('poly-market-title').textContent='';
+  const titleEl = document.getElementById('poly-market-title');
+  if(titleEl) titleEl.textContent='';
   const emptyEl = document.getElementById('poly-market-empty');
   const secEl = document.getElementById('poly-market-sections');
   if(emptyEl) emptyEl.classList.remove('hidden');
   if(secEl) secEl.classList.add('hidden');
   const detailEl = document.getElementById('poly-market-detail');
   if(detailEl) detailEl.innerHTML='';
-  document.getElementById('poly-orderbook-up').innerHTML='<span class="text-slate-400">Select a market.</span>';
-  document.getElementById('poly-orderbook-down').innerHTML='<span class="text-slate-400">Select a market.</span>';
-  document.getElementById('poly-ob-status').textContent='';
+  const obUp = document.getElementById('poly-orderbook-up');
+  const obDown = document.getElementById('poly-orderbook-down');
+  const obStatus = document.getElementById('poly-ob-status');
+  if(obUp) obUp.innerHTML='<span class="text-slate-400">Select a market.</span>';
+  if(obDown) obDown.innerHTML='<span class="text-slate-400">Select a market.</span>';
+  if(obStatus) obStatus.textContent='';
   const simMsg = document.getElementById('poly-sim-msg');
   if(simMsg) simMsg.textContent='';
   const priceEl = document.getElementById('poly-sim-price');
@@ -1123,17 +1127,22 @@ function clearPolySelectionComplete(){
   stopPolyOrderBookUpdates();
   stopPolyCountdown();
   try{ localStorage.removeItem(POLY_LAST_MARKET_KEY); }catch(e){}
-  document.getElementById('poly-market-title').textContent='';
+  const titleEl = document.getElementById('poly-market-title');
+  if(titleEl) titleEl.textContent='';
   const emptyEl = document.getElementById('poly-market-empty');
   const secEl = document.getElementById('poly-market-sections');
   if(emptyEl) emptyEl.classList.remove('hidden');
   if(secEl) secEl.classList.add('hidden');
   const detailEl = document.getElementById('poly-market-detail');
   if(detailEl) detailEl.innerHTML='';
-  document.getElementById('poly-orderbook-up').innerHTML='<span class="text-slate-400">Select a market.</span>';
-  document.getElementById('poly-orderbook-down').innerHTML='<span class="text-slate-400">Select a market.</span>';
-  document.getElementById('poly-ob-status').textContent='';
-  document.getElementById('poly-sim-msg').textContent='';
+  const obUp = document.getElementById('poly-orderbook-up');
+  const obDown = document.getElementById('poly-orderbook-down');
+  const obStatus = document.getElementById('poly-ob-status');
+  if(obUp) obUp.innerHTML='<span class="text-slate-400">Select a market.</span>';
+  if(obDown) obDown.innerHTML='<span class="text-slate-400">Select a market.</span>';
+  if(obStatus) obStatus.textContent='';
+  const simMsg = document.getElementById('poly-sim-msg');
+  if(simMsg) simMsg.textContent='';
   const priceEl = document.getElementById('poly-sim-price');
   if(priceEl) priceEl.value = '';
   polySelectedPriceCents = null;
@@ -1251,13 +1260,8 @@ async function loadPolyMarkets(){
     const prevCache = Array.isArray(polyMarketsCache) ? polyMarketsCache : null;
     const prevBySlug = new Map((prevCache || []).filter(x=>x&&x.slug).map(x=>[x.slug, x]));
 
-    const [res, posRes] = await Promise.all([
-      fetch(API+`/api/poly/markets?limit=${POLY_MARKETS_PER_PAGE}&offset=${(Math.max(1, polyMarketsPage)-1)*POLY_MARKETS_PER_PAGE}`),
-      fetch(API+'/api/poly/sim/markets_with_positions')
-    ]);
+    const res = await fetch(API+`/api/poly/markets?limit=${POLY_MARKETS_PER_PAGE}&offset=${(Math.max(1, polyMarketsPage)-1)*POLY_MARKETS_PER_PAGE}`);
     const data=await res.json();
-    const marketsWithPosRaw = await posRes.json();
-    const marketsWithPos = new Set(Array.isArray(marketsWithPosRaw) ? marketsWithPosRaw : []);
     if(!Array.isArray(data)||!data.length){
       polyMarketsReachedLastPage = true;
       polyRenderMarketsPageButtons();
@@ -1268,7 +1272,7 @@ async function loadPolyMarkets(){
     polyMarketsKnownMaxPage = Math.max(polyMarketsKnownMaxPage, polyMarketsPage + (polyMarketsReachedLastPage ? 0 : 1));
     polyPersistMarketsPage(polyMarketsPage);
     polyMarketsCache=data;
-    polyMarketsWithPosCache = marketsWithPos;
+    polyMarketsWithPosCache = new Set();
     renderPolyMarkets();
     polyRenderMarketsPageButtons();
 
@@ -1286,7 +1290,7 @@ async function loadPolyMarkets(){
           const pred = String(m.prediction_outcome || '').toUpperCase();
           if(!(pred === 'UP' || pred === 'DOWN')) continue;
 
-          const votesTs = (m.pred_votes && typeof m.pred_votes.ts === 'number') ? Number(m.pred_votes.ts) : null;
+          const votesTs = (m.prediction_ts || null);
           const age = votesTs ? (nowUtc - votesTs) : null;
           if(age === null || age < 0 || age > 60) continue; // only within 60s
 
@@ -1445,8 +1449,6 @@ async function showPolyMarket(slug){
     try{
       loadLivePositions();
       loadLiveOrders();
-      loadSimPositions();
-      loadSimTrades();
     }catch(e){/* ignore */}
   }catch(e){el.textContent='Error loading market';}
 }
@@ -1526,17 +1528,8 @@ function polyUpdateSideButtons(){
   }
 }
 
-function polySetBuyPrice(priceCents, side){
-  polySelectedPriceCents = priceCents;
-  polySelectSide(side);
-  const priceEl = document.getElementById('poly-sim-price');
-  if(priceEl) priceEl.value = priceCents;
-  const buyBtn = document.getElementById('poly-sim-submit');
-  if(buyBtn) buyBtn.disabled = false;
-  const simMsg = document.getElementById('poly-sim-msg');
-  if(simMsg) simMsg.textContent='';
-  // Re-render highlighting for selected row
-  if(polySelectedMarket) updatePolyOrderBooks();
+function polySetBuyPrice(){
+  // Sim trading removed
 }
 
 function polyTogglePredPopup(){
@@ -1786,7 +1779,8 @@ async function polyLoadPredictionDetails(slug){
         +`<div style="font-size:48px;font-weight:800;color:${color}">${arrow} ${pred}</div>`
         +`<div class="text-xs text-slate-400 mt-2">Saved prediction summary is available${t?` @ <b>${t}</b>`:''}.</div>`
         +`<div class="text-xs text-slate-500 mt-1">Detailed diagnostics are not available yet for this prediction.</div>`
-        +`</div>`;
+        +`</div>`
+        +`<div id="poly-pred-chart-wrap" class="mt-3"></div>`;
       return;
     }
 
@@ -2351,7 +2345,7 @@ async function loadPredictionCandles(slug, windowSize){
     const data = await res.json();
     if(data.error){ wrap.innerHTML=`<span class="text-red-400 text-xs">${data.error}</span>`; return; }
     if(!data.candles || !data.candles.length){ wrap.innerHTML='<span class="text-slate-400 text-xs">No candles</span>'; return; }
-    wrap.innerHTML=`<div class="text-xs text-slate-400 mb-1">${data.candles.length} candles shown (last ${tail} of ${windowSize} window)</div>`
+    wrap.innerHTML=`<div class="text-xs text-slate-500 mb-1">${data.candles.length} candles shown (last ${tail} of ${windowSize} window)</div>`
       +`<div id="poly-pred-scroll" style="overflow-x:auto"><canvas id="poly-pred-canvas" height="320"></canvas></div>`;
     const canvas = document.getElementById('poly-pred-canvas');
     const markers = polyPredRunsCache.length ? buildPredMarkers(polyPredRunsCache, data.candles) : undefined;
@@ -2361,8 +2355,7 @@ async function loadPredictionCandles(slug, windowSize){
       const sc = document.getElementById('poly-pred-scroll');
       const x = canvas?.dataset?.marketX ? Number(canvas.dataset.marketX) : null;
       if(sc && x != null && Number.isFinite(x)){
-        const target = Math.max(0, x - (sc.clientWidth / 2));
-        sc.scrollLeft = target;
+        sc.scrollLeft = Math.max(0, x - (sc.clientWidth / 2));
       }
     }catch(e){/* ignore */}
   }catch(e){
@@ -2542,41 +2535,6 @@ function drawCandleChart(canvas, candles, marketTs, markers){
 }
 
 // ===== Sim trades =====
-
-async function submitSimTrade(){
-  const msg=document.getElementById('poly-sim-msg');
-  if(!msg){ console.warn('submitSimTrade called without sim UI'); return; }
-  msg.textContent='';
-  if(!polySelectedOutcome){msg.textContent='Select an outcome first';return}
-  if(!polySelectedMarket || !polySelectedMarket.slug){msg.textContent='Select a market first';return}
-  const priceInput = document.getElementById('poly-sim-price');
-  if(!priceInput){ console.warn('Sim price input missing'); return; }
-  const priceVal = priceInput.value;
-  if(!priceVal){msg.textContent='Select a price from order book';return}
-  if(!polySelectedSide){msg.textContent='Select a price from order book';return}
-  const price = parseFloat(priceVal);
-  if(!price || price <= 0){msg.textContent='Invalid price';return}
-  const qtyInput = document.getElementById('poly-sim-qty');
-  if(!qtyInput){ console.warn('Sim qty input missing'); return; }
-  const qty=parseFloat(qtyInput.value)||0;
-  if(qty <= 0){msg.textContent='Qty must be > 0';return}
-  try{
-    const res=await fetch(API+'/api/poly/sim/trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-      slug: polySelectedMarket.slug,
-      asset_id: polySelectedOutcome.asset_id,
-      qty,
-      outcome_side: polySelectedSide,
-      price
-    })});
-    const data=await res.json();
-    if(data.error){msg.innerHTML=`<span class="text-red-400">${data.error}</span>`;return}
-    const fillNote = data.fill_price_cents < price ? ` (filled at better price ${data.fill_price_cents}¢)` : '';
-    msg.innerHTML=`<span class="text-green-400">Trade #${data.id} filled @ ${data.fill_price_cents}¢${fillNote}</span>`;
-    loadSimTrades();
-    loadSimPositions();
-    loadPolyMarkets();
-  }catch(e){msg.textContent='Error submitting trade';}
-}
 
 async function loadSimTrades(){
   const el=document.getElementById('poly-trades');

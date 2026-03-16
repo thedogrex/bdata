@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1:3306
--- Generation Time: Mar 15, 2026 at 10:23 AM
+-- Generation Time: Mar 16, 2026 at 10:43 AM
 -- Server version: 8.4.7
 -- PHP Version: 8.3.28
 
@@ -139,8 +139,107 @@ CREATE TABLE IF NOT EXISTS `c_5m` (
   UNIQUE KEY `saqx` (`open_time`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `c_5m_3s`
+--
+
+CREATE TABLE IF NOT EXISTS `c_5m_3s` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `open_time` bigint NOT NULL,
+  `open` float NOT NULL,
+  `high` float NOT NULL,
+  `low` float NOT NULL,
+  `close` float NOT NULL,
+  `volume` float NOT NULL,
+  `close_time` bigint NOT NULL,
+  `quota_volume` float NOT NULL,
+  `trades` int NOT NULL,
+  `taker_base_volume` float NOT NULL,
+  `taker_quota_volume` float NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_snapshot_3s` (`open_time`),
+  KEY `idx_open_time_3s` (`open_time`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `c_5m_4s`
+--
+
+CREATE TABLE IF NOT EXISTS `c_5m_4s` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `open_time` bigint NOT NULL,
+  `open` float NOT NULL,
+  `high` float NOT NULL,
+  `low` float NOT NULL,
+  `close` float NOT NULL,
+  `volume` float NOT NULL,
+  `close_time` bigint NOT NULL,
+  `quota_volume` float NOT NULL,
+  `trades` int NOT NULL,
+  `taker_base_volume` float NOT NULL,
+  `taker_quota_volume` float NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_snapshot_4s` (`open_time`),
+  KEY `idx_open_time_4s` (`open_time`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `c_5m_5s`
+--
+
+CREATE TABLE IF NOT EXISTS `c_5m_5s` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `open_time` bigint NOT NULL,
+  `open` float NOT NULL,
+  `high` float NOT NULL,
+  `low` float NOT NULL,
+  `close` float NOT NULL,
+  `volume` float NOT NULL,
+  `close_time` bigint NOT NULL,
+  `quota_volume` float NOT NULL,
+  `trades` int NOT NULL,
+  `taker_base_volume` float NOT NULL,
+  `taker_quota_volume` float NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_snapshot_5s` (`open_time`),
+  KEY `idx_open_time_5s` (`open_time`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `c_5m_7s`
+--
+
+CREATE TABLE IF NOT EXISTS `c_5m_7s` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `open_time` bigint NOT NULL,
+  `open` float NOT NULL,
+  `high` float NOT NULL,
+  `low` float NOT NULL,
+  `close` float NOT NULL,
+  `volume` float NOT NULL,
+  `close_time` bigint NOT NULL,
+  `quota_volume` float NOT NULL,
+  `trades` int NOT NULL,
+  `taker_base_volume` float NOT NULL,
+  `taker_quota_volume` float NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_snapshot_7s` (`open_time`),
+  KEY `idx_open_time_7s` (`open_time`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
 -- Table structure for table `c_5m_8s`
--- Captures real-time snapshots ~8 seconds before close for each 5m candle.
+--
 
 CREATE TABLE IF NOT EXISTS `c_5m_8s` (
   `id` int NOT NULL AUTO_INCREMENT,
@@ -156,7 +255,8 @@ CREATE TABLE IF NOT EXISTS `c_5m_8s` (
   `taker_base_volume` float NOT NULL,
   `taker_quota_volume` float NOT NULL,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `saqx_snapshot` (`open_time`)
+  UNIQUE KEY `saqx_snapshot` (`open_time`),
+  KEY `idx_open_time_8s` (`open_time`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------

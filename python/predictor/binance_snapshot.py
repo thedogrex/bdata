@@ -9,28 +9,49 @@ background task launched from the FastAPI server startup hook.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from typing import Optional, Set
+from typing import Dict, Optional, Set
 
 import requests
+import websockets
+
+import app.config as config
 
 from db import DbProvider
 
 LOGGER = logging.getLogger("binance_snapshot")
 LOGGER.setLevel(logging.DEBUG)
+if not LOGGER.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter(
+            "[%(name)s %(levelname)s %(asctime)s] %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    )
+    LOGGER.addHandler(_handler)
+LOGGER.propagate = False
 
 BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
+BINANCE_WS_BASE_URL = "wss://stream.binance.com:9443/ws"
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
-SNAPSHOT_LEAD_MS = 8_000  # grab data ~8 seconds before candle close
+SNAPSHOT_TARGETS = {
+    8_000: "c_5m_8s",
+    7_000: "c_5m_7s",
+    5_000: "c_5m_5s",
+    4_000: "c_5m_4s",
+    3_000: "c_5m_3s",
+}
 POLL_INTERVAL_SEC = 1.0
 RETRY_DELAY_SEC = 5.0
 CACHE_LIMIT = 1500
 
 
 _CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS `c_5m_8s` (
+CREATE TABLE IF NOT EXISTS `{table}` (
   `id` int NOT NULL AUTO_INCREMENT,
   `open_time` bigint NOT NULL,
   `open` float NOT NULL,
@@ -44,7 +65,7 @@ CREATE TABLE IF NOT EXISTS `c_5m_8s` (
   `taker_base_volume` float NOT NULL,
   `taker_quota_volume` float NOT NULL,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `saqx_snapshot` (`open_time`)
+  UNIQUE KEY `{unique_key}` (`open_time`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 """
 
@@ -57,19 +78,20 @@ class SnapshotCollector:
         self.interval = interval
         self.db = DbProvider()
         self._stop_event = asyncio.Event()
-        self._seen_snapshots: Set[int] = set()
+        self._seen_snapshots: Dict[int, Set[int]] = {
+            lead_ms: set() for lead_ms in SNAPSHOT_TARGETS
+        }
+        self._debug_price = bool(getattr(config, "DEBUG_BINANCE_PRICE", False))
+        self._last_price_log_ms = 0
 
     async def run_forever(self) -> None:
-        await self.db.execute(_CREATE_TABLE_SQL)
+        await self._ensure_tables()
         LOGGER.info(
             "Starting Binance REST snapshot collector for %s %s", self.symbol, self.interval
         )
         while not self._stop_event.is_set():
             try:
-                await self._maybe_collect_snapshot()
-                await asyncio.wait_for(self._stop_event.wait(), timeout=POLL_INTERVAL_SEC)
-            except asyncio.TimeoutError:
-                continue
+                await self._run_ws_loop()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - network errors
@@ -79,80 +101,96 @@ class SnapshotCollector:
     async def stop(self) -> None:
         self._stop_event.set()
 
-    async def _maybe_collect_snapshot(self) -> None:
-        kline = await self._fetch_latest_kline()
-        if not kline:
-            return
+    async def _ensure_tables(self) -> None:
+        for lead_ms, table in SNAPSHOT_TARGETS.items():
+            unique_key = f"uniq_snapshot_{lead_ms // 1000}s"
+            await self.db.execute(
+                _CREATE_TABLE_SQL.format(table=table, unique_key=unique_key)
+            )
 
-        open_time_ms = int(kline[0])
-        close_time_ms = int(kline[6])
-        close_price = float(kline[4])
-        snapshot_at_ms = close_time_ms - SNAPSHOT_LEAD_MS
+    async def _run_ws_loop(self) -> None:
+        stream = f"{BINANCE_WS_BASE_URL}/{self.symbol.lower()}@kline_{self.interval}"
+        LOGGER.info("Connecting to Binance websocket stream %s", stream)
+        async with websockets.connect(stream, ping_interval=20, ping_timeout=10) as ws:
+            LOGGER.info("Binance websocket connected")
+            while not self._stop_event.is_set():
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                except asyncio.TimeoutError:
+                    await ws.ping()
+                    continue
+
+                data = json.loads(msg)
+                kline = data.get("k")
+                if not kline:
+                    continue
+
+                event_time = int(data.get("E", 0))
+                if event_time:
+                    latency_ms = self._now_ms() - event_time
+                    LOGGER.debug(
+                        "[binance_snapshot] websocket event latency %.1f ms",
+                        latency_ms,
+                    )
+
+                await self._process_kline(kline)
+
+    async def _process_kline(self, kline: dict) -> None:
+        open_time_ms = int(kline["t"])
+        close_time_ms = int(kline["T"])
         now_ms = self._now_ms()
+        time_to_close_ms = close_time_ms - now_ms
 
-        LOGGER.debug(
-            "[binance_snapshot] candle open_time=%s close_price=%s snapshot_at=%s now=%s",
-            open_time_ms,
-            close_price,
-            snapshot_at_ms,
-            now_ms,
-        )
+        if self._debug_price and now_ms - self._last_price_log_ms >= 1000:
+            price = float(kline["c"])
+            LOGGER.info(
+                "[binance_snapshot] price=%.2f open_time=%s closes_in=%.1fs",
+                price,
+                time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(open_time_ms / 1000)),
+                max(time_to_close_ms / 1000, 0),
+            )
+            self._last_price_log_ms = now_ms
 
-        if open_time_ms in self._seen_snapshots:
-            return
+        for lead_ms, table in SNAPSHOT_TARGETS.items():
+            seen = self._seen_snapshots[lead_ms]
+            if open_time_ms in seen:
+                continue
+            if time_to_close_ms > lead_ms:
+                continue
 
-        if now_ms < snapshot_at_ms:
-            return
+            fields = self._map_fields(kline)
+            await self._store_snapshot(fields, table)
+            seen.add(open_time_ms)
+            if len(seen) > CACHE_LIMIT:
+                self._seen_snapshots[lead_ms] = set(sorted(seen)[-CACHE_LIMIT:])
 
-        await self._store_snapshot(kline)
-        self._seen_snapshots.add(open_time_ms)
-        if len(self._seen_snapshots) > CACHE_LIMIT:
-            # keep the set from growing indefinitely
-            self._seen_snapshots = set(sorted(self._seen_snapshots)[-CACHE_LIMIT:])
-
-    async def _fetch_latest_kline(self) -> Optional[list]:
-        params = {
-            "symbol": self.symbol,
-            "interval": self.interval,
-            "limit": 1,
-        }
-        resp = await asyncio.to_thread(
-            requests.get,
-            BINANCE_FUTURES_KLINES_URL,
-            params=params,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data[-1] if data else None
-
-    async def _store_snapshot(self, kline: list) -> None:
-        fields = self._map_fields(kline)
-        result = await self.db.insert_one("c_5m_8s", fields=fields, ignore=True, print_query=False)
+    async def _store_snapshot(self, fields: dict, table: str) -> None:
+        result = await self.db.insert_one(table, fields=fields, ignore=True, print_query=False)
         if result >= 0:
             LOGGER.info(
-                "Stored snapshot for candle %s (%s) close=%.2f",
+                "Stored %s snapshot for candle %s (%s) close=%.2f",
+                table,
                 fields["open_time"],
                 time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(fields["open_time"] / 1_000_000)),
                 fields["close"],
             )
 
     @staticmethod
-    def _map_fields(kline: list) -> dict:
-        open_time_ms = int(kline[0])
-        close_time_ms = int(kline[6])
+    def _map_fields(kline: dict) -> dict:
+        open_time_ms = int(kline["t"])
+        close_time_ms = int(kline["T"])
         return {
             "open_time": open_time_ms * 1000,  # store in microseconds
-            "open": float(kline[1]),
-            "high": float(kline[2]),
-            "low": float(kline[3]),
-            "close": float(kline[4]),
-            "volume": float(kline[5]),
+            "open": float(kline["o"]),
+            "high": float(kline["h"]),
+            "low": float(kline["l"]),
+            "close": float(kline["c"]),
+            "volume": float(kline["v"]),
             "close_time": close_time_ms,
-            "quota_volume": float(kline[7]),
-            "trades": int(kline[8]),
-            "taker_base_volume": float(kline[9]),
-            "taker_quota_volume": float(kline[10]),
+            "quota_volume": float(kline["q"]),
+            "trades": int(kline["n"]),
+            "taker_base_volume": float(kline["V"]),
+            "taker_quota_volume": float(kline["Q"]),
         }
 
     @staticmethod

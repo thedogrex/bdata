@@ -12,6 +12,7 @@ import zipfile
 import csv
 import io
 import sys
+import time as tt
 from datetime import *
 import pandas as pd
 import re
@@ -132,6 +133,18 @@ async def process_file_like(f):
 
         if row[0].isdigit():
 
+            open_time_raw = row[0]
+            if len(open_time_raw) == 13:
+                open_time_ms = int(open_time_raw)
+                open_time_us = open_time_ms * 1000
+            else:
+                open_time_us = int(open_time_raw)
+                open_time_ms = open_time_us // 1000
+
+            # skip if candle still within its 5-minute window
+            if (tt.time() * 1000) < open_time_ms + 300_000:
+                continue
+
             open = float(row[1])
             high = float(row[2])
             low = float(row[3])
@@ -143,14 +156,8 @@ async def process_file_like(f):
             taker_base_volume = float(row[9])
             taker_quota_volume = float(row[10])
 
-            optime = row[0]
-
-            # convert to nanoseconds
-            if(len(optime)==13):
-                optime = optime + '000'
-
             await db.insert_one("c_5m", fields={
-                'open_time' : int(optime),
+                'open_time' : open_time_us,
                 'open' : open,
                 'high' : high,
                 'low' : low,
@@ -182,7 +189,7 @@ if __name__ == "__main__":
 
     print(dates)
 
-    start_date = '2026-02-10'
+    start_date = '2026-01-14'
 
     asyncio.run(download_daily_klines('spot', symbols, num_symbols, ["5m"], dates, start_date, None, folder))
 

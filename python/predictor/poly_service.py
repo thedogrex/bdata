@@ -1325,7 +1325,7 @@ async def predict_for_market(
     last_candle_open_us, missing_candles = _compute_missing(rows)
     shifted = missing_candles > 0
 
-    if missing_candles > 0 and missing_candles >= horizon:
+    if missing_candles > 0 and missing_candles > horizon:
         # Candle might appear a moment later. Retry sync once after 1 second.
         try:
             await asyncio.sleep(1)
@@ -1347,7 +1347,7 @@ async def predict_for_market(
         except Exception as e:
             sync_info["sync_retry_error"] = str(e)
 
-    if missing_candles > 0 and missing_candles >= horizon:
+    if missing_candles > 0 and missing_candles > horizon:
         last_dt = pd.Timestamp(last_candle_open_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
         market_dt = pd.Timestamp(market_ts_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
         diff_min = round((market_ts_us - last_candle_open_us) / 1_000_000 / 60, 1)

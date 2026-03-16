@@ -131,6 +131,10 @@ async def fetch_and_store_klines(
             open_time_ms = int(k[0])
             open_time_us = open_time_ms * 1000  # convert ms -> us
 
+            # ensure candle is fully closed (open_time older than 5 minutes)
+            if (time.time() * 1000) < open_time_ms + INTERVAL_MS:
+                continue
+
             await db.insert_one(
                 "c_5m",
                 fields={

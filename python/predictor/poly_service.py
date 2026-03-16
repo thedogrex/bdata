@@ -778,11 +778,11 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
 
                 # After end: ensure upcoming markets exist in DB and prefetch ask history (snapshots)
                 try:
-                    await refresh_tracked_markets(now=int(current_ts), count=4)
+                    await refresh_tracked_markets(now=int(current_ts), count=3)
                 except Exception:
                     pass
                 try:
-                    upcoming_ts = _compute_timestamps(now=int(current_ts), count=4)
+                    upcoming_ts = _compute_timestamps(now=int(current_ts), count=3)
                     for ts in upcoming_ts:
                         asyncio.create_task(_take_orderbook_snapshot_for_slug(_slug_for_ts(int(ts))))
                 except Exception:
@@ -825,7 +825,7 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
             if not active_markets and current_time - last_active_missing_refresh >= 10:
                 last_active_missing_refresh = current_time
                 try:
-                    await refresh_tracked_markets(now=int(current_ts), count=2)
+                    await refresh_tracked_markets(now=int(current_ts), count=3)
                 except Exception as e:
                     print(f"[poly] refresh_tracked_markets for active failed: {e}")
             

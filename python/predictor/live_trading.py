@@ -20,6 +20,39 @@ if not logger.handlers:
 db = DbProvider()
 trading_client = PolymarketClient()
 
+
+def format_order_flow_totals_message(totals: Dict[str, Any], day_label: str) -> str:
+    win = int(totals.get("win_count") or 0)
+    loss = int(totals.get("loss_count") or 0)
+    resolved = int(totals.get("resolved_orders") or 0)
+    total_orders = int(totals.get("total_orders") or 0)
+    win_rate = totals.get("win_rate")
+    win_rate_s = f"{float(win_rate) * 100:.1f}%" if win_rate is not None else "—"
+
+    winning_shares = float(totals.get("winning_shares") or 0.0)
+    winning_cost = float(totals.get("winning_cost") or 0.0)
+    avg_win_price = (winning_cost / winning_shares * 100.0) if winning_shares > 0 else None
+    avg_win_price_s = f"{avg_win_price:.3f}" if avg_win_price is not None else "—"
+
+    net = float(totals.get("net_winning_amount") or 0.0)
+    net_s = f"{net:+.2f}$"
+
+    lines = [
+        f"Order Flow ({day_label})",
+        f"Orders: {total_orders} (resolved {resolved})",
+        f"Wins/Losses: {win}/{loss} (win% {win_rate_s})",
+        f"Avg win price: {avg_win_price_s} cents",
+        f"NET: {net_s}",
+    ]
+    return "\n".join(lines)
+
+
+async def get_today_order_flow_report_text() -> str:
+    today = datetime.utcnow().date().isoformat()
+    data = await order_flow_analytics(date_from=today, date_to=today)
+    totals = (data or {}).get("totals") or {}
+    return format_order_flow_totals_message(totals, day_label=today)
+
 _market_buy_locks: Dict[str, asyncio.Lock] = {}
 
 

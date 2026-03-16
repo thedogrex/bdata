@@ -83,6 +83,9 @@ class SnapshotCollector:
         }
         self._debug_price = bool(getattr(config, "DEBUG_BINANCE_PRICE", False))
         self._last_price_log_ms = 0
+        self._lat_sum_ms = 0.0
+        self._lat_count = 0
+        self._lat_window_started_s = int(time.time())
 
     async def run_forever(self) -> None:
         await self._ensure_tables()
@@ -128,10 +131,19 @@ class SnapshotCollector:
                 event_time = int(data.get("E", 0))
                 if event_time:
                     latency_ms = self._now_ms() - event_time
-                    LOGGER.debug(
-                        "[binance_snapshot] websocket event latency %.1f ms",
-                        latency_ms,
-                    )
+                    self._lat_sum_ms += float(latency_ms)
+                    self._lat_count += 1
+                    now_s = int(time.time())
+                    if now_s - self._lat_window_started_s >= 60:
+                        avg_ms = (self._lat_sum_ms / self._lat_count) if self._lat_count > 0 else 0.0
+                        LOGGER.info(
+                            "[binance_snapshot] websocket event latency avg=%.1f ms (%d events/60s)",
+                            avg_ms,
+                            int(self._lat_count),
+                        )
+                        self._lat_sum_ms = 0.0
+                        self._lat_count = 0
+                        self._lat_window_started_s = now_s
 
                 await self._process_kline(kline)
 

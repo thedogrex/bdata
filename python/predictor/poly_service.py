@@ -723,6 +723,7 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
     last_active_missing_refresh = 0
     last_balance_refresh = 0
     last_daily_report_check = 0
+    last_order_flow_report = 0
     last_seen_active_ts: Optional[int] = None
     autopredicted_slugs: set = set()  # slugs we already auto-predicted
     autopredicted_ended_ts: set[int] = set()  # ended market ts we already processed
@@ -745,6 +746,20 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     logger.warning("[poll_loop] daily balance report check failed: %s", exc)
                 finally:
                     last_daily_report_check = current_time
+
+            if getattr(config, "TELEGRAM_ORDER_FLOW_INFO", None) and current_time - last_order_flow_report >= 3600:
+                last_order_flow_report = current_time
+                try:
+                    from predictor import live_trading
+
+                    text = await live_trading.get_today_order_flow_report_text()
+                    for chat_id in getattr(config, "TELEGRAM_ORDER_FLOW_INFO", []) or []:
+                        try:
+                            await telegram_bot.send_message(chat_id, text)
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    logger.warning("[poll_loop] order flow telegram report failed: %s", exc)
 
             # Refresh cached collateral balance every 15 minutes to reuse in Telegram confirmations.
             if current_time - last_balance_refresh >= 900:

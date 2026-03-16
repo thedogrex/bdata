@@ -63,3 +63,5 @@ def _env_json_list(name: str) -> list[str]:
     return [s.strip() for s in raw.split(',') if s.strip()]
 
 TELEGRAM_INFO_CHAT_IDS: list[str] = _env_json_list("TELEGRAM_INFO_CHAT_IDS")
+
+TELEGRAM_ORDER_FLOW_INFO: list[str] = _env_json_list("TELEGRAM_ORDER_FLOW_INFO")

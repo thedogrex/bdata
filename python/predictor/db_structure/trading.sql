@@ -139,6 +139,26 @@ CREATE TABLE IF NOT EXISTS `c_5m` (
   UNIQUE KEY `saqx` (`open_time`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+-- Table structure for table `c_5m_8s`
+-- Captures real-time snapshots ~8 seconds before close for each 5m candle.
+
+CREATE TABLE IF NOT EXISTS `c_5m_8s` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `open_time` bigint NOT NULL,
+  `open` float NOT NULL,
+  `high` float NOT NULL,
+  `low` float NOT NULL,
+  `close` float NOT NULL,
+  `volume` float NOT NULL,
+  `close_time` bigint NOT NULL,
+  `quota_volume` float NOT NULL,
+  `trades` int NOT NULL,
+  `taker_base_volume` float NOT NULL,
+  `taker_quota_volume` float NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `saqx_snapshot` (`open_time`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 -- --------------------------------------------------------
 
 --

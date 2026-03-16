@@ -27,6 +27,7 @@ from predictor.task_manager import task_mgr
 from predictor import poly_service
 from predictor import live_trading
 from predictor import telegram_bot
+from predictor.binance_snapshot import start_snapshot_collector, stop_snapshot_collector
 import app.config as config
 
 app = FastAPI(title="Candle Predictor & Backtester", version="3.0.0")
@@ -181,6 +182,7 @@ async def startup_event():
     poly_stop_event = asyncio.Event()
     asyncio.create_task(poly_service.poll_loop(poly_stop_event, orderbook_interval_sec=3))
     telegram_bot.start_polling()
+    start_snapshot_collector()
 
 
 @app.on_event("shutdown")
@@ -189,6 +191,7 @@ async def shutdown_event():
     if poly_stop_event is not None:
         poly_stop_event.set()
     await telegram_bot.stop_polling()
+    await stop_snapshot_collector()
 
 
 @app.get("/api/poly/markets")
@@ -831,13 +834,8 @@ async def api_live_buy(req: LiveBuyRequest):
         asset_id=req.asset_id,
         outcome_side=req.outcome_side,
         prediction_direction=req.prediction_direction,
-        amount_usd=req.amount_usd,
         snapshot_price=req.snapshot_price,
         price_threshold=req.price_threshold,
-        bank_usd=req.bank_usd,
-        bank_pct=req.bank_pct,
-        min_buy_usd=req.min_buy_usd,
-        max_buy_usd=req.max_buy_usd,
         batch_id=req.batch_id,
         template_id=req.template_id,
     )

@@ -1,16 +1,3 @@
-"""
-Live trading service for Polymarket.
-
-After a prediction is made, this module can:
- 1. Buy the predicted outcome at the current snapshot price
- 2. Record the order in poly_live_orders
- 3. Track the position in poly_live_positions
- 4. Report wallet summary for monitoring
-
-All DB operations are async (aiomysql via DbProvider).
-All CLOB operations are sync (py_clob_client) — run in executor.
-"""
-
 import asyncio
 import json
 import logging
@@ -47,6 +34,7 @@ def _get_market_lock(slug: Optional[str]) -> asyncio.Lock:
 MAX_LIMIT_PRICE_USD = 0.53
 PRICE_RETRY_WINDOW_SEC = 300
 PRICE_RETRY_INTERVAL_SEC = 10
+DEFAULT_BET_SIZE_USD = 3.0
 MSK_UTC_OFFSET_HOURS = 3
 MSK_UTC_OFFSET = timedelta(hours=MSK_UTC_OFFSET_HOURS)
 MSK_UTC_OFFSET_SECONDS = int(MSK_UTC_OFFSET.total_seconds())
@@ -67,6 +55,20 @@ def _set_cached_collateral_balance_usd(value: Optional[float]) -> None:
 
 def get_cached_collateral_balance_usd() -> Optional[float]:
     return _last_collateral_balance_usd
+
+
+async def _get_static_bet_size_usd() -> float:
+    try:
+        row = await db.fetchone(
+            "SELECT bet_size_usd FROM poly_live_trade_settings WHERE id='default'"
+        )
+        if row:
+            val = row[0]
+            if val is not None:
+                return max(0.0, float(val))
+    except Exception as exc:
+        logger.warning("Failed to fetch bet size from settings: %s", exc)
+    return DEFAULT_BET_SIZE_USD
 
 
 def _parse_float(value: Any) -> Optional[float]:
@@ -261,10 +263,11 @@ async def _wait_for_price_within_threshold(
     slug: str,
     asset_id: str,
     price_threshold: float,
+    deadline_ts: Optional[float] = None,
 ) -> Optional[float]:
-    """Poll best ask every PRICE_RETRY_INTERVAL_SEC until it falls below threshold or timeout."""
+    """Poll best ask until it falls below threshold or timeout."""
     loop = asyncio.get_event_loop()
-    deadline = loop.time() + PRICE_RETRY_WINDOW_SEC
+    deadline = deadline_ts if deadline_ts is not None else loop.time() + PRICE_RETRY_WINDOW_SEC
     attempt = 0
     while loop.time() < deadline:
         await asyncio.sleep(PRICE_RETRY_INTERVAL_SEC)
@@ -353,126 +356,20 @@ async def ensure_tables():
 
 
 # ---------------------------------------------------------------------------
-# Core: buy after prediction
+# Core: buy after prediction helpers
 # ---------------------------------------------------------------------------
 
-async def buy_after_prediction(
+async def _submit_market_order(
     slug: str,
     asset_id: str,
     outcome_side: str,
-    prediction_direction: str,
     amount_usd: float,
     snapshot_price: float,
-    price_threshold: float = 0.52,
-    bank_usd: Optional[float] = None,
-    bank_pct: float = 0.05,
-    min_buy_usd: float = 3.0,
-    max_buy_usd: float = 20.0,
-    batch_id: Optional[str] = None,
-    template_id: Optional[int] = None,
-    enable_price_wait: bool = False,
+    price_threshold: float,
+    batch_id: Optional[str],
+    template_id: Optional[int],
 ) -> Dict[str, Any]:
-    """
-    Execute a limit buy on Polymarket CLOB after a prediction.
-
-    Args:
-        slug:                 Market slug
-        asset_id:             CLOB token ID for the outcome to buy
-        outcome_side:         'UP' or 'DOWN' (the outcome we're buying)
-        prediction_direction: 'UP' or 'DOWN' (what model predicted)
-        amount_usd:           Dollar amount to spend
-        snapshot_price:       Current best ask / snapshot price
-        price_threshold:      Max acceptable price (default 0.52, hard cap 0.53)
-        batch_id:             Prediction batch ID for linking
-        template_id:          Template ID that triggered this
-
-    Returns:
-        Dict with order info and position info
-    """
-    market_lock = _get_market_lock(slug)
-    if market_lock.locked():
-        logger.info("Market %s already has a buy in flight; waiting for lock", slug)
-    await market_lock.acquire()
-    logger.debug("Market %s buy lock acquired", slug)
-
-    try:
-        # Compute amount from bank if caller passed 0/None
-        computed_from_bank = False
-        if amount_usd is None or float(amount_usd) <= 0:
-            computed_from_bank = True
-        fetched_bank = False
-        if bank_usd is None:
-            try:
-                bal = trading_client.get_balance_allowance()
-                bank_usd = _extract_collateral_balance_usd(bal) or 0.0
-                fetched_bank = True
-                logger.info("  fetched collateral balance from CLOB: %.6f", float(bank_usd))
-            except Exception as e:
-                logger.warning("  failed to fetch collateral balance: %s", e)
-                bank_usd = 0.0
-        bank_val = float(bank_usd or 0.0)
-        bank_pct_val = float(bank_pct or 0.0)
-        raw_amount = bank_val * bank_pct_val
-        amount_usd = compute_buy_amount_usd(
-            bank_usd=bank_val,
-            bank_pct=bank_pct_val,
-            min_usd=min_buy_usd,
-            max_usd=max_buy_usd,
-        )
-        logger.info(
-            "  sizing: bank_usd=%.6f%s pct=%.4f raw=%.6f min=%.2f max=%.2f -> amount=%.2f",
-            bank_val,
-            " (fetched)" if fetched_bank else "",
-            bank_pct_val,
-            raw_amount,
-            float(min_buy_usd),
-            float(max_buy_usd),
-            float(amount_usd),
-        )
-    except Exception:
-        pass
-
-    if float(price_threshold) > MAX_LIMIT_PRICE_USD:
-        msg = f"Limit price {float(price_threshold):.4f} exceeds hard cap {MAX_LIMIT_PRICE_USD:.4f}"
-        logger.error(msg)
-        return {"success": False, "error": msg, "order_row_id": None, "position": None}
-
-    logger.info("=== BUY AFTER PREDICTION ===")
-    logger.info(
-        "  slug=%s  asset=%s  side=%s  direction=%s  amount=$%.2f%s  snap_price=%.4f  threshold=%.4f",
-        slug,
-        asset_id[:16],
-        outcome_side,
-        prediction_direction,
-        amount_usd,
-        " (computed)" if computed_from_bank else "",
-        snapshot_price,
-        price_threshold,
-    )
-    if computed_from_bank and not fetched_bank:
-        # Already logged detailed sizing above when fetched_bank True; keep legacy log for provided bank values.
-        logger.info(
-            "  sizing (provided bank): bank_usd=%.2f  pct=%.4f  min=%.2f  max=%.2f -> amount=%.2f",
-            float(bank_usd or 0.0), float(bank_pct), float(min_buy_usd), float(max_buy_usd), float(amount_usd)
-        )
-
-    # Refresh market + best ask right before placing order (do not rely on UI cached snapshot).
-    refreshed_best_ask = None
-    try:
-        try:
-            # For debug parity with earlier logs (Gamma market prices)
-            trading_client.fetch_market(slug)
-        except Exception as e:
-            logger.debug("fetch_market failed (non-fatal): %s", e)
-
-        refreshed_best_ask = trading_client.get_best_ask(asset_id)
-        if refreshed_best_ask is not None:
-            logger.info("  refreshed_best_ask=%.4f (CLOB)", float(refreshed_best_ask))
-    except Exception as e:
-        logger.debug("refresh best ask failed (non-fatal): %s", e)
-
-    if refreshed_best_ask is not None and float(refreshed_best_ask) > 0:
-        snapshot_price = float(refreshed_best_ask)
+    """Submit a single market order attempt."""
 
     if await _market_has_completed_buy(slug):
         msg = f"Market {slug} already has a filled buy; skip duplicate order"
@@ -484,183 +381,42 @@ async def buy_after_prediction(
         logger.warning(msg)
         return {"success": False, "error": msg, "order_row_id": None, "position": None}
 
-    if enable_price_wait and snapshot_price > price_threshold:
-        logger.info(
-            "  snapshot price %.4f above threshold %.4f — waiting up to %ss for better price",
-            snapshot_price,
-            price_threshold,
-            PRICE_RETRY_WINDOW_SEC,
-        )
-        awaited_price = await _wait_for_price_within_threshold(slug, asset_id, price_threshold)
-        if awaited_price is None:
-            msg = (
-                f"Snapshot price {snapshot_price:.4f} exceeds threshold {price_threshold:.4f} "
-                "and no better quote arrived within retry window"
-            )
-            logger.warning(msg)
-            return {"success": False, "error": msg, "order_row_id": None, "position": None}
-        snapshot_price = float(awaited_price)
-        logger.info("  price recovered to %.4f — proceeding with buy", snapshot_price)
-
-    if await _market_has_completed_buy(slug):
-        msg = f"Market {slug} received a fill before execution; skip duplicate order"
+    worst_price = float(min(float(price_threshold), float(MAX_LIMIT_PRICE_USD)))
+    if worst_price <= 0:
+        msg = f"Invalid worst_price {worst_price}; skip buy"
         logger.warning(msg)
         return {"success": False, "error": msg, "order_row_id": None, "position": None}
 
-    use_market = bool(getattr(config, "BUY_MARKET", True))
-    if use_market:
-        worst_price = float(min(float(price_threshold), float(MAX_LIMIT_PRICE_USD)))
-        if worst_price <= 0:
-            msg = f"Invalid worst_price {worst_price}; skip buy"
-            logger.warning(msg)
-            return {"success": False, "error": msg, "order_row_id": None, "position": None}
-
-        if await _market_has_completed_buy(slug):
-            msg = f"Market {slug} received a fill while preparing order; skip duplicate buy"
-            logger.warning(msg)
-            return {"success": False, "error": msg, "order_row_id": None, "position": None}
-
-        size_shares = amount_usd / float(snapshot_price) if float(snapshot_price) > 0 else 0.0
-        logger.info("  BUY_MARKET enabled: worst_price=%.4f", worst_price)
-        logger.debug("Computed size_shares=%.6f from amount_usd=%.2f and snapshot_price=%.6f", size_shares, amount_usd, float(snapshot_price))
-        loop = asyncio.get_event_loop()
-        logger.debug("Calling trading_client.buy_market with token_id=%s, amount=%.6f, worst_price=%.6f", asset_id[:16], float(amount_usd), float(worst_price))
-        try:
-            clob_resp = await loop.run_in_executor(
-                None,
-                lambda: trading_client.buy_market(
-                    token_id=asset_id,
-                    amount=float(amount_usd),
-                    worst_price=float(worst_price),
-                )
-            )
-            logger.debug("Raw CLOB response: %s", clob_resp)
-        except Exception as e:
-            logger.error("Exception calling trading_client.buy_market: %s", e, exc_info=True)
-            return {"success": False, "error": f"buy_market exception: {e}", "order_row_id": None, "position": None}
-
-        success = clob_resp.get("success", False)
-        order_id = clob_resp.get("orderID") or clob_resp.get("order_id") or None
-        status = clob_resp.get("status", "error" if not success else "unknown")
-        error_msg = clob_resp.get("errorMsg") or clob_resp.get("error_msg") or None
-
-        logger.info("CLOB response: success=%s  order_id=%s  status=%s  error=%s",
-                    success, order_id, status, error_msg)
-
-        # Record order in DB
-        fill_shares, fill_spent_usd, fill_avg_cents = _extract_fill_metrics(clob_resp)
-
-        order_row_id = await db.execute(
-            """
-            INSERT INTO poly_live_orders
-              (slug, asset_id, outcome_side, side, order_type, price, amount,
-               fill_shares, fill_total_spent_usd, fill_avg_price_cents,
-               clob_order_id, clob_status, clob_error_msg, clob_response_json,
-               prediction_batch_id, template_id)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """,
-            (
-                slug, asset_id, outcome_side, "BUY", "FOK",
-                worst_price, amount_usd,
-                fill_shares, fill_spent_usd, fill_avg_cents,
-                order_id, status, error_msg,
-                json.dumps(clob_resp, default=str),
-                batch_id, template_id,
-            ),
-        )
-        logger.info("Order recorded in DB: row_id=%s", order_row_id)
-
-        position_info = None
-
-        # If order was matched, update position
-        if success and status in ("matched", "live"):
-            actual_shares = float(fill_shares) if fill_shares is not None else size_shares
-            actual_cost = float(fill_spent_usd) if fill_spent_usd is not None else float(amount_usd)
-            actual_avg_price = float(fill_avg_cents) / 100.0 if fill_avg_cents is not None else float(worst_price)
-
-            try:
-                existing = await db.fetchone(
-                    "SELECT id, shares, total_cost FROM poly_live_positions "
-                    "WHERE slug=%s AND asset_id=%s AND closed=0 LIMIT 1",
-                    (slug, asset_id),
-                )
-                if existing:
-                    pos_id, shares0, cost0 = existing
-                    shares_new = float(shares0 or 0) + float(actual_shares)
-                    cost_new = float(cost0 or 0) + float(actual_cost)
-                    avg_new = cost_new / shares_new if shares_new > 0 else 0
-                    await db.execute(
-                        "UPDATE poly_live_positions SET shares=%s,total_cost=%s,avg_price=%s,last_order_id=%s WHERE id=%s",
-                        (shares_new, cost_new, avg_new, order_id, pos_id),
-                    )
-                    position_info = {"id": pos_id, "shares": shares_new, "total_cost": cost_new, "avg_price": avg_new}
-                else:
-                    pos_id = await db.execute(
-                        "INSERT INTO poly_live_positions (slug, asset_id, outcome_side, shares, avg_price, total_cost, closed, last_order_id) VALUES (%s,%s,%s,%s,%s,%s,0,%s)",
-                        (slug, asset_id, outcome_side, float(actual_shares), actual_avg_price, float(actual_cost), order_id),
-                    )
-                    position_info = {"id": pos_id, "shares": float(actual_shares), "total_cost": float(actual_cost), "avg_price": actual_avg_price}
-            except Exception as e:
-                logger.error("Position update failed (non-fatal): %s", e)
-
-        return {
-            "success": bool(success),
-            "order_id": order_id,
-            "status": status,
-            "order_row_id": order_row_id,
-            "position": position_info,
-            "clob": clob_resp,
-        }
-
-    limit_price = float(snapshot_price)
-    try:
-        tick_size_s = trading_client.get_tick_size(asset_id)
-        tick = Decimal(str(tick_size_s))
-        if tick > 0:
-            p = Decimal(str(limit_price))
-            limit_price = float((p / tick).to_integral_value(rounding=ROUND_CEILING) * tick)
-    except Exception:
-        pass
-    if limit_price > MAX_LIMIT_PRICE_USD:
-        msg = f"Snapshot price {limit_price:.4f} exceeds hard cap {MAX_LIMIT_PRICE_USD:.4f}; skip buy"
-        logger.warning(msg)
-        return {"success": False, "error": msg, "order_row_id": None, "position": None}
-
-    logger.info("  limit_price=%.4f (from snapshot)", limit_price)
-
-    # Use limit buy at snapshot price. Shares derived from snapshot price.
-    if await _market_has_completed_buy(slug):
-        msg = f"Market {slug} received a fill while preparing limit order; skip duplicate buy"
-        logger.warning(msg)
-        return {"success": False, "error": msg, "order_row_id": None, "position": None}
-
-    size_shares = amount_usd / limit_price if limit_price > 0 else 0
-    logger.debug("Computed size_shares=%.6f from amount_usd=%.2f and limit_price=%.6f", size_shares, amount_usd, limit_price)
+    size_shares = amount_usd / float(snapshot_price) if float(snapshot_price) > 0 else 0.0
+    logger.info("  BUY_MARKET attempt: worst_price=%.4f amount=%.2f", worst_price, amount_usd)
     loop = asyncio.get_event_loop()
-    logger.debug("Calling trading_client.buy_limit with token_id=%s, price=%.6f, size=%.6f", asset_id[:16], limit_price, size_shares)
     try:
         clob_resp = await loop.run_in_executor(
             None,
-            lambda: trading_client.buy_limit(
+            lambda: trading_client.buy_market(
                 token_id=asset_id,
-                price=limit_price,
-                size=size_shares,
+                amount=float(amount_usd),
+                worst_price=float(worst_price),
             )
         )
         logger.debug("Raw CLOB response: %s", clob_resp)
     except Exception as e:
-        logger.error("Exception calling trading_client.buy_limit: %s", e, exc_info=True)
-        return {"success": False, "error": f"buy_limit exception: {e}", "order_row_id": None, "position": None}
+        logger.error("Exception calling trading_client.buy_market: %s", e, exc_info=True)
+        return {"success": False, "error": f"buy_market exception: {e}", "order_row_id": None, "position": None}
 
     success = clob_resp.get("success", False)
     order_id = clob_resp.get("orderID") or clob_resp.get("order_id") or None
     status = clob_resp.get("status", "error" if not success else "unknown")
     error_msg = clob_resp.get("errorMsg") or clob_resp.get("error_msg") or None
 
-    logger.info("CLOB response: success=%s  order_id=%s  status=%s  error=%s",
-                success, order_id, status, error_msg)
+    logger.info(
+        "CLOB response: success=%s  order_id=%s  status=%s  error=%s",
+        success,
+        order_id,
+        status,
+        error_msg,
+    )
 
-    # Record order in DB
     fill_shares, fill_spent_usd, fill_avg_cents = _extract_fill_metrics(clob_resp)
 
     order_row_id = await db.execute(
@@ -673,89 +429,265 @@ async def buy_after_prediction(
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         (
-            slug, asset_id, outcome_side, "BUY", "GTC",
-            price_threshold, amount_usd,
-            fill_shares, fill_spent_usd, fill_avg_cents,
-            order_id, status, error_msg,
+            slug,
+            asset_id,
+            outcome_side,
+            "BUY",
+            "FOK",
+            worst_price,
+            amount_usd,
+            fill_shares,
+            fill_spent_usd,
+            fill_avg_cents,
+            order_id,
+            status,
+            error_msg,
             json.dumps(clob_resp, default=str),
-            batch_id, template_id,
+            batch_id,
+            template_id,
         ),
     )
     logger.info("Order recorded in DB: row_id=%s", order_row_id)
 
-    if order_id and order_row_id:
-        try:
-            asyncio.create_task(_cancel_after_timeout(str(order_id), order_row_id, timeout_sec=60))
-        except Exception:
-            pass
-
     position_info = None
 
-    # If order was matched, update position
     if success and status in ("matched", "live"):
         actual_shares = float(fill_shares) if fill_shares is not None else size_shares
         actual_cost = float(fill_spent_usd) if fill_spent_usd is not None else float(amount_usd)
-        actual_avg_price = float(fill_avg_cents) / 100.0 if fill_avg_cents is not None else float(snapshot_price)
+        actual_avg_price = float(fill_avg_cents) / 100.0 if fill_avg_cents is not None else float(worst_price)
 
         try:
-            # Try to update existing open position
             existing = await db.fetchone(
                 "SELECT id, shares, total_cost FROM poly_live_positions "
-                "WHERE slug=%s AND asset_id=%s AND status='open' LIMIT 1",
+                "WHERE slug=%s AND asset_id=%s AND closed=0 LIMIT 1",
                 (slug, asset_id),
             )
-
             if existing:
-                pos_id, old_shares, old_cost = existing
-                new_shares = old_shares + actual_shares
-                new_cost = old_cost + actual_cost
-                new_avg = new_cost / new_shares if new_shares > 0 else 0
+                pos_id, shares0, cost0 = existing
+                shares_new = float(shares0 or 0) + float(actual_shares)
+                cost_new = float(cost0 or 0) + float(actual_cost)
+                avg_new = cost_new / shares_new if shares_new > 0 else 0
                 await db.execute(
-                    "UPDATE poly_live_positions SET shares=%s, avg_price=%s, total_cost=%s, updated_at=NOW() "
-                    "WHERE id=%s",
-                    (new_shares, new_avg, new_cost, pos_id),
+                    "UPDATE poly_live_positions SET shares=%s,total_cost=%s,avg_price=%s,last_order_id=%s WHERE id=%s",
+                    (shares_new, cost_new, avg_new, order_id, pos_id),
                 )
-                logger.info("Position updated: id=%s  shares=%.4f  avg_price=%.4f  total_cost=%.2f",
-                            pos_id, new_shares, new_avg, new_cost)
-                position_info = {"id": pos_id, "shares": new_shares, "avg_price": new_avg, "total_cost": new_cost}
+                position_info = {"id": pos_id, "shares": shares_new, "total_cost": cost_new, "avg_price": avg_new}
             else:
-                # Create new position
-                avg_price = actual_avg_price
                 pos_id = await db.execute(
-                    """
-                    INSERT INTO poly_live_positions
-                      (slug, asset_id, outcome_side, shares, avg_price, total_cost,
-                       status, snapshot_price_cents, prediction_direction,
-                       prediction_batch_id, template_id)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    """,
-                    (
-                        slug, asset_id, outcome_side,
-                        actual_shares, avg_price, actual_cost,
-                        "open", (avg_price or snapshot_price) * 100,
-                        prediction_direction, batch_id, template_id,
-                    ),
+                    "INSERT INTO poly_live_positions (slug, asset_id, outcome_side, shares, avg_price, total_cost, closed, last_order_id) VALUES (%s,%s,%s,%s,%s,%s,0,%s)",
+                    (slug, asset_id, outcome_side, float(actual_shares), actual_avg_price, float(actual_cost), order_id),
                 )
-                logger.info("Position created: id=%s  shares=%.4f  avg=%.4f  cost=%.2f",
-                            pos_id, actual_shares, avg_price, actual_cost)
-                position_info = {"id": pos_id, "shares": actual_shares, "avg_price": avg_price, "total_cost": actual_cost}
-
+                position_info = {"id": pos_id, "shares": float(actual_shares), "total_cost": float(actual_cost), "avg_price": actual_avg_price}
         except Exception as e:
-            logger.error("Failed to update position in DB: %s", e, exc_info=True)
-
-
-    if market_lock.locked():
-        market_lock.release()
-        logger.debug("Market %s buy lock released", slug)
+            logger.error("Position update failed (non-fatal): %s", e)
 
     return {
-        "success": success,
+        "success": bool(success),
         "order_id": order_id,
-        "clob_status": status,
-        "error": error_msg,
+        "status": status,
         "order_row_id": order_row_id,
         "position": position_info,
+        "error": error_msg,
     }
+
+
+# ---------------------------------------------------------------------------
+# Core: buy after prediction
+# ---------------------------------------------------------------------------
+
+async def buy_after_prediction(
+    slug: str,
+    asset_id: str,
+    outcome_side: str,
+    prediction_direction: str,
+    snapshot_price: float,
+    price_threshold: float = 0.52,
+    batch_id: Optional[str] = None,
+    template_id: Optional[int] = None,
+    enable_price_wait: bool = False,
+) -> Dict[str, Any]:
+    """
+    Execute buy flow with price waits and retries, ensuring single filled order per market.
+    """
+
+    market_lock = _get_market_lock(slug)
+    if market_lock.locked():
+        logger.info("Market %s already has a buy in flight; waiting for lock", slug)
+    await market_lock.acquire()
+    logger.debug("Market %s buy lock acquired", slug)
+
+    order_row_id: Optional[Any] = None
+    order_id: Optional[str] = None
+    success = False
+    status: Optional[str] = None
+    error_msg: Optional[str] = None
+    position_info: Optional[Dict[str, Any]] = None
+
+    try:
+        amount_usd = DEFAULT_BET_SIZE_USD
+        try:
+            amount_usd = await _get_static_bet_size_usd()
+            logger.info("  bet_size (settings): $%.2f", amount_usd)
+        except Exception:
+            logger.warning("  falling back to default bet size: %.2f", DEFAULT_BET_SIZE_USD)
+
+        if float(price_threshold) > MAX_LIMIT_PRICE_USD:
+            msg = f"Limit price {float(price_threshold):.4f} exceeds hard cap {MAX_LIMIT_PRICE_USD:.4f}"
+            logger.error(msg)
+            return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
+        logger.info("=== BUY AFTER PREDICTION ===")
+        logger.info(
+            "  slug=%s  asset=%s  side=%s  direction=%s  amount=$%.2f  snap_price=%.4f  threshold=%.4f",
+            slug,
+            asset_id[:16],
+            outcome_side,
+            prediction_direction,
+            amount_usd,
+            snapshot_price,
+            price_threshold,
+        )
+
+        def _refresh_snapshot_price(current_price: float) -> float:
+            try:
+                try:
+                    trading_client.fetch_market(slug)
+                except Exception as inner_exc:
+                    logger.debug("fetch_market failed (non-fatal): %s", inner_exc)
+
+                refreshed = trading_client.get_best_ask(asset_id)
+                if refreshed is not None and float(refreshed) > 0:
+                    logger.info("  refreshed_best_ask=%.4f (CLOB)", float(refreshed))
+                    return float(refreshed)
+            except Exception as inner_exc:
+                logger.debug("refresh best ask failed (non-fatal): %s", inner_exc)
+            return current_price
+
+        snapshot_price = _refresh_snapshot_price(snapshot_price)
+
+        if await _market_has_completed_buy(slug):
+            msg = f"Market %s already has a filled buy; skip duplicate order"
+            logger.warning(msg)
+            return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
+        if snapshot_price is None or float(snapshot_price) <= 0:
+            msg = f"Invalid snapshot_price {snapshot_price}; skip buy"
+            logger.warning(msg)
+            return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
+        if enable_price_wait and snapshot_price > price_threshold:
+            logger.info(
+                "  snapshot price %.4f above threshold %.4f — waiting up to %ss for better price",
+                snapshot_price,
+                price_threshold,
+                PRICE_RETRY_WINDOW_SEC,
+            )
+            awaited_price = await _wait_for_price_within_threshold(
+                slug,
+                asset_id,
+                price_threshold,
+            )
+            if awaited_price is None:
+                msg = (
+                    f"Snapshot price {snapshot_price:.4f} exceeds threshold {price_threshold:.4f} "
+                    "and no better quote arrived within retry window"
+                )
+                logger.warning(msg)
+                return {"success": False, "error": msg, "order_row_id": None, "position": None}
+            snapshot_price = float(awaited_price)
+            logger.info("  price recovered to %.4f — proceeding with buy", snapshot_price)
+
+        if await _market_has_completed_buy(slug):
+            msg = f"Market %s received a fill before execution; skip duplicate order"
+            logger.warning(msg)
+            return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + PRICE_RETRY_WINDOW_SEC
+        attempt = 0
+        while loop.time() < deadline:
+            attempt += 1
+            if await _market_has_completed_buy(slug):
+                msg = f"Market {slug} already filled before attempt {attempt}; aborting"
+                logger.warning(msg)
+                return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
+            snapshot_price = _refresh_snapshot_price(snapshot_price)
+
+            if enable_price_wait and snapshot_price > price_threshold:
+                logger.info(
+                    "  snapshot price %.4f above threshold %.4f — waiting for better price (attempt %d)",
+                    snapshot_price,
+                    price_threshold,
+                    attempt,
+                )
+                awaited_price = await _wait_for_price_within_threshold(
+                    slug,
+                    asset_id,
+                    price_threshold,
+                    deadline_ts=deadline,
+                )
+                if awaited_price is None:
+                    msg = (
+                        f"Snapshot price {snapshot_price:.4f} exceeds threshold {price_threshold:.4f} "
+                        "and no better quote arrived within retry window"
+                    )
+                    logger.warning(msg)
+                    return {"success": False, "error": msg, "order_row_id": None, "position": None}
+                snapshot_price = float(awaited_price)
+                logger.info("  price recovered to %.4f — proceeding with buy", snapshot_price)
+
+            if await _market_has_completed_buy(slug):
+                msg = f"Market {slug} received a fill before execution; skip duplicate order"
+                logger.warning(msg)
+                return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
+            response: Optional[Dict[str, Any]] = None
+            try:
+                response = await _submit_market_order(
+                    slug=slug,
+                    asset_id=asset_id,
+                    outcome_side=outcome_side,
+                    amount_usd=amount_usd,
+                    snapshot_price=snapshot_price,
+                    price_threshold=price_threshold,
+                    batch_id=batch_id,
+                    template_id=template_id,
+                )
+            except Exception as exc:
+                logger.error("Market order attempt %d failed: %s", attempt, exc, exc_info=True)
+                response = {"success": False, "error": str(exc), "order_row_id": None, "position": None}
+
+            if response and response.get("success"):
+                success = True
+                status = response.get("status")
+                order_row_id = response.get("order_row_id")
+                order_id = response.get("order_id")
+                position_info = response.get("position")
+                return response
+
+            error_msg = (response or {}).get("error")
+            status = (response or {}).get("status")
+            logger.warning(
+                "Market order attempt %d failed: status=%s error=%s", attempt, status, error_msg
+            )
+
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(PRICE_RETRY_INTERVAL_SEC)
+
+        return {
+            "success": False,
+            "error": error_msg or "market order retries exhausted",
+            "order_row_id": order_row_id,
+            "position": position_info,
+            "status": status,
+        }
+
+    finally:
+        if market_lock.locked():
+            market_lock.release()
+            logger.debug("Market %s buy lock released", slug)
 
 
 # ---------------------------------------------------------------------------

@@ -866,6 +866,18 @@ async def api_live_order_flow(
     return await live_trading.order_flow_analytics(date_from=date_from, date_to=date_to)
 
 
+# ==================== COMPARE ASUME ====================
+
+@app.get("/api/compare_asume")
+async def api_compare_asume(
+    date_from: str | None = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
+    date_to: str | None = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
+    limit: int = Query(500, ge=1, le=5000, description="Max markets to compare in range"),
+):
+    from predictor.compare_asume import run_compare
+    return await run_compare(date_from=date_from, date_to=date_to, limit=limit)
+
+
 _TEMPLATE_DIR = pathlib.Path(__file__).parent / "templates"
 
 
@@ -885,9 +897,11 @@ def _build_admin_html() -> str:
         "{{TAB_WALLET}}": _load_template("tab_wallet.html"),
         "{{TAB_ORDERBOOKS}}": _load_template("tab_orderbooks.html"),
         "{{TAB_ANALYTICS}}": _load_template("tab_analytics.html"),
+        "{{TAB_COMPARE_ASUME}}": _load_template("tab_compare_asume.html"),
         "{{JS_COMMON}}": _load_template("js_common.js"),
         "{{JS_POLY}}": _load_template("js_poly.js"),
         "{{JS_ORDERBOOKS}}": _load_template("js_orderbooks.js"),
+        "{{JS_COMPARE_ASUME}}": _load_template("js_compare_asume.js"),
         "{{JS_BACKTEST}}": "",  # included in js_common.js
     }
     for key, val in replacements.items():

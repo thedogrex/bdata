@@ -124,6 +124,7 @@
     <button onclick="switchTab('poly')" id="tab-poly" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Polymarket</button>
     <button onclick="switchTab('wallet')" id="tab-wallet" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Wallet</button>
     <button onclick="switchTab('analytics');analyticsLoad()" id="tab-analytics" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Analytics</button>
+    <button onclick="switchTab('compare_asume')" id="tab-compare_asume" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Compare Asume</button>
   </div>
 
   {{TAB_BACKTEST}}
@@ -134,6 +135,7 @@
   {{TAB_POLY}}
   {{TAB_WALLET}}
   {{TAB_ANALYTICS}}
+  {{TAB_COMPARE_ASUME}}
 
   <!-- Compare Development Dialog -->
   <div id="compare-dev-popup" class="hidden absolute bg-slate-800 border border-slate-600 rounded-md p-2 shadow-lg z-50" style="min-width:120px;">
@@ -152,6 +154,7 @@ let polyActiveTs=null;
 {{JS_COMMON}}
 {{JS_POLY}}
 {{JS_ORDERBOOKS}}
+{{JS_COMPARE_ASUME}}
 {{JS_BACKTEST}}
 
 // ===== BOOT =====

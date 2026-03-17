@@ -1317,6 +1317,9 @@ async function loadPolyMarkets(){
       const hasLast = !!(lastSlug && data.find(m => m && m.slug === lastSlug));
       if(hasLast){
         await selectPolyMarket(lastSlug);
+      } else if(lastSlug){
+        polySelectedMarketSlug = lastSlug;
+        await showPolyMarket(lastSlug);
       } else {
         // No auto-selection; wait for user to click a market
         startLiveMarketPoll();

@@ -1,0 +1,72 @@
+  <!-- ============ TAB: COMPARE ASUME ============ -->
+  <div id="panel-compare_asume" class="hidden">
+    <div class="card p-6 mb-4">
+      <h2 class="text-lg font-semibold mb-2">Compare Asume</h2>
+      <p class="text-xs text-slate-400 mb-4">
+        Compare RSI mean-reversion signals produced by real candle close (c_5m) vs early-close snapshots (3-8 seconds before close).
+        If signals match, you can act on the signal earlier than everyone else.
+      </p>
+
+      <div class="flex flex-wrap gap-4 items-end">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Date From</label>
+          <input type="date" id="ca-date-from" class="w-40">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Date To</label>
+          <input type="date" id="ca-date-to" class="w-40">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Max Markets</label>
+          <input type="number" id="ca-limit" value="500" min="1" max="5000" step="50" class="w-28">
+        </div>
+        <button onclick="caRun()" id="ca-run-btn" class="btn btn-purple">Run Comparison</button>
+        <span id="ca-status" class="text-xs text-slate-500"></span>
+      </div>
+    </div>
+
+    <!-- Template info -->
+    <div id="ca-template-info" class="hidden card p-4 mb-4">
+      <div class="flex items-center gap-4">
+        <span class="text-xs text-slate-400">Template:</span>
+        <span id="ca-tpl-name" class="text-sm font-semibold"></span>
+        <span class="text-xs text-slate-500">|</span>
+        <span id="ca-tpl-strategy" class="text-xs text-slate-400"></span>
+        <span class="text-xs text-slate-500">|</span>
+        <span id="ca-tpl-horizon" class="text-xs text-slate-400"></span>
+        <span class="text-xs text-slate-500">|</span>
+        <span id="ca-tpl-elapsed" class="text-xs text-slate-500"></span>
+      </div>
+    </div>
+
+    <!-- Summary cards -->
+    <div id="ca-summary" class="grid gap-4 mb-4" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))"></div>
+
+    <!-- Comparison table -->
+    <div id="ca-table-wrap" class="hidden card p-2 mb-4" style="overflow-x:hidden">
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="text-xs font-semibold">Signal Comparison (newest first)</h3>
+        <label class="flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer">
+          <input type="checkbox" id="ca-diff-only" onchange="caRender()" class="accent-purple-500"> Show only differences
+        </label>
+      </div>
+      <table id="ca-table" class="text-[11px] w-full" style="table-layout:fixed">
+        <thead>
+          <tr>
+            <th style="width:11%">Market</th>
+            <th style="width:10%">Time</th>
+            <th style="width:12%">Signal open_time</th>
+            <th style="width:8%">c_5m close</th>
+            <th style="width:12%">c_5m signal</th>
+            <th style="width:6%">RSI</th>
+            <th style="width:8%">3s early</th>
+            <th style="width:8%">4s early</th>
+            <th style="width:8%">5s early</th>
+            <th style="width:8%">7s early</th>
+            <th style="width:9%">8s early</th>
+          </tr>
+        </thead>
+        <tbody id="ca-tbody"></tbody>
+      </table>
+    </div>
+  </div>

@@ -410,7 +410,7 @@ function walletRenderAnalyticsSummary(data, node){
   const winRate = totals.win_rate != null ? (totals.win_rate * 100).toFixed(1) + '%' : '—';
   node.innerHTML = `
     <div class="text-[11px] text-slate-400 mb-2">Range: ${range.start || '-'} → ${range.end || '-'}</div>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
       <div class="p-2 rounded bg-slate-900/50 border border-slate-800">
         <div class="text-[10px] uppercase tracking-wide text-slate-500">Orders</div>
         <div class="text-lg font-semibold text-slate-100">${totals.total_orders || 0}</div>
@@ -422,14 +422,11 @@ function walletRenderAnalyticsSummary(data, node){
         <div class="text-[11px] text-slate-500">Wins: ${totals.win_count || 0} · Losses: ${totals.loss_count || 0}</div>
       </div>
       <div class="p-2 rounded bg-slate-900/50 border border-slate-800">
-        <div class="text-[10px] uppercase tracking-wide text-slate-500">Winning Shares</div>
-        <div class="text-lg font-semibold text-green-400">${fmt(totals.winning_shares)}</div>
-        <div class="text-[11px] text-slate-500">Cost: $${fmt(totals.winning_cost)}</div>
-      </div>
-      <div class="p-2 rounded bg-slate-900/50 border border-slate-800">
-        <div class="text-[10px] uppercase tracking-wide text-slate-500">Net Results</div>
-        <div class="text-lg font-semibold ${totals.winning_net >= 0 ? 'text-emerald-300' : 'text-rose-300'}">$${fmt(totals.winning_net)}</div>
-        <div class="text-[11px] text-slate-500">After cost · Losses: $${fmt(totals.losing_amount)} · <span class="${totals.net_winning_amount >= 0 ? 'text-emerald-300' : 'text-rose-300'}">Net: $${fmt(totals.net_winning_amount)}</span></div>
+        <div class="text-[10px] uppercase tracking-wide text-slate-500">Spent & Profit</div>
+        <div class="text-[11px] text-slate-500 mb-1">Total spent on shares</div>
+        <div class="text-lg font-semibold text-indigo-200">$${fmt(totals.total_amount)}</div>
+        <div class="text-[11px] text-slate-500 mt-2">Net profit (period)</div>
+        <div class="text-lg font-semibold ${totals.net_winning_amount >= 0 ? 'text-emerald-300' : 'text-rose-300'}">$${fmt(totals.net_winning_amount)}</div>
       </div>
     </div>
   `;
@@ -456,6 +453,7 @@ function walletRenderAnalyticsTable(data, node){
     const winShares = Number(d.winning_shares || 0);
     const winCost = Number(d.winning_cost || 0);
     const avgPrice = winShares > 0 ? ((winCost / winShares) * 100).toFixed(3) : '—';
+    const totalSpent = Number(d.total_amount || 0);
     return `
       <tr class="border-b border-slate-800">
         <td class="py-2 pr-3 whitespace-nowrap text-slate-200">${d.date}</td>
@@ -464,6 +462,7 @@ function walletRenderAnalyticsTable(data, node){
         <td class="py-2 pr-3 text-center text-rose-300">${d.loss_count}</td>
         <td class="py-2 pr-3 text-center">${winRate}</td>
         <td class="py-2 pr-3 text-center text-indigo-200">${avgPrice}</td>
+        <td class="py-2 pr-3 text-center">$${totalSpent.toFixed(2)}</td>
         <td class="py-2 pr-3 text-center text-green-300">${Number(d.winning_shares || 0).toFixed(2)}</td>
         <td class="py-2 pr-3 text-center">$${winCost.toFixed(2)}</td>
         <td class="py-2 pr-3 text-center text-rose-300">$${Number(d.losing_amount || 0).toFixed(2)}</td>
@@ -483,6 +482,7 @@ function walletRenderAnalyticsTable(data, node){
             <th class="text-center py-2 pr-3">Losses</th>
             <th class="text-center py-2 pr-3">Win%</th>
             <th class="text-center py-2 pr-3">Av.</th>
+            <th class="text-center py-2 pr-3">Total Spent</th>
             <th class="text-center py-2 pr-3">Win Shares</th>
             <th class="text-center py-2 pr-3">Win Cost</th>
             <th class="text-center py-2 pr-3">Losing Amount</th>

@@ -36,6 +36,7 @@ let polyMarketsWithPosCache = null;
 
 let polyDetailTab = 'live';
 let polyPredRunsCache = [];
+let poly4sPredCache = []; // 4s-early predictions for current market
 
 let polyLastPredBatchId = null;
 let polyLastLiveOrderPlacedForBatchId = null;
@@ -1355,6 +1356,7 @@ async function showPolyMarket(slug){
   stopPolyCountdown();
   polyClosePredHistoryPanel();
   polyPredRunsCache = [];
+  poly4sPredCache = [];
   document.getElementById('poly-orderbook-up').innerHTML='<span class="text-slate-400">Loading...</span>';
   document.getElementById('poly-orderbook-down').innerHTML='<span class="text-slate-400">Loading...</span>';
   const simMsg = document.getElementById('poly-sim-msg');
@@ -1582,6 +1584,11 @@ async function polyFetchPredRunsForChart(slug){
     // Redraw the ask price chart so markers appear
     if(typeof obDrawChart === 'function') obDrawChart();
   }catch(e){ /* ignore — markers just won't show */ }
+  try{
+    const res4 = await fetch(API + '/api/poly/predictions_4s/' + encodeURIComponent(slug));
+    const p4 = await res4.json();
+    poly4sPredCache = (p4 && !p4.error) ? [p4] : [];
+  }catch(e){ poly4sPredCache = []; }
 }
 
 async function polyRefreshPredHistory(){
@@ -1628,7 +1635,8 @@ async function polyLoadHistoryChart(slug, runs){
 
     // Build prediction markers from runs: aggregate per market_ts
     const markers = buildPredMarkers(runs, data.candles);
-    drawCandleChart(canvas, data.candles, data.market_ts, markers);
+    const markers4s = poly4sPredCache.length ? build4sMarkers(poly4sPredCache) : undefined;
+    drawCandleChart(canvas, data.candles, data.market_ts, markers, markers4s);
 
     // Scroll to market candle
     try{
@@ -1644,17 +1652,31 @@ async function polyLoadHistoryChart(slug, runs){
 }
 
 function buildPredMarkers(runs, candles){
-  // Build a map: candle_ts → {up, down, unk}
+  // Build a map: candle_ts → aggregated counts + raw runs for hover tooltips
   const map = {};
   runs.forEach(r => {
     const ts = r.market_ts || (polySelectedMarket?.ts);
     if(!ts) return;
-    if(!map[ts]) map[ts] = {up:0, down:0, unk:0, ts: ts};
+    if(!map[ts]) map[ts] = {up:0, down:0, unk:0, ts: ts, runs: []};
     if(r.prediction === 'UP') map[ts].up++;
     else if(r.prediction === 'DOWN') map[ts].down++;
     else map[ts].unk++;
+    map[ts].runs.push(r);
   });
   return Object.values(map);
+}
+
+function build4sMarkers(preds4s){
+  // Plot 4s markers strictly at prediction completion time (prediction_ts)
+  return preds4s
+    .filter(p => p && p.prediction && p.prediction_ts)
+    .map(p => ({
+      ts: Number(p.prediction_ts),
+      market_ts: p.market_ts ? Number(p.market_ts) : null,
+      signal: String(p.prediction).toUpperCase(),
+      prob: typeof p.probability === 'number' ? p.probability : null,
+      payload: p,
+    }));
 }
 
 function renderPredHistory(runs){
@@ -2268,7 +2290,8 @@ async function loadPredictionCandles(slug, windowSize){
       +`<div id="poly-pred-scroll" style="overflow-x:auto"><canvas id="poly-pred-canvas" height="320"></canvas></div>`;
     const canvas = document.getElementById('poly-pred-canvas');
     const markers = polyPredRunsCache.length ? buildPredMarkers(polyPredRunsCache, data.candles) : undefined;
-    drawCandleChart(canvas, data.candles, data.market_ts, markers);
+    const markers4s = poly4sPredCache.length ? build4sMarkers(poly4sPredCache) : undefined;
+    drawCandleChart(canvas, data.candles, data.market_ts, markers, markers4s);
     // Scroll to market candle if present
     try{
       const sc = document.getElementById('poly-pred-scroll');
@@ -2282,7 +2305,7 @@ async function loadPredictionCandles(slug, windowSize){
   }
 }
 
-function drawCandleChart(canvas, candles, marketTs, markers){
+function drawCandleChart(canvas, candles, marketTs, markers, markers4s){
   if(!canvas || !candles.length) return;
   const ctx = canvas.getContext('2d');
   const n = candles.length;
@@ -2303,10 +2326,34 @@ function drawCandleChart(canvas, candles, marketTs, markers){
   const yScale = drawH / pRange;
   const priceY = p => padT + (maxP - p) * yScale;
   const candleX = i => padL + i * step;
+  const candleCenterX = i => candleX(i) + candleW / 2;
 
   // Build ts→index map for fast marker lookup
   const tsIdx = {};
   candles.forEach((c, i) => { tsIdx[c.t] = i; });
+  const intervalSec = (() => {
+    if(n >= 2){
+      const d = Number(candles[1].t) - Number(candles[0].t);
+      if(Number.isFinite(d) && d > 0) return d;
+    }
+    return 300;
+  })();
+  const markerXForTs = (ts) => {
+    const t = Number(ts);
+    if(!Number.isFinite(t)) return null;
+    const exactIdx = tsIdx[t];
+    if(exactIdx !== undefined) return candleCenterX(exactIdx);
+    if(t < Number(candles[0].t) || t > Number(candles[n - 1].t) + intervalSec) return null;
+    for(let i = 0; i < n; i++){
+      const start = Number(candles[i].t);
+      const end = start + intervalSec;
+      if(t >= start && t <= end){
+        const frac = Math.max(0, Math.min(1, (t - start) / intervalSec));
+        return candleCenterX(i) + frac * step;
+      }
+    }
+    return null;
+  };
 
   // Background
   ctx.fillStyle = '#0f172a';
@@ -2387,12 +2434,15 @@ function drawCandleChart(canvas, candles, marketTs, markers){
     }
   }
 
-  // --- Prediction markers ---
+  const markerHits = [];
+  const marker4sHits = [];
+
+  // --- Prediction markers (triangles, normal candle-close predictions) ---
   if(markers && markers.length){
     markers.forEach(m => {
       const idx = tsIdx[m.ts];
       if(idx === undefined) return;
-      const cx = candleX(idx) + candleW / 2;
+      const cx = candleCenterX(idx);
       const c = candles[idx];
       const yBot = priceY(c.l) + 1;  // below the candle low
       const markerRadius = 0.8;
@@ -2450,6 +2500,86 @@ function drawCandleChart(canvas, candles, marketTs, markers){
         ctx.fillText(String(total), cx, yBot + 3);
       }
       ctx.textBaseline = 'alphabetic';
+
+      markerHits.push({
+        cx,
+        cy: yBot,
+        r: 10,
+        color: iconColor,
+        data: m,
+      });
+    });
+  }
+
+  // --- 4s-early prediction markers (diamonds, drawn above candle top) ---
+  if(markers4s && markers4s.length){
+    markers4s.forEach(m => {
+      const cx = markerXForTs(m.ts);
+      if(cx == null) return;
+      let idx = tsIdx[m.ts];
+      if(idx === undefined){
+        for(let i = 0; i < n; i++){
+          const start = Number(candles[i].t);
+          const end = start + intervalSec;
+          if(Number(m.ts) >= start && Number(m.ts) <= end){
+            idx = i;
+            break;
+          }
+        }
+      }
+      if(idx === undefined) return;
+      const c = candles[idx];
+      // Place diamond above the candle high, larger offset to avoid overlapping normal marker
+      const yTop = priceY(c.h) - 12;
+      const hw = 2.5; // half-width of diamond
+      const hh = 3.5; // half-height of diamond
+
+      let iconColor;
+      if(m.signal === 'UP') iconColor = '#4ade80';        // lighter green
+      else if(m.signal === 'DOWN') iconColor = '#f87171'; // lighter red
+      else iconColor = '#fbbf24';                         // amber for UNDEFINED
+
+      // Glow halo
+      ctx.save();
+      ctx.fillStyle = iconColor;
+      ctx.globalAlpha = 0.20;
+      ctx.beginPath();
+      ctx.arc(cx, yTop, hw + 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1.0;
+
+      // Diamond shape (rotated square)
+      ctx.fillStyle = iconColor;
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(cx,        yTop - hh); // top
+      ctx.lineTo(cx + hw,   yTop);      // right
+      ctx.lineTo(cx,        yTop + hh); // bottom
+      ctx.lineTo(cx - hw,   yTop);      // left
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      // Small '4s' label above the diamond
+      ctx.save();
+      ctx.fillStyle = iconColor;
+      ctx.font = 'bold 2.4px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('4s', cx, yTop - hh - 0.5);
+      ctx.restore();
+
+      marker4sHits.push({
+        cx,
+        cy: yTop,
+        r: Math.max(hw + 6, 10),
+        color: iconColor,
+        payload: m.payload || {},
+        signal: m.signal,
+        prob: m.prob,
+      });
     });
   }
 
@@ -2469,6 +2599,166 @@ function drawCandleChart(canvas, candles, marketTs, markers){
     ctx.fillText(lbl, 0, 0);
     ctx.restore();
   }
+
+  canvas._polyHoverMeta = {
+    markerHits,
+    marker4sHits,
+  };
+  bindPolyChartHover(canvas);
+}
+
+function polyGetChartTooltip(){
+  let tip = document.getElementById('poly-chart-tooltip');
+  if(!tip){
+    tip = document.createElement('div');
+    tip.id = 'poly-chart-tooltip';
+    tip.style.position = 'fixed';
+    tip.style.background = '#1e293b';
+    tip.style.border = '1px solid #475569';
+    tip.style.borderRadius = '6px';
+    tip.style.padding = '8px 12px';
+    tip.style.fontSize = '11px';
+    tip.style.color = '#e2e8f0';
+    tip.style.pointerEvents = 'none';
+    tip.style.zIndex = '100000';
+    tip.style.maxWidth = '320px';
+    tip.style.display = 'none';
+    document.body.appendChild(tip);
+  }
+  return tip;
+}
+
+function bindPolyChartHover(canvas){
+  if(!canvas) return;
+  if(!canvas._polyHoverHandler){
+    canvas._polyHoverHandler = (evt) => polyChartHover(evt, canvas);
+    canvas.addEventListener('mousemove', canvas._polyHoverHandler);
+  }
+  if(!canvas._polyLeaveHandler){
+    canvas._polyLeaveHandler = () => polyHideChartTooltip();
+    canvas.addEventListener('mouseleave', canvas._polyLeaveHandler);
+  }
+  const parent = canvas.parentElement;
+  if(parent && !parent._polyHoverHandler){
+    parent._polyHoverHandler = (evt) => polyChartHover(evt, canvas);
+    parent.addEventListener('mousemove', parent._polyHoverHandler);
+  }
+  if(parent && !parent._polyLeaveHandler){
+    parent._polyLeaveHandler = () => polyHideChartTooltip();
+    parent.addEventListener('mouseleave', parent._polyLeaveHandler);
+  }
+}
+
+function polyHideChartTooltip(){
+  const tip = polyGetChartTooltip();
+  if(tip) tip.style.display = 'none';
+}
+
+function polyChartHover(e, canvas){
+  const meta = canvas?._polyHoverMeta;
+  const tooltip = polyGetChartTooltip();
+  if(!meta || !tooltip){
+    polyHideChartTooltip();
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const mx = (e.clientX - rect.left) * scaleX;
+  const my = (e.clientY - rect.top) * scaleY;
+
+  const hit4s = (meta.marker4sHits || []).find(m => {
+    const dx = mx - m.cx;
+    const dy = my - m.cy;
+    return Math.sqrt(dx*dx + dy*dy) <= (m.r + 3);
+  });
+  if(hit4s){
+    try{ canvas.style.cursor = 'pointer'; }catch(_){}
+    polyRender4sTooltip(hit4s, e, tooltip);
+    return;
+  }
+
+  const hitPred = (meta.markerHits || []).find(m => {
+    const dx = mx - m.cx;
+    const dy = my - m.cy;
+    return Math.sqrt(dx*dx + dy*dy) <= (m.r + 3);
+  });
+  if(hitPred){
+    try{ canvas.style.cursor = 'pointer'; }catch(_){}
+    polyRenderPredTooltip(hitPred, e, tooltip);
+    return;
+  }
+
+  polyHideChartTooltip();
+  try{ canvas.style.cursor = 'default'; }catch(_){}
+}
+
+function polyRender4sTooltip(hit, evt, tooltip){
+  const payload = hit.payload || {};
+  const predTs = payload.prediction_ts ? new Date(payload.prediction_ts * 1000) : null;
+  const marketTs = payload.market_ts ? new Date(payload.market_ts * 1000) : null;
+  const signalTs = payload.signal_open_time ? new Date(payload.signal_open_time / 1000) : null;
+  const prob = Number.isFinite(hit.prob) ? Math.round(hit.prob * 100) + '%' : '—';
+  const rsi = payload.rsi !== undefined ? Number(payload.rsi).toFixed(1) : '—';
+  const slug = payload.market_slug || payload.slug || payload._requested_slug || '—';
+  const dirIcon = hit.signal === 'UP' ? '▲' : (hit.signal === 'DOWN' ? '▼' : '?');
+  const dirColor = hit.signal === 'UP' ? '#4ade80' : (hit.signal === 'DOWN' ? '#f87171' : '#fbbf24');
+
+  let html = `<div style="color:${dirColor};font-weight:700;font-size:13px">4s Early Prediction ${dirIcon}</div>`;
+  if(predTs){
+    html += `<div style="color:#94a3b8;font-size:10px;margin-bottom:4px">Predicted: ${predTs.toUTCString()}</div>`;
+  }
+  html += `<div style="font-size:11px;margin-bottom:4px">`;
+  html += `<span style="color:${dirColor};font-weight:700">${hit.signal || 'UNDEFINED'}</span>`;
+  html += ` · Prob: <span style="color:#94a3b8">${prob}</span>`;
+  html += ` · RSI: <span style="color:#94a3b8">${rsi}</span>`;
+  html += `</div>`;
+  html += `<div style="font-size:11px;color:#cbd5e1">Market: <strong>${slug}</strong></div>`;
+  if(marketTs){
+    html += `<div style="font-size:10px;color:#94a3b8">Target market starts: ${marketTs.toUTCString()}</div>`;
+  }
+  if(signalTs){
+    html += `<div style="font-size:10px;color:#94a3b8">Signal candle: ${signalTs.toUTCString()}</div>`;
+  }
+
+  tooltip.innerHTML = html;
+  tooltip.style.display = 'block';
+  tooltip.style.left = (evt.clientX + 14) + 'px';
+  tooltip.style.top = (evt.clientY - 10) + 'px';
+  const tr = tooltip.getBoundingClientRect();
+  if(tr.right > window.innerWidth) tooltip.style.left = (evt.clientX - tr.width - 10) + 'px';
+  if(tr.bottom > window.innerHeight) tooltip.style.top = (evt.clientY - tr.height - 10) + 'px';
+}
+
+function polyRenderPredTooltip(hit, evt, tooltip){
+  const runs = hit.data?.runs || [];
+  if(!runs.length){
+    polyHideChartTooltip();
+    return;
+  }
+  const dt = runs[0].started_at ? runs[0].started_at.replace('T',' ').substring(0,19) : '—';
+  let html = `<div style="color:${hit.color};font-weight:700;font-size:13px">Prediction Batch</div>`;
+  html += `<div style="color:#94a3b8;font-size:10px;margin-bottom:4px">${dt}</div>`;
+  html += '<div style="border-top:1px solid #334155;padding-top:4px;display:flex;flex-direction:column;gap:2px">';
+  runs.forEach(r => {
+    const predColor = r.prediction==='UP' ? '#22c55e' : (r.prediction==='DOWN' ? '#ef4444' : '#f59e0b');
+    const predIcon = r.prediction==='UP' ? '▲' : (r.prediction==='DOWN' ? '▼' : '?');
+    const prob = r.probability !== null && r.probability !== undefined ? Math.round(r.probability*100)+'%' : '';
+    html += `<div style="display:flex;align-items:center;gap:6px;font-size:10px">`;
+    html += `<span style="color:#94a3b8;min-width:70px">${r.template_name||'?'}${r.quantum_scenario ? ' <span style=\'color:#8b5cf6\'>['+r.quantum_scenario+']</span>' : ''}</span>`;
+    html += `<span style="color:${predColor};font-weight:700">${predIcon} ${r.prediction||'UNDEFINED'}</span>`;
+    if(prob) html += `<span style="color:#94a3b8">${prob}</span>`;
+    html += `</div>`;
+  });
+  html += '</div>';
+
+  tooltip.innerHTML = html;
+  tooltip.style.display = 'block';
+  tooltip.style.left = (evt.clientX + 14) + 'px';
+  tooltip.style.top = (evt.clientY - 10) + 'px';
+  const tr = tooltip.getBoundingClientRect();
+  if(tr.right > window.innerWidth) tooltip.style.left = (evt.clientX - tr.width - 10) + 'px';
+  if(tr.bottom > window.innerHeight) tooltip.style.top = (evt.clientY - tr.height - 10) + 'px';
 }
 
 // ===== Sim trades =====

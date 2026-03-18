@@ -693,6 +693,81 @@ function obDrawChart(){
     }
   }catch(e){ /* polyPredRunsCache may not exist in non-poly context */ }
 
+  // --- 4s-early prediction markers (diamonds) on ask-price chart ---
+  const pred4sMarkerHits = [];
+  try{
+    const preds4s = (typeof poly4sPredCache !== 'undefined') ? poly4sPredCache : [];
+    if(preds4s.length){
+      const marker4sY = totalH - paddingBottom - PRED_MARKER_R - 6 - PRED_MARKER_R * 2 - 10; // lifted a bit more to avoid overlap
+      const hw = PRED_MARKER_R * 0.65;
+      const hh = PRED_MARKER_R * 0.9;
+      preds4s.forEach(p => {
+        if(!p || !p.prediction_ts || !p.prediction) return; // require prediction_ts to avoid shifting to market_ts
+        const batchTs = Number(p.prediction_ts);
+        if(isNaN(batchTs) || batchTs < tsMin || batchTs > tsMax) return;
+        if(markerCutoffTs !== null && batchTs > markerCutoffTs) return;
+
+        const sig = String(p.prediction).toUpperCase();
+        let iconColor;
+        if(sig === 'UP') iconColor = '#4ade80';
+        else if(sig === 'DOWN') iconColor = '#f87171';
+        else iconColor = '#fbbf24';
+
+        const mx = tsToX(batchTs);
+
+        ctx.save();
+        // Dashed vertical line
+        ctx.strokeStyle = iconColor;
+        ctx.globalAlpha = 0.18;
+        ctx.lineWidth = 0.8;
+        ctx.setLineDash([3,3]);
+        ctx.beginPath(); ctx.moveTo(mx, paddingTop); ctx.lineTo(mx, marker4sY - hh); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1.0;
+
+        // Glow halo
+        ctx.fillStyle = iconColor;
+        ctx.globalAlpha = 0.20;
+        ctx.beginPath();
+        ctx.arc(mx, marker4sY, hw + 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+
+        // Diamond shape
+        ctx.fillStyle = iconColor;
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(mx,      marker4sY - hh);
+        ctx.lineTo(mx + hw, marker4sY);
+        ctx.lineTo(mx,      marker4sY + hh);
+        ctx.lineTo(mx - hw, marker4sY);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // '4s' label above diamond
+        ctx.fillStyle = iconColor;
+        ctx.font = 'bold 7px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('4s', mx, marker4sY - hh - 1);
+
+        ctx.restore();
+
+        pred4sMarkerHits.push({
+          cx: mx,
+          cy: marker4sY,
+          r: Math.max(hw + 6, 10),
+          payload: p,
+          color: iconColor,
+          signal: sig,
+          prob: (typeof p.probability === 'number') ? p.probability : null,
+        });
+      });
+    }
+  }catch(e){ /* poly4sPredCache may not exist */ }
+
   // Draw fill markers (executed buys)
   try{
     const fills = Array.isArray(obFillMarkers) ? obFillMarkers : [];
@@ -750,7 +825,7 @@ function obDrawChart(){
   }catch(e){/* ignore fill marker issues */}
 
   // Store chart metadata for hover
-  canvas._obChartMeta = {tsMin,tsMax,tsRange,chartW,chartH,paddingLeft,paddingTop,paddingBottom,paddingRight,totalW,totalH,minPrice,maxPrice,seriesNames,colors,tsToX,priceToY,predMarkerHits,fillMarkerHits};
+  canvas._obChartMeta = {tsMin,tsMax,tsRange,chartW,chartH,paddingLeft,paddingTop,paddingBottom,paddingRight,totalW,totalH,minPrice,maxPrice,seriesNames,colors,tsToX,priceToY,predMarkerHits,fillMarkerHits,pred4sMarkerHits};
 
   // Attach hover handler (once)
   if(!canvas._obHoverBound){
@@ -772,6 +847,37 @@ function obChartHover(e){
   const my = (e.clientY - rect.top);
 
   const tooltip = document.getElementById('ob-chart-tooltip');
+
+  // --- Check 4s diamond hover FIRST ---
+  const hits4s = meta.pred4sMarkerHits || [];
+  for(const m of hits4s){
+    const dx = mx - m.cx, dy = my - m.cy;
+    if(Math.sqrt(dx*dx + dy*dy) <= m.r + 4){
+      const p = m.payload || {};
+      const dirIcon = (m.signal === 'UP') ? '▲' : (m.signal === 'DOWN' ? '▼' : '?');
+      const dirColor = (m.signal === 'UP') ? '#4ade80' : (m.signal === 'DOWN' ? '#f87171' : '#fbbf24');
+      const prob = (typeof m.prob === 'number') ? Math.round(m.prob*100)+'%' : '—';
+      const predTs = p.prediction_ts ? new Date(p.prediction_ts*1000) : null;
+      const marketTs = p.market_ts ? new Date(p.market_ts*1000) : null;
+      const signalTs = p.signal_open_time ? new Date(p.signal_open_time/1000) : null;
+      let html = `<div style="color:${dirColor};font-weight:700;font-size:13px">4s Early Prediction ${dirIcon}</div>`;
+      if(predTs) html += `<div style="color:#94a3b8;font-size:10px;margin-bottom:4px">Predicted: ${predTs.toUTCString()}</div>`;
+      html += `<div style="font-size:11px;margin-bottom:4px">`
+        + `<span style=\"color:${dirColor};font-weight:700\">${m.signal||'UNDEFINED'}</span>`
+        + ` · Prob: <span style=\"color:#94a3b8\">${prob}</span>`
+        + `</div>`;
+      if(marketTs) html += `<div style=\"font-size:10px;color:#94a3b8\">Target market starts: ${marketTs.toUTCString()}</div>`;
+      if(signalTs) html += `<div style=\"font-size:10px;color:#94a3b8\">Signal candle: ${signalTs.toUTCString()}</div>`;
+      tooltip.innerHTML = html;
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.clientX + 14) + 'px';
+      tooltip.style.top = (e.clientY - 10) + 'px';
+      const tr = tooltip.getBoundingClientRect();
+      if(tr.right > window.innerWidth) tooltip.style.left = (e.clientX - tr.width - 10) + 'px';
+      if(tr.bottom > window.innerHeight) tooltip.style.top = (e.clientY - tr.height - 10) + 'px';
+      return;
+    }
+  }
 
   // --- Check prediction marker hover FIRST ---
   const hits = meta.predMarkerHits || [];

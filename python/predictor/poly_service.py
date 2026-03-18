@@ -933,12 +933,12 @@ async def save_settings(autopredict: bool, strategy: str, params: Optional[dict]
     await db.execute(
         """
         INSERT INTO poly_settings (id, autopredict, strategy, params_json, window_size)
-        VALUES ('default', %s, %s, %s, %s)
+        VALUES ('default', %s, %s, %s, %s) AS new
         ON DUPLICATE KEY UPDATE
-            autopredict=VALUES(autopredict),
-            strategy=VALUES(strategy),
-            params_json=VALUES(params_json),
-            window_size=VALUES(window_size)
+            autopredict=new.autopredict,
+            strategy=new.strategy,
+            params_json=new.params_json,
+            window_size=new.window_size
         """,
         (int(autopredict), strategy, params_json, int(window_size)),
     )
@@ -995,11 +995,11 @@ async def save_live_trade_settings(
         """
         INSERT INTO poly_live_trade_settings
             (id, auto_place, bet_size_usd, price_cap_cents)
-        VALUES ('default', %s, %s, %s)
+        VALUES ('default', %s, %s, %s) AS new
         ON DUPLICATE KEY UPDATE
-            auto_place=VALUES(auto_place),
-            bet_size_usd=VALUES(bet_size_usd),
-            price_cap_cents=VALUES(price_cap_cents)
+            auto_place=new.auto_place,
+            bet_size_usd=new.bet_size_usd,
+            price_cap_cents=new.price_cap_cents
         """,
         (
             int(bool(normalized["auto_place"])),
@@ -1634,6 +1634,10 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
 
         # Import here to avoid circular imports
         from predictor import live_trading
+
+        if pred not in ("UP", "DOWN"):
+            logger.info("[auto_trade] skip: non-tradable prediction", {"slug": slug, "prediction": pred})
+            return
 
         bet_size_usd = float(live_settings.get("bet_size_usd", DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"]) or DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"])
         bet_size_usd = max(0.0, bet_size_usd)

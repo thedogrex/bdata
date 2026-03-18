@@ -177,25 +177,25 @@ async def _upsert_cached_offset(
             market_slug, market_ts, market_open_time, signal_open_time, source_table,
             ref_signal, ref_prob, ref_close, ref_rsi,
             has_data, delayed_signal, delayed_prob, delayed_close, delayed_rsi, is_diff, message
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS new
         ON DUPLICATE KEY UPDATE
-            strategy_name = VALUES(strategy_name),
-            strategy_params_json = VALUES(strategy_params_json),
-            window_size = VALUES(window_size),
-            horizon = VALUES(horizon),
-            market_slug = VALUES(market_slug),
-            market_open_time = VALUES(market_open_time),
-            ref_signal = VALUES(ref_signal),
-            ref_prob = VALUES(ref_prob),
-            ref_close = VALUES(ref_close),
-            ref_rsi = VALUES(ref_rsi),
-            has_data = VALUES(has_data),
-            delayed_signal = VALUES(delayed_signal),
-            delayed_prob = VALUES(delayed_prob),
-            delayed_close = VALUES(delayed_close),
-            delayed_rsi = VALUES(delayed_rsi),
-            is_diff = VALUES(is_diff),
-            message = VALUES(message)
+            strategy_name = new.strategy_name,
+            strategy_params_json = new.strategy_params_json,
+            window_size = new.window_size,
+            horizon = new.horizon,
+            market_slug = new.market_slug,
+            market_open_time = new.market_open_time,
+            ref_signal = new.ref_signal,
+            ref_prob = new.ref_prob,
+            ref_close = new.ref_close,
+            ref_rsi = new.ref_rsi,
+            has_data = new.has_data,
+            delayed_signal = new.delayed_signal,
+            delayed_prob = new.delayed_prob,
+            delayed_close = new.delayed_close,
+            delayed_rsi = new.delayed_rsi,
+            is_diff = new.is_diff,
+            message = new.message
         """,
         (
             int(template_id),

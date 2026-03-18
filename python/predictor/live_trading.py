@@ -278,11 +278,20 @@ async def _cancel_after_timeout(order_id: str, order_row_id: Any, timeout_sec: i
 
 
 async def _market_has_completed_buy(slug: str) -> bool:
+    """Return True if the slug already has a non-error order in poly_live_orders.
+
+    Checks for ANY order whose clob_status is NOT 'error', OR whose
+    fill_shares > 0.  This catches matched/live/filled orders even when
+    the CLOB omits takingAmount (fill_shares=NULL), while still allowing
+    retries for genuinely failed (error) attempts within buy_after_prediction.
+    """
     if not slug:
         return False
     try:
         row = await db.fetchone(
-            "SELECT 1 FROM poly_live_orders WHERE slug=%s AND COALESCE(fill_shares,0) > 0 LIMIT 1",
+            "SELECT 1 FROM poly_live_orders "
+            "WHERE slug=%s AND (COALESCE(clob_status,'') != 'error' OR COALESCE(fill_shares,0) > 0) "
+            "LIMIT 1",
             (slug,),
         )
         return bool(row)
@@ -401,6 +410,7 @@ async def _submit_market_order(
     price_threshold: float,
     batch_id: Optional[str],
     template_id: Optional[int],
+    is_4s_early: bool = False,
 ) -> Dict[str, Any]:
     """Submit a single market order attempt."""
 
@@ -458,8 +468,8 @@ async def _submit_market_order(
           (slug, asset_id, outcome_side, side, order_type, price, amount,
            fill_shares, fill_total_spent_usd, fill_avg_price_cents,
            clob_order_id, clob_status, clob_error_msg, clob_response_json,
-           prediction_batch_id, template_id)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           prediction_batch_id, template_id, is_4s_early)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         (
             slug,
@@ -478,6 +488,7 @@ async def _submit_market_order(
             json.dumps(clob_resp, default=str),
             batch_id,
             template_id,
+            1 if is_4s_early else 0,
         ),
     )
     logger.info("Order recorded in DB: row_id=%s", order_row_id)
@@ -538,10 +549,20 @@ async def buy_after_prediction(
     batch_id: Optional[str] = None,
     template_id: Optional[int] = None,
     enable_price_wait: bool = False,
+    is_4s_early: bool = False,
 ) -> Dict[str, Any]:
     """
     Execute buy flow with price waits and retries, ensuring single filled order per market.
+    
+    CRITICAL: This is the ONLY function that places Polymarket orders.
+    All order paths (4s early, regular auto-trade, manual API) converge here.
     """
+
+    # DEDUP CHECK #1: Block immediately if market already has an order
+    if await _market_has_completed_buy(slug):
+        msg = f"Market {slug} already has an order; reject duplicate"
+        logger.warning(msg)
+        return {"success": False, "error": msg, "order_row_id": None, "position": None}
 
     market_lock = _get_market_lock(slug)
     if market_lock.locked():
@@ -557,6 +578,12 @@ async def buy_after_prediction(
     position_info: Optional[Dict[str, Any]] = None
 
     try:
+        pred_norm = str(prediction_direction or "").upper()
+        if pred_norm not in ("UP", "DOWN"):
+            msg = f"Prediction {prediction_direction!r} is not tradable; skip buy"
+            logger.warning(msg)
+            return {"success": False, "error": msg, "order_row_id": None, "position": None}
+
         amount_usd = DEFAULT_BET_SIZE_USD
         try:
             amount_usd = await _get_static_bet_size_usd()
@@ -686,6 +713,7 @@ async def buy_after_prediction(
                     price_threshold=price_threshold,
                     batch_id=batch_id,
                     template_id=template_id,
+                    is_4s_early=is_4s_early,
                 )
             except Exception as exc:
                 logger.error("Market order attempt %d failed: %s", attempt, exc, exc_info=True)

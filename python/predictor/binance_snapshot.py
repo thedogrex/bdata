@@ -186,6 +186,34 @@ class SnapshotCollector:
                 time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(fields["open_time"] / 1_000_000)),
                 fields["close"],
             )
+            if table == "c_5m_5s":
+                asyncio.create_task(self._trigger_4s_predict(fields["open_time"], fields))
+
+    async def _trigger_4s_predict(self, open_time_us: int, live_fields: dict) -> None:
+        """Fire 5s-early autopredict for the latest possible market (horizon=2).
+
+        With horizon=2 the signal candle predicts 2 intervals ahead, so the
+        single target market is at  open_time + 2 * interval.
+        live_fields is passed directly so predict_4s skips the DB offset query."""
+        try:
+            from predictor.predict_4s import try_autopredict_4s
+            interval_us = 5 * 60 * 1_000_000
+            horizon = 2
+            target_ts_us = open_time_us + horizon * interval_us
+            target_ts = target_ts_us // 1_000_000
+            now_utc = int(time.time())
+            if target_ts <= now_utc:
+                return
+            rows = await self.db.fetchall(
+                "SELECT slug FROM poly_markets WHERE ts=%s AND closed=0 LIMIT 10",
+                (target_ts,),
+            )
+            for (slug,) in (rows or []):
+                LOGGER.info("[4s_trigger] firing autopredict_4s for %s (horizon=%d, starts in %ds)",
+                            slug, horizon, target_ts - now_utc)
+                asyncio.create_task(try_autopredict_4s(slug, live_fields))
+        except Exception as exc:
+            LOGGER.warning("[4s_trigger] error: %s", exc)
 
     @staticmethod
     def _map_fields(kline: dict) -> dict:

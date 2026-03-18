@@ -27,6 +27,7 @@ from predictor.task_manager import task_mgr
 from predictor import poly_service
 from predictor import live_trading
 from predictor import telegram_bot
+from predictor import predict_4s
 from predictor.binance_snapshot import start_snapshot_collector, stop_snapshot_collector
 import app.config as config
 
@@ -822,6 +823,7 @@ async def api_kelly_sim(
 @app.on_event("startup")
 async def startup_live_trading():
     await live_trading.ensure_tables()
+    await predict_4s.ensure_tables()
 
 
 @app.post("/api/poly/live/buy")
@@ -864,6 +866,38 @@ async def api_live_order_flow(
     date_to: str | None = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
 ):
     return await live_trading.order_flow_analytics(date_from=date_from, date_to=date_to)
+
+
+# ==================== 4S-EARLY PREDICTIONS ====================
+
+@app.post("/api/poly/predict_4s/{slug:path}")
+async def api_predict_4s(slug: str):
+    """Run a 4s-early prediction for a market slug."""
+    return await predict_4s.predict_for_market_4s(slug=slug)
+
+
+@app.get("/api/poly/predictions_4s/{slug:path}")
+async def api_get_prediction_4s(slug: str):
+    """Return saved 4s-early prediction payload for a market."""
+    result = await predict_4s.get_saved_prediction_4s(slug=slug)
+    if result is None:
+        return {"error": "No 4s-early prediction found for this market"}
+    return result
+
+
+@app.get("/api/poly/predictions_4s")
+async def api_list_predictions_4s(limit: int = Query(200, ge=1, le=1000)):
+    """List recent 4s-early predictions."""
+    return await predict_4s.list_predictions_4s(limit=limit)
+
+
+@app.get("/api/poly/live/orders_4s")
+async def api_live_orders_4s(
+    limit: int = Query(100, ge=1, le=1000),
+    slug: str | None = Query(None),
+):
+    """List recent orders placed via 4s-early predictions."""
+    return await predict_4s.list_orders_4s(slug=slug, limit=limit)
 
 
 # ==================== COMPARE ASUME ====================

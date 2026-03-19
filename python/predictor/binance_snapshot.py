@@ -178,7 +178,7 @@ class SnapshotCollector:
 
     async def _store_snapshot(self, fields: dict, table: str) -> None:
         result = await self.db.insert_one(table, fields=fields, ignore=True, print_query=False)
-        if result >= 0:
+        if result > 0:
             LOGGER.info(
                 "Stored %s snapshot for candle %s (%s) close=%.2f",
                 table,
@@ -188,6 +188,12 @@ class SnapshotCollector:
             )
             if table == "c_5m_5s":
                 asyncio.create_task(self._trigger_4s_predict(fields["open_time"], fields))
+        elif result == 0:
+            LOGGER.debug(
+                "Skip duplicate %s snapshot for candle %s; no retrigger",
+                table,
+                fields.get("open_time"),
+            )
 
     async def _trigger_4s_predict(self, open_time_us: int, live_fields: dict) -> None:
         """Fire 5s-early autopredict for the latest possible market (horizon=2).

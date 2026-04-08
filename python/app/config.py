@@ -10,6 +10,7 @@ DB_USER: str = os.getenv("DB_USER", "")
 DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
 DB_NAME: str = os.getenv("DB_NAME", "")
 
+FASTAPI_ROOT: str = os.getenv("FASTAPI_ROOT", "")
 
 API_KEY : str = os.getenv("API_KEY", "no-api-key")
 WALLET_ADDRESS : str = os.getenv("WALLET_ADDRESS", "no-wallet-address")

@@ -9,6 +9,8 @@ from typing import (
     Optional
 )
 
+import app.config as config
+
 
 class DbProvider:
 
@@ -31,8 +33,8 @@ class DbProvider:
         if self.__pool is None:
             self.__pool = await aiomysql.create_pool(
                 host="localhost",
-                user="root",
-                password="",
+                user=config.DB_USER,
+                password=config.DB_PASSWORD,
                 db="trading",
                 autocommit=True,
                 init_command="SET time_zone = '+00:00'"

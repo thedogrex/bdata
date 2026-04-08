@@ -31,7 +31,7 @@ from predictor import predict_4s
 from predictor.binance_snapshot import start_snapshot_collector, stop_snapshot_collector
 import app.config as config
 
-app = FastAPI(title="Candle Predictor & Backtester", version="3.0.0")
+app = FastAPI(title="Candle Predictor & Backtester", version="3.0.0", root_path=config.FASTAPI_ROOT)
 
 app.add_middleware(
     CORSMiddleware,

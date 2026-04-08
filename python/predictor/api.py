@@ -168,6 +168,10 @@ class LiveBuyRequest(BaseModel):
     template_id: int | None = None
 
 
+class ManualResolveRequest(BaseModel):
+    outcome: str
+
+
 # ==================== API ROUTES ====================
 
 @app.get("/api/strategies")
@@ -223,6 +227,15 @@ async def api_poly_market_live(slug: str):
     if m is None:
         return JSONResponse(status_code=404, content={"error": "Not found"})
     return m
+
+
+@app.post("/api/poly/market/{slug}/resolve")
+async def api_poly_market_resolve(slug: str, req: ManualResolveRequest):
+    result = await poly_service.set_market_resolution_manual(slug, req.outcome)
+    if result.get("error"):
+        status = 404 if result.get("error") == "Market not found" else 400
+        return JSONResponse(status_code=status, content=result)
+    return result
 
 
 @app.get("/api/poly/outcome/{asset_id}/series")

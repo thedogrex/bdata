@@ -42,6 +42,7 @@ let polyLastPredBatchId = null;
 let polyLastLiveOrderPlacedForBatchId = null;
 
 let polyLastConfirmPromptKey = null;
+let polyManualResolveCtx = { slug: null, btn: null, prevText: '' };
 
 let polyNotifAudioCtx = null;
 
@@ -739,7 +740,11 @@ async function renderPolyMarkets(){
       predBadge = `<span title="${title}" style="margin-left:8px;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:6px;background:${bg};color:${fg};font-weight:900;font-size:11px;border:1px solid rgba(51,65,85,0.8)">P</span>`;
     }
 
-    const stHtml = `<span class="${statusClass}">${status}</span>${resolvedTri}${undefCircle}${predBadge}`;
+    const isUnresolvedEnded = (status === 'ended' || status === 'done') && !resolved;
+    const resolveBtn = isUnresolvedEnded
+      ? `<button type="button" title="Set market outcome manually" onclick="polyResolveMarket('${m.slug}', event)" style="margin-left:8px;padding:2px 6px;font-size:10px;line-height:1;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#cbd5e1">↻</button>`
+      : '';
+    const stHtml = `<span class="${statusClass}">${status}</span>${resolvedTri}${undefCircle}${predBadge}${resolveBtn}`;
     const isActive = (polyActiveTs!==null && (m.ts||0)===polyActiveTs && !m.closed);
     const dot = isActive ? '<span title="active" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:6px"></span>' : '';
     const posDot = marketsWithPos.has(m.slug) ? '<span title="has position" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#22c55e;margin-right:6px"></span>' : '';
@@ -758,6 +763,105 @@ async function renderPolyMarkets(){
   });
   html += '</tbody></table>';
   el.innerHTML = html;
+}
+
+function polyEnsureManualResolvePopup(){
+  let popup = document.getElementById('poly-manual-resolve-popup');
+  if(popup) return popup;
+
+  popup = document.createElement('div');
+  popup.id = 'poly-manual-resolve-popup';
+  popup.className = 'hidden';
+  popup.style.position = 'absolute';
+  popup.style.zIndex = '9999';
+  popup.style.padding = '10px';
+  popup.style.border = '1px solid #334155';
+  popup.style.borderRadius = '8px';
+  popup.style.background = '#0f172a';
+  popup.style.color = '#cbd5e1';
+  popup.style.boxShadow = '0 4px 12px rgba(0,0,0,0.45)';
+  popup.style.fontSize = '12px';
+  popup.style.minWidth = '200px';
+  popup.innerHTML = `
+    <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">Manual resolution</div>
+    <div id="poly-manual-resolve-slug" style="font-size:10px;color:#64748b;word-break:break-all;margin-bottom:8px"></div>
+    <div style="display:flex;gap:6px;justify-content:center;margin-bottom:8px">
+      <button type="button" onclick="polySubmitManualResolve('UP')" style="padding:4px 8px;border:1px solid #14532d;border-radius:6px;background:rgba(34,197,94,0.12);color:#22c55e;font-weight:700;font-size:11px">UP</button>
+      <button type="button" onclick="polySubmitManualResolve('DOWN')" style="padding:4px 8px;border:1px solid #7f1d1d;border-radius:6px;background:rgba(239,68,68,0.12);color:#ef4444;font-weight:700;font-size:11px">DOWN</button>
+    </div>
+    <div style="text-align:center">
+      <button type="button" onclick="polyCloseManualResolvePopup()" style="padding:3px 8px;border:1px solid #334155;border-radius:6px;background:#111827;color:#cbd5e1;font-size:10px">Cancel</button>
+    </div>
+  `;
+  document.body.appendChild(popup);
+  return popup;
+}
+
+function polyCloseManualResolvePopup(){
+  const popup = document.getElementById('poly-manual-resolve-popup');
+  if(popup) popup.classList.add('hidden');
+  polyManualResolveCtx.slug = null;
+}
+
+async function polySubmitManualResolve(outcome){
+  const slug = polyManualResolveCtx.slug;
+  if(!slug) return;
+  const side = String(outcome || '').toUpperCase();
+  if(side !== 'UP' && side !== 'DOWN') return;
+
+  const btn = polyManualResolveCtx.btn || null;
+  const prevText = polyManualResolveCtx.prevText || '↻';
+  try{
+    if(btn){
+      btn.disabled = true;
+      btn.textContent = '...';
+    }
+    const res = await fetch(API + '/api/poly/market/' + encodeURIComponent(slug) + '/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ outcome: side }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if(!res.ok || data?.error){
+      throw new Error(data?.error || ('HTTP ' + res.status));
+    }
+
+    polyCloseManualResolvePopup();
+    await loadPolyMarkets();
+    if(polySelectedMarketSlug === slug){
+      await showPolyMarket(slug);
+    }
+  }catch(e){
+    console.error('polySubmitManualResolve error', e);
+  }finally{
+    if(btn){
+      btn.disabled = false;
+      btn.textContent = prevText;
+    }
+  }
+}
+
+async function polyResolveMarket(slug, ev){
+  if(ev){
+    ev.preventDefault();
+    ev.stopPropagation();
+  }
+  if(!slug) return;
+  const popup = polyEnsureManualResolvePopup();
+  polyManualResolveCtx.slug = slug;
+  polyManualResolveCtx.btn = ev && ev.currentTarget ? ev.currentTarget : null;
+  polyManualResolveCtx.prevText = polyManualResolveCtx.btn ? polyManualResolveCtx.btn.textContent : '↻';
+  const slugEl = document.getElementById('poly-manual-resolve-slug');
+  if(slugEl) slugEl.textContent = slug;
+  
+  // Position popup near the clicked button
+  if(polyManualResolveCtx.btn){
+    const rect = polyManualResolveCtx.btn.getBoundingClientRect();
+    popup.style.left = (rect.left + window.scrollX) + 'px';
+    popup.style.top = (rect.bottom + window.scrollY + 2) + 'px';
+  }
+  
+  popup.classList.remove('hidden');
 }
 
 let liveMarketPollInterval = null;

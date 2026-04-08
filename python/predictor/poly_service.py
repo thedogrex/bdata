@@ -3,7 +3,8 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timedelta, date
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -469,11 +470,12 @@ def _get_current_ts() -> int:
 
 
 def _infer_resolved_outcome(m: MarketData) -> Optional[str]:
-    """Infer resolved outcome from Gamma outcomePrices.
+    """Infer resolved outcome from explicit Polymarket market resolution fields.
 
-    Returns 'UP' or 'DOWN' when there is a clear winner, otherwise None.
+    Uses only final_price vs target_price from Gamma market payload.
+    Returns 'UP' or 'DOWN' when both values are present, otherwise None.
     """
-    if not m or not getattr(m, "outcomes", None):
+    if not m:
         return None
 
     # Prefer explicit market resolution inputs when available.
@@ -485,20 +487,7 @@ def _infer_resolved_outcome(m: MarketData) -> Optional[str]:
     except Exception:
         pass
 
-    try:
-        best = max(m.outcomes, key=lambda o: float(getattr(o, "price", 0.0)))
-        best_price = float(getattr(best, "price", 0.0))
-        name = (getattr(best, "name", "") or "").upper()
-        # Conservative threshold to avoid marking unresolved markets.
-        if best_price < 0.95:
-            return None
-        if "UP" in name:
-            return "UP"
-        if "DOWN" in name:
-            return "DOWN"
-        return None
-    except Exception:
-        return None
+    return None
 
 
 async def _check_and_store_market_resolution(slug: str, now_ts: int) -> Optional[str]:
@@ -876,17 +865,22 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
             # Resolution polling: once per minute scan DONE markets without resolution.
             if current_time - last_resolution_scan >= 60:
                 last_resolution_scan = current_time
+                interval = int(getattr(config, "POLY_INTERVAL_SECONDS", 300))
+                if interval <= 0:
+                    interval = 300
+                min_auto_resolve_ts = int(current_ts) - interval * 7
                 done_rows = await db.fetchall(
                     """
                     SELECT slug
                     FROM poly_markets
                     WHERE (closed=1 OR ts < %s)
+                      AND ts >= %s
                       AND (resolved_outcome IS NULL OR resolved_outcome='')
                       AND (last_resolution_check_ts IS NULL OR last_resolution_check_ts < %s)
                     ORDER BY ts DESC
                     LIMIT 20
                     """,
-                    (int(current_ts), int(current_time) - 60),
+                    (int(current_ts), int(min_auto_resolve_ts), int(current_time) - 60),
                 )
                 for (slug,) in done_rows:
                     try:
@@ -1197,6 +1191,47 @@ async def get_market_live(slug: str) -> Optional[Dict[str, Any]]:
         "closed": int(m.closed),
         "resolved_outcome": resolved,
         "outcomes": [{"asset_id": o.asset_id, "name": o.name, "price": float(o.price)} for o in m.outcomes],
+    }
+
+
+async def set_market_resolution_manual(slug: str, outcome: str) -> Dict[str, Any]:
+    side = str(outcome or "").strip().upper()
+    if side not in ("UP", "DOWN"):
+        return {"error": "outcome must be UP or DOWN", "slug": slug}
+
+    row = await db.fetchone(
+        "SELECT slug, ts, closed, resolved_outcome FROM poly_markets WHERE slug=%s",
+        (slug,),
+    )
+    if not row:
+        return {"error": "Market not found", "slug": slug}
+
+    now_ts = int(time.time())
+    await db.execute(
+        """
+        UPDATE poly_markets
+        SET resolved_outcome=%s,
+            last_resolution_check_ts=%s
+        WHERE slug=%s
+        """,
+        (side, now_ts, slug),
+    )
+
+    updated = await db.fetchone(
+        "SELECT slug, ts, closed, resolved_outcome, last_resolution_check_ts FROM poly_markets WHERE slug=%s",
+        (slug,),
+    )
+    if not updated:
+        return {"error": "Market not found after update", "slug": slug}
+
+    return {
+        "slug": str(updated[0]),
+        "ts": int(updated[1]) if updated[1] is not None else None,
+        "closed": int(updated[2]) if updated[2] is not None else 0,
+        "resolved_outcome": updated[3],
+        "resolved_now": side,
+        "last_resolution_check_ts": int(updated[4]) if updated[4] is not None else now_ts,
+        "manual": True,
     }
 
 

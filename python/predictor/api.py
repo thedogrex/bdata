@@ -802,6 +802,19 @@ async def api_ask_price_analysis(
     )
 
 
+@app.get("/api/analytics/order_market_pricing")
+async def api_order_market_pricing(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    price_threshold_cents: float = Query(52.0),
+):
+    return await poly_service.get_order_market_pricing(
+        date_from=date_from,
+        date_to=date_to,
+        price_threshold_cents=price_threshold_cents,
+    )
+
+
 @app.get("/api/analytics/kelly_sim")
 async def api_kelly_sim(
     date_from: str | None = Query(None),
@@ -946,6 +959,7 @@ def _build_admin_html() -> str:
         "{{TAB_ORDERBOOKS}}": _load_template("tab_orderbooks.html"),
         "{{TAB_ANALYTICS}}": _load_template("tab_analytics.html"),
         "{{TAB_COMPARE_ASUME}}": _load_template("tab_compare_asume.html"),
+        "{{TAB_ORDER_PRICING}}": _load_template("tab_order_pricing.html"),
         "{{JS_COMMON}}": _load_template("js_common.js"),
         "{{JS_POLY}}": _load_template("js_poly.js"),
         "{{JS_ORDERBOOKS}}": _load_template("js_orderbooks.js"),

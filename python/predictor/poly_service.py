@@ -2952,3 +2952,190 @@ async def get_kelly_simulation(
         },
         "trades": trades_detail,
     }
+
+
+async def get_order_market_pricing(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    price_threshold_cents: float = 52.0,
+) -> Dict[str, Any]:
+    """Analyse correctly predicted markets: what % had the ask price drop ≤ threshold
+    during the market's active window.
+
+    For each market with a correct prediction (prediction == resolved_outcome):
+      1. Find the matching outcome asset_id (UP→Up/Yes, DOWN→Down/No).
+      2. Look at all orderbook snapshots during the market lifetime (pm.ts → pm.ts + interval).
+      3. Find the minimum best_ask_cents recorded.
+      4. If min_ask ≤ price_threshold_cents, the market counts as "fillable" (limit order would fill).
+
+    Returns summary stats + per-market detail rows.
+    """
+    interval = int(getattr(config, "POLY_INTERVAL_SECONDS", 300))
+    if interval <= 0:
+        interval = 300
+
+    msk_started = f"CONVERT_TZ(pr.started_at, '+00:00', '{MSK_TZ_NAME}')"
+
+    # Base filters: correct predictions only, resolved markets
+    where = [
+        "pr.prediction IN ('UP','DOWN')",
+        "pr.quantum = 0",
+        "pr.error IS NULL",
+        "pm.resolved_outcome IS NOT NULL",
+        "pm.resolved_outcome IN ('UP','DOWN')",
+        "pr.prediction = pm.resolved_outcome",
+        "pr.started_at < FROM_UNIXTIME(pm.ts)",
+    ]
+    params: list = []
+
+    if date_from:
+        where.append(f"DATE({msk_started}) >= %s")
+        params.append(date_from)
+    if date_to:
+        where.append(f"DATE({msk_started}) <= %s")
+        params.append(date_to)
+
+    where_sql = " AND ".join(where)
+
+    # Deduplicate per market (slug): one row per correctly-predicted market
+    # Use the first prediction (earliest started_at) per slug
+    q = f"""
+        SELECT
+            sub.slug,
+            sub.prediction,
+            sub.resolved_outcome,
+            sub.market_ts,
+            sub.day,
+            sub.template_name,
+            sub.asset_id,
+            (
+                SELECT MIN(obs.best_ask_cents)
+                FROM poly_orderbook_snapshots obs
+                WHERE obs.slug = sub.slug
+                  AND obs.asset_id = sub.asset_id
+                  AND obs.ts >= sub.market_ts
+                  AND obs.ts <= sub.market_ts + {interval}
+                  AND obs.best_ask_cents IS NOT NULL
+                  AND obs.best_ask_cents > 0
+            ) AS min_ask_cents
+        FROM (
+            SELECT
+                pr.slug,
+                pr.prediction,
+                pm.resolved_outcome,
+                pm.ts AS market_ts,
+                DATE({msk_started}) AS day,
+                pr.template_name,
+                po.asset_id,
+                ROW_NUMBER() OVER (PARTITION BY pr.slug ORDER BY pr.started_at ASC) AS rn
+            FROM poly_pred_runs pr
+            JOIN poly_markets pm ON pm.slug = pr.slug
+            JOIN poly_outcomes po
+                ON  po.slug = pr.slug
+                AND (
+                    (pr.prediction = 'UP'   AND (UPPER(po.name) LIKE '%%UP%%'   OR UPPER(po.name) LIKE '%%YES%%'))
+                 OR (pr.prediction = 'DOWN' AND (UPPER(po.name) LIKE '%%DOWN%%' OR UPPER(po.name) LIKE '%%NO%%'))
+                )
+            WHERE {where_sql}
+        ) sub
+        WHERE sub.rn = 1
+        ORDER BY sub.market_ts ASC
+        LIMIT 20000
+    """
+    rows = await db.fetchall(q, params or None)
+
+    threshold = float(price_threshold_cents)
+
+    total_correct = len(rows)
+    fillable_count = 0
+    no_data_count = 0
+    markets: List[Dict[str, Any]] = []
+
+    per_day_raw: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "correct": 0,
+        "fillable": 0,
+        "no_data": 0,
+        "min_asks": [],
+    })
+
+    for row in rows:
+        slug, prediction, resolved_outcome, market_ts, day, template_name, asset_id, min_ask = row
+        day_str = str(day) if day else ""
+
+        min_ask_f = float(min_ask) if min_ask is not None else None
+        is_fillable = min_ask_f is not None and min_ask_f <= threshold
+        has_data = min_ask_f is not None
+
+        if is_fillable:
+            fillable_count += 1
+        if not has_data:
+            no_data_count += 1
+
+        markets.append({
+            "slug": slug,
+            "prediction": prediction,
+            "resolved_outcome": resolved_outcome,
+            "market_ts": int(market_ts),
+            "day": day_str,
+            "template": template_name or "—",
+            "asset_id": asset_id,
+            "min_ask_cents": round(min_ask_f, 2) if min_ask_f is not None else None,
+            "fillable": is_fillable,
+        })
+
+        d = per_day_raw[day_str]
+        d["correct"] += 1
+        if is_fillable:
+            d["fillable"] += 1
+        if not has_data:
+            d["no_data"] += 1
+        if min_ask_f is not None:
+            d["min_asks"].append(min_ask_f)
+
+    with_data = total_correct - no_data_count
+    fillable_pct = round(fillable_count / with_data * 100, 1) if with_data > 0 else None
+
+    per_day = []
+    for day_str in sorted(per_day_raw.keys()):
+        d = per_day_raw[day_str]
+        wd = d["correct"] - d["no_data"]
+        pct = round(d["fillable"] / wd * 100, 1) if wd > 0 else None
+        avg_min = round(sum(d["min_asks"]) / len(d["min_asks"]), 2) if d["min_asks"] else None
+        per_day.append({
+            "day": day_str,
+            "correct": d["correct"],
+            "with_data": wd,
+            "fillable": d["fillable"],
+            "fillable_pct": pct,
+            "no_data": d["no_data"],
+            "avg_min_ask": avg_min,
+        })
+
+    # Distribution histogram: count markets per 0.5c bucket
+    histogram: List[Dict[str, Any]] = []
+    if markets:
+        asks_with_data = [m["min_ask_cents"] for m in markets if m["min_ask_cents"] is not None]
+        if asks_with_data:
+            bucket_range = [round(44.0 + i * 0.5, 1) for i in range(37)]  # 44.0 .. 62.0
+            for b in bucket_range:
+                cnt = sum(1 for a in asks_with_data if a <= b)
+                histogram.append({
+                    "price": b,
+                    "count": cnt,
+                    "pct": round(cnt / len(asks_with_data) * 100, 1),
+                })
+
+    return {
+        "price_threshold_cents": threshold,
+        "interval_sec": interval,
+        "summary": {
+            "total_correct_predictions": total_correct,
+            "with_orderbook_data": with_data,
+            "no_data": no_data_count,
+            "fillable_count": fillable_count,
+            "fillable_pct": fillable_pct,
+        },
+        "per_day": per_day,
+        "histogram": histogram,
+        "markets": markets,
+    }

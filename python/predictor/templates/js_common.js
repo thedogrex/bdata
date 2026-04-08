@@ -155,7 +155,12 @@ async function init(){
   loadDefaultGrid();
   startPolling();
   loadAutopredictState();
-  switchTab(getInitialTab());
+  const initialTab = getInitialTab();
+  switchTab(initialTab);
+  const initialSlug = getInitialSlug();
+  if(initialSlug){
+    setTimeout(()=>analyticsOpenPolyMarket(initialSlug), 120);
+  }
 }
 
 function updateDesc(){
@@ -275,26 +280,35 @@ function ensureBacktestConfig(){
 }
 
 // ===== TABS =====
-const TABS=['backtest','bruteforce','history','best','best_compare','poly','wallet','analytics','compare_asume'];
+const TABS=['backtest','bruteforce','history','best','best_compare','poly','wallet','analytics','compare_asume','order_pricing'];
 
 function getInitialTab(){
   let tabParam = null;
+  let slugParam = null;
   try{
     const url = new URL(window.location.href);
     tabParam = url.searchParams.get('tab');
+    slugParam = url.searchParams.get('slug');
     if(!tabParam && url.hash){
       tabParam = url.hash.replace('#','').trim();
     }
   }catch(e){ tabParam = null; }
 
-  if(tabParam && TABS.includes(tabParam)) return tabParam;
-
-  const activeBtn = document.querySelector('[id^="tab-"].tab-active');
-  if(activeBtn){
-    const id = activeBtn.id.replace('tab-','');
-    if(TABS.includes(id)) return id;
+  if((!tabParam || !TABS.includes(tabParam)) && slugParam){
+    tabParam = 'poly';
   }
-  return 'backtest';
+
+  if(!tabParam || !TABS.includes(tabParam)) tabParam = 'backtest';
+  return tabParam;
+}
+
+function getInitialSlug(){
+  try{
+    const url = new URL(window.location.href);
+    return url.searchParams.get('slug') || '';
+  }catch(e){
+    return '';
+  }
 }
 
 function switchTab(tab){
@@ -2221,6 +2235,18 @@ function analyticsRenderAskPerDay(rows){
   el.innerHTML=html;
 }
 
+function buildPolyMarketUrl(slug){
+  if(!slug) return '#';
+  try{
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab','poly');
+    url.searchParams.set('slug', slug);
+    return url.pathname + url.search;
+  }catch(e){
+    return `?tab=poly&slug=${encodeURIComponent(slug)}`;
+  }
+}
+
 async function analyticsOpenPolyMarket(slug){
   if(!slug) return;
   try{
@@ -2512,6 +2538,153 @@ function analyticsRenderPerHour(rows){
   });
   html+='</tbody></table></div>';
   el.innerHTML=html;
+}
+
+// ===== ORDERS MARKET PRICING =====
+function ompSetLastDays(days){
+  const now = new Date();
+  const to = new Date(now.getTime() + 3*3600000); // MSK offset
+  const from = new Date(to.getTime() - days*86400000);
+  const fmt = d => d.toISOString().slice(0,10);
+  const fromEl=document.getElementById('omp-date-from');
+  const toEl=document.getElementById('omp-date-to');
+  if(fromEl) fromEl.value = fmt(from);
+  if(toEl) toEl.value = fmt(to);
+  ompLoad();
+}
+
+async function ompLoad(){
+  const dateFrom = document.getElementById('omp-date-from')?.value || '';
+  const dateTo   = document.getElementById('omp-date-to')?.value   || '';
+  const threshold = parseFloat(document.getElementById('omp-threshold')?.value || '52') || 52;
+
+  const ps = [`price_threshold_cents=${threshold}`];
+  if(dateFrom) ps.push('date_from='+encodeURIComponent(dateFrom));
+  if(dateTo)   ps.push('date_to='+encodeURIComponent(dateTo));
+  const url = API+'/api/analytics/order_market_pricing?'+ps.join('&');
+
+  ['omp-summary','omp-histogram','omp-per-day','omp-markets'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.innerHTML='<div class="text-slate-500 text-xs">Loading\u2026</div>';
+  });
+
+  try{
+    const res = await fetch(url);
+    const data = await res.json();
+    ompRenderSummary(data);
+    ompRenderHistogram(data);
+    ompRenderPerDay(data);
+    ompRenderMarkets(data);
+  }catch(e){ console.error('Order Market Pricing error',e); }
+}
+
+function ompRenderSummary(data){
+  const el = document.getElementById('omp-summary');
+  if(!el) return;
+  const s = data.summary || {};
+  const threshold = data.price_threshold_cents || 52;
+  const fillPct = s.fillable_pct != null ? s.fillable_pct+'%' : '\u2014';
+  const fillColor = s.fillable_pct != null ? (s.fillable_pct >= 60 ? '#22c55e' : s.fillable_pct >= 40 ? '#eab308' : '#ef4444') : '#8b5cf6';
+  const cards = [
+    {label:'Correct Predictions',   value: s.total_correct_predictions || 0, sub:'markets where prediction = outcome',      color:'#8b5cf6'},
+    {label:'With Orderbook Data',    value: s.with_orderbook_data || 0,       sub:`of ${s.total_correct_predictions||0} total (${s.no_data||0} missing)`, color:'#06b6d4'},
+    {label:`Fillable \u2264 ${threshold}\u00A2`, value: s.fillable_count || 0, sub:`min ask reached \u2264 ${threshold}\u00A2 during market`, color: fillColor},
+    {label:'Fillable %',             value: fillPct,                          sub:'of correct predictions with data',        color: fillColor},
+  ];
+  el.innerHTML = cards.map(c=>`<div class="card p-5" style="border-left:3px solid ${c.color}">
+    <div class="text-xs text-slate-400 mb-1">${c.label}</div>
+    <div class="text-2xl font-bold" style="color:${c.color}">${c.value}</div>
+    <div class="text-xs text-slate-500 mt-1">${c.sub}</div>
+  </div>`).join('');
+}
+
+function ompRenderHistogram(data){
+  const el = document.getElementById('omp-histogram');
+  if(!el) return;
+  const hist = data.histogram || [];
+  const threshold = data.price_threshold_cents || 52;
+  if(!hist.length){ el.innerHTML='<div class="text-slate-400 text-sm">No histogram data</div>'; return; }
+
+  const maxPct = Math.max(...hist.map(h=>h.pct), 1);
+  let html = `<h3 class="font-semibold mb-3">Cumulative Distribution: Min Ask During Market Window</h3>`;
+  html += `<p class="text-xs text-slate-400 mb-3">% of correct predictions where min ask \u2264 price. Threshold: ${threshold}\u00A2</p>`;
+  html += `<div class="flex items-end gap-px mb-2" style="height:120px">`;
+  hist.forEach(h => {
+    const pct = Math.round(h.pct / maxPct * 100);
+    const isThreshold = Math.abs(h.price - threshold) < 0.25;
+    const barColor = h.price <= threshold ? '#22c55e' : '#475569';
+    const border = isThreshold ? 'border:2px solid #f59e0b' : '';
+    const title = `\u2264 ${h.price}\u00A2: ${h.count} (${h.pct}%)`;
+    html += `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${title}">
+      <div class="text-slate-400" style="font-size:8px;margin-bottom:1px">${h.pct}%</div>
+      <div style="width:100%;background:${barColor};height:${pct}%;min-height:2px;border-radius:2px 2px 0 0;${border}"></div>
+      <div class="text-slate-500" style="font-size:8px;margin-top:1px">${h.price}</div>
+    </div>`;
+  });
+  html += `</div>`;
+  el.innerHTML = html;
+}
+
+function ompRenderPerDay(data){
+  const el = document.getElementById('omp-per-day');
+  if(!el) return;
+  const rows = data.per_day || [];
+  const threshold = data.price_threshold_cents || 52;
+  if(!rows.length){ el.innerHTML=''; return; }
+
+  let html = `<h3 class="font-semibold mb-3">Per Day</h3><div style="overflow-x:auto"><table>
+    <thead><tr><th>Date</th><th>Correct</th><th>With Data</th><th>Fillable \u2264 ${threshold}\u00A2</th><th>Fillable %</th><th>No Data</th><th>Avg Min Ask</th></tr></thead><tbody>`;
+  rows.forEach(r => {
+    const pctBadge = r.fillable_pct != null
+      ? `<span class="font-bold ${r.fillable_pct>=60?'text-green-400':r.fillable_pct>=40?'text-yellow-400':'text-red-400'}">${r.fillable_pct}%</span>`
+      : '<span class="text-slate-500">\u2014</span>';
+    const avgAsk = r.avg_min_ask != null ? r.avg_min_ask+'\u00A2' : '\u2014';
+    html += `<tr>
+      <td class="font-mono text-xs">${r.day}</td>
+      <td class="font-mono text-xs">${r.correct}</td>
+      <td class="font-mono text-xs">${r.with_data}</td>
+      <td class="font-mono text-xs">${r.fillable}</td>
+      <td>${pctBadge}</td>
+      <td class="font-mono text-xs text-slate-500">${r.no_data}</td>
+      <td class="font-mono text-xs">${avgAsk}</td>
+    </tr>`;
+  });
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
+}
+
+function ompRenderMarkets(data){
+  const el = document.getElementById('omp-markets');
+  if(!el) return;
+  const markets = data.markets || [];
+  const threshold = data.price_threshold_cents || 52;
+  if(!markets.length){ el.innerHTML='<div class="text-slate-400 text-sm">No market data</div>'; return; }
+
+  let html = `<h3 class="font-semibold mb-3">All Correct Markets (${markets.length})</h3>
+  <div style="overflow-x:auto"><table style="white-space:nowrap">
+    <thead><tr><th>#</th><th>Date</th><th>Market</th><th>Pred</th><th>Min Ask \u00A2</th><th>Fillable \u2264 ${threshold}\u00A2</th></tr></thead><tbody>`;
+  markets.forEach((m, i) => {
+    const askTxt = m.min_ask_cents != null ? m.min_ask_cents.toFixed(2)+'\u00A2' : '\u2014';
+    const fillBadge = m.min_ask_cents == null
+      ? '<span class="text-slate-500 text-xs">no data</span>'
+      : m.fillable
+        ? '<span class="badge badge-up">YES</span>'
+        : '<span class="badge badge-down">NO</span>';
+    const askCls = m.min_ask_cents != null && m.min_ask_cents <= threshold ? 'text-green-400' : 'text-slate-300';
+    const slugEsc = String(m.slug||'').replace(/'/g,"\\'");
+    const linkUrl = buildPolyMarketUrl(m.slug);
+    const linkAttr = (linkUrl || '').replace(/"/g,'&quot;');
+    html += `<tr>
+      <td class="font-mono text-xs text-slate-500">${i+1}</td>
+      <td class="font-mono text-xs">${m.day}</td>
+      <td class="font-mono text-xs"><a href="${linkAttr}" target="_blank" rel="noopener" class="text-blue-400 hover:underline">${m.slug}</a></td>
+      <td class="font-mono text-xs"><span class="badge badge-${m.prediction.toLowerCase()}">${m.prediction}</span></td>
+      <td class="font-mono text-xs font-bold ${askCls}">${askTxt}</td>
+      <td>${fillBadge}</td>
+    </tr>`;
+  });
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
 }
 
 // ===== COMPARE DEVELOPMENT POPUP =====

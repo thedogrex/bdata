@@ -877,8 +877,9 @@ async def api_live_wallet(limit: int = Query(25)):
 async def api_live_order_flow(
     date_from: str | None = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
     date_to: str | None = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
+    fee_pct: float | None = Query(3.6, description="Fee percentage applied to winning payouts"),
 ):
-    return await live_trading.order_flow_analytics(date_from=date_from, date_to=date_to)
+    return await live_trading.order_flow_analytics(date_from=date_from, date_to=date_to, fee_pct=fee_pct)
 
 
 # ==================== 4S-EARLY PREDICTIONS ====================

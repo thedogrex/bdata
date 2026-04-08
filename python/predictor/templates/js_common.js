@@ -363,6 +363,13 @@ function walletSetAnalyticsPreset(days){
   loadWalletAnalytics();
 }
 
+function walletGetFeePct(){
+  const feeEl = document.getElementById('wallet-analytics-fee');
+  if(!feeEl) return 3.6;
+  const v = parseFloat(feeEl.value);
+  return Number.isFinite(v) ? v : 3.6;
+}
+
 function walletReadAnalyticsRange(){
   const fromEl = document.getElementById('wallet-analytics-from');
   const toEl = document.getElementById('wallet-analytics-to');
@@ -387,6 +394,8 @@ async function loadWalletAnalytics(){
     const params = new URLSearchParams();
     if(range.from) params.append('date_from', range.from);
     if(range.to) params.append('date_to', range.to);
+    const feePct = walletGetFeePct();
+    if(Number.isFinite(feePct)) params.append('fee_pct', String(feePct));
     const res = await fetch(API + '/api/poly/live/order_flow?' + params.toString());
     if(!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
@@ -406,10 +415,15 @@ function walletRenderAnalyticsSummary(data, node){
   if(!node) return;
   const totals = data?.totals || {};
   const range = data?.range || {};
+  const feePct = typeof data?.fee_pct === 'number' ? Number(data.fee_pct) : null;
+  const feeLabel = feePct != null ? feePct.toFixed(2) + '%' : '—';
   const fmt = (v, digits = 2) => Number.isFinite(parseFloat(v)) ? parseFloat(v).toFixed(digits) : '-';
   const winRate = totals.win_rate != null ? (totals.win_rate * 100).toFixed(1) + '%' : '—';
+  const winningIncome = Number(totals.winning_income || 0);
+  const netAmount = Number(totals.net_winning_amount || 0);
+  const netClass = netAmount >= 0 ? 'text-emerald-300' : 'text-rose-300';
   node.innerHTML = `
-    <div class="text-[11px] text-slate-400 mb-2">Range: ${range.start || '-'} → ${range.end || '-'}</div>
+    <div class="text-[11px] text-slate-400 mb-2">Range: ${range.start || '-'} -> ${range.end || '-'}</div>
     <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
       <div class="p-2 rounded bg-slate-900/50 border border-slate-800">
         <div class="text-[10px] uppercase tracking-wide text-slate-500">Orders</div>
@@ -425,8 +439,8 @@ function walletRenderAnalyticsSummary(data, node){
         <div class="text-[10px] uppercase tracking-wide text-slate-500">Spent & Profit</div>
         <div class="text-[11px] text-slate-500 mb-1">Total spent on shares</div>
         <div class="text-lg font-semibold text-indigo-200">$${fmt(totals.total_amount)}</div>
-        <div class="text-[11px] text-slate-500 mt-2">Net profit (period)</div>
-        <div class="text-lg font-semibold ${totals.net_winning_amount >= 0 ? 'text-emerald-300' : 'text-rose-300'}">$${fmt(totals.net_winning_amount)}</div>
+        <div class="text-[11px] text-slate-500 mt-2">Net profit (after losses)</div>
+        <div class="text-lg font-semibold ${netClass}">$${netAmount.toFixed(2)}</div>
       </div>
     </div>
   `;
@@ -452,6 +466,10 @@ function walletRenderAnalyticsTable(data, node){
     const netClass = net >= 0 ? 'text-emerald-300' : 'text-rose-300';
     const winShares = Number(d.winning_shares || 0);
     const winCost = Number(d.winning_cost || 0);
+    const winFee = Number(d.winning_fee || 0);
+    const winIncome = Number(d.winning_income || 0);
+    const winProfit = Number(d.winning_profit || 0);
+    const winProfitClass = winProfit >= 0 ? 'text-emerald-300' : 'text-rose-300';
     const avgPrice = winShares > 0 ? ((winCost / winShares) * 100).toFixed(3) : '—';
     const totalSpent = Number(d.total_amount || 0);
     return `
@@ -463,8 +481,11 @@ function walletRenderAnalyticsTable(data, node){
         <td class="py-2 pr-3 text-center">${winRate}</td>
         <td class="py-2 pr-3 text-center text-indigo-200">${avgPrice}</td>
         <td class="py-2 pr-3 text-center">$${totalSpent.toFixed(2)}</td>
-        <td class="py-2 pr-3 text-center text-green-300">${Number(d.winning_shares || 0).toFixed(2)}</td>
+        <td class="py-2 pr-3 text-center text-green-300">${winShares.toFixed(2)}</td>
         <td class="py-2 pr-3 text-center">$${winCost.toFixed(2)}</td>
+        <td class="py-2 pr-3 text-center">$${winFee.toFixed(2)}</td>
+        <td class="py-2 pr-3 text-center">$${winIncome.toFixed(2)}</td>
+        <td class="py-2 pr-3 text-center ${winProfitClass}">$${winProfit.toFixed(2)}</td>
         <td class="py-2 pr-3 text-center text-rose-300">$${Number(d.losing_amount || 0).toFixed(2)}</td>
         <td class="py-2 pr-3 text-center ${netClass}">$${net.toFixed(2)}</td>
       </tr>
@@ -485,6 +506,9 @@ function walletRenderAnalyticsTable(data, node){
             <th class="text-center py-2 pr-3">Total Spent</th>
             <th class="text-center py-2 pr-3">Win Shares</th>
             <th class="text-center py-2 pr-3">Win Cost</th>
+            <th class="text-center py-2 pr-3">Win Fee</th>
+            <th class="text-center py-2 pr-3">Win Income</th>
+            <th class="text-center py-2 pr-3">Win Profit</th>
             <th class="text-center py-2 pr-3">Losing Amount</th>
             <th class="text-center py-2 pr-3">Net</th>
           </tr>

@@ -805,6 +805,7 @@ def _parse_ymd(date_str: Optional[str]):
 async def order_flow_analytics(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    fee_pct: Optional[float] = 3.6,
 ) -> Dict[str, Any]:
     """Aggregate order flow + prediction correctness per day."""
 
@@ -889,6 +890,13 @@ async def order_flow_analytics(
 
     rows = await db.fetchall(sql, (start_date.isoformat(), end_date.isoformat()))
 
+    try:
+        fee_pct = float(fee_pct) if fee_pct is not None else 0.0
+    except (TypeError, ValueError):
+        fee_pct = 0.0
+    fee_pct = max(0.0, fee_pct)
+    fee_rate = fee_pct / 100.0
+
     for row in rows:
         day_val = row[0]
         if hasattr(day_val, "isoformat"):
@@ -907,6 +915,9 @@ async def order_flow_analytics(
         winning_cost = float(row[7] or 0.0)
         losing_amount = float(row[8] or 0.0)
         winning_payout = winning_shares
+        winning_fee = winning_payout * fee_rate
+        winning_income = winning_payout - winning_fee
+        winning_profit = winning_income - winning_cost
         pending = max(total_orders - resolved_orders, 0)
 
         entry.update(
@@ -919,9 +930,12 @@ async def order_flow_analytics(
                 "total_amount": total_amount,
                 "winning_shares": winning_shares,
                 "winning_cost": winning_cost,
-                "winning_net": winning_payout - winning_cost,
+                "winning_fee": winning_fee,
+                "winning_income": winning_income,
+                "winning_profit": winning_profit,
+                "winning_net": winning_profit,
                 "losing_amount": losing_amount,
-                "net_winning_amount": winning_payout - winning_cost - losing_amount,
+                "net_winning_amount": winning_profit - losing_amount,
                 "win_rate": (win_count / resolved_orders) if resolved_orders > 0 else None,
             }
         )
@@ -938,6 +952,9 @@ async def order_flow_analytics(
             totals[key] += float(entry.get(key) or 0.0)
         totals["winning_shares"] += float(entry.get("winning_shares") or 0.0)
         totals["winning_cost"] += float(entry.get("winning_cost") or 0.0)
+        totals["winning_fee"] += float(entry.get("winning_fee") or 0.0)
+        totals["winning_income"] += float(entry.get("winning_income") or 0.0)
+        totals["winning_profit"] += float(entry.get("winning_profit") or 0.0)
         totals["winning_net"] += float(entry.get("winning_net") or 0.0)
 
     resolved_total = totals_counts["resolved_orders"]
@@ -952,6 +969,9 @@ async def order_flow_analytics(
         "total_amount": totals["total_amount"],
         "winning_shares": totals["winning_shares"],
         "winning_cost": totals["winning_cost"],
+        "winning_fee": totals["winning_fee"],
+        "winning_income": totals["winning_income"],
+        "winning_profit": totals["winning_profit"],
         "winning_net": totals["winning_net"],
         "losing_amount": totals["losing_amount"],
         "net_winning_amount": totals["net_winning_amount"],
@@ -962,6 +982,7 @@ async def order_flow_analytics(
             "start": start_date.isoformat(),
             "end": end_date.isoformat(),
         },
+        "fee_pct": fee_pct,
         "daily": daily_rows,
         "totals": totals_summary,
     }

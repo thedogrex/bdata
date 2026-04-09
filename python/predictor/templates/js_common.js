@@ -2583,13 +2583,30 @@ function ompRenderSummary(data){
   if(!el) return;
   const s = data.summary || {};
   const threshold = data.price_threshold_cents || 52;
-  const fillPct = s.fillable_pct != null ? s.fillable_pct+'%' : '\u2014';
-  const fillColor = s.fillable_pct != null ? (s.fillable_pct >= 60 ? '#22c55e' : s.fillable_pct >= 40 ? '#eab308' : '#ef4444') : '#8b5cf6';
+  const fmtPct = (v) => v!=null ? v+'%' : '\u2014';
+  const totalPred = s.total_predictions || 0;
+  const correct = s.total_correct_predictions || 0;
+  const incorrect = s.total_incorrect_predictions || 0;
+  const withData = s.with_orderbook_data || 0;
+  const noData = s.no_data || 0;
+  const fillableCorrect = s.fillable_count || 0;
+  const fillableIncorrect = s.fillable_incorrect_count || 0;
+  const fillablePct = fmtPct(s.fillable_pct);
+  const fillableIncorrectPct = fmtPct(s.fillable_incorrect_pct);
+  const fillableColor = s.fillable_pct != null ? (s.fillable_pct >= 60 ? '#22c55e' : s.fillable_pct >= 40 ? '#eab308' : '#ef4444') : '#8b5cf6';
+  const lossColor = '#ef4444';
+  const profitTotal = s.profit_final_usd != null ? `$${s.profit_final_usd.toFixed(2)}` : (s.profit_total_usd != null ? `$${s.profit_total_usd.toFixed(2)}` : '—');
+  const profitAvg = s.profit_avg_per_trade_usd != null ? `$${s.profit_avg_per_trade_usd.toFixed(3)}` : '—';
+  const profitTrades = s.profit_trades || 0;
+  const profitWinRate = s.profit_win_rate != null ? (s.profit_win_rate * 100).toFixed(1)+'%' : '—';
+  const profitWins = s.profit_win_trades || 0;
+  const profitLosses = s.profit_loss_trades || 0;
   const cards = [
-    {label:'Correct Predictions',   value: s.total_correct_predictions || 0, sub:'markets where prediction = outcome',      color:'#8b5cf6'},
-    {label:'With Orderbook Data',    value: s.with_orderbook_data || 0,       sub:`of ${s.total_correct_predictions||0} total (${s.no_data||0} missing)`, color:'#06b6d4'},
-    {label:`Fillable \u2264 ${threshold}\u00A2`, value: s.fillable_count || 0, sub:`min ask reached \u2264 ${threshold}\u00A2 during market`, color: fillColor},
-    {label:'Fillable %',             value: fillPct,                          sub:'of correct predictions with data',        color: fillColor},
+    {label:'Predictions (UP/DOWN)', value: totalPred, sub:`correct ${correct} · incorrect ${incorrect}`, color:'#8b5cf6'},
+    {label:'Orderbook Coverage', value: withData, sub:`missing data: ${noData}`, color:'#06b6d4'},
+    {label:`Fillable Correct \u2264 ${threshold}\u00A2`, value: fillableCorrect, sub:`${fillablePct} of correct with data`, color: fillableColor},
+    {label:'Fillable Incorrect', value: fillableIncorrect, sub:`${fillableIncorrectPct} of incorrect with data`, color: lossColor},
+    {label:'Final Profit (fills only)', value: profitTotal, sub:`wins ${profitWins} · losses ${profitLosses} · avg ${profitAvg} · win ${profitWinRate}`, color:'#10b981'},
   ];
   el.innerHTML = cards.map(c=>`<div class="card p-5" style="border-left:3px solid ${c.color}">
     <div class="text-xs text-slate-400 mb-1">${c.label}</div>
@@ -2606,8 +2623,8 @@ function ompRenderHistogram(data){
   if(!hist.length){ el.innerHTML='<div class="text-slate-400 text-sm">No histogram data</div>'; return; }
 
   const maxPct = Math.max(...hist.map(h=>h.pct), 1);
-  let html = `<h3 class="font-semibold mb-3">Cumulative Distribution: Min Ask During Market Window</h3>`;
-  html += `<p class="text-xs text-slate-400 mb-3">% of correct predictions where min ask \u2264 price. Threshold: ${threshold}\u00A2</p>`;
+  let html = `<h3 class="font-semibold mb-3">Cumulative Distribution: Min Ask (correct predictions only)</h3>`;
+  html += `<p class="text-xs text-slate-400 mb-3">% of correct predictions with orderbook data where min ask \u2264 price. Threshold: ${threshold}\u00A2</p>`;
   html += `<div class="flex items-end gap-px mb-2" style="height:120px">`;
   hist.forEach(h => {
     const pct = Math.round(h.pct / maxPct * 100);
@@ -2633,19 +2650,38 @@ function ompRenderPerDay(data){
   if(!rows.length){ el.innerHTML=''; return; }
 
   let html = `<h3 class="font-semibold mb-3">Per Day</h3><div style="overflow-x:auto"><table>
-    <thead><tr><th>Date</th><th>Correct</th><th>With Data</th><th>Fillable \u2264 ${threshold}\u00A2</th><th>Fillable %</th><th>No Data</th><th>Avg Min Ask</th></tr></thead><tbody>`;
+    <thead><tr>
+      <th>Date</th>
+      <th>Correct</th>
+      <th>Incorrect</th>
+      <th>Fillable ✓</th>
+      <th>Fillable ✗</th>
+      <th>✓ %</th>
+      <th>✗ %</th>
+      <th>Profit $</th>
+      <th>Avg Profit</th>
+      <th>Avg Min Ask</th>
+    </tr></thead><tbody>`;
   rows.forEach(r => {
-    const pctBadge = r.fillable_pct != null
-      ? `<span class="font-bold ${r.fillable_pct>=60?'text-green-400':r.fillable_pct>=40?'text-yellow-400':'text-red-400'}">${r.fillable_pct}%</span>`
+    const pctCorrect = r.fillable_pct_correct != null
+      ? `<span class="font-bold ${r.fillable_pct_correct>=60?'text-green-400':r.fillable_pct_correct>=40?'text-yellow-400':'text-red-400'}">${r.fillable_pct_correct}%</span>`
+      : '<span class="text-slate-500">\u2014</span>';
+    const pctIncorrect = r.fillable_pct_incorrect != null
+      ? `<span class="font-bold text-red-400">${r.fillable_pct_incorrect}%</span>`
       : '<span class="text-slate-500">\u2014</span>';
     const avgAsk = r.avg_min_ask != null ? r.avg_min_ask+'\u00A2' : '\u2014';
+    const profit = r.profit_usd != null ? `$${Number(r.profit_usd).toFixed(2)}` : '$0.00';
+    const avgProfit = r.avg_profit_usd != null ? `$${r.avg_profit_usd.toFixed(3)}` : '\u2014';
     html += `<tr>
       <td class="font-mono text-xs">${r.day}</td>
       <td class="font-mono text-xs">${r.correct}</td>
-      <td class="font-mono text-xs">${r.with_data}</td>
-      <td class="font-mono text-xs">${r.fillable}</td>
-      <td>${pctBadge}</td>
-      <td class="font-mono text-xs text-slate-500">${r.no_data}</td>
+      <td class="font-mono text-xs text-slate-400">${r.incorrect}</td>
+      <td class="font-mono text-xs">${r.fillable_correct}</td>
+      <td class="font-mono text-xs text-slate-400">${r.fillable_incorrect}</td>
+      <td>${pctCorrect}</td>
+      <td>${pctIncorrect}</td>
+      <td class="font-mono text-xs">${profit}</td>
+      <td class="font-mono text-xs">${avgProfit}</td>
       <td class="font-mono text-xs">${avgAsk}</td>
     </tr>`;
   });
@@ -2662,7 +2698,7 @@ function ompRenderMarkets(data){
 
   let html = `<h3 class="font-semibold mb-3">All Correct Markets (${markets.length})</h3>
   <div style="overflow-x:auto"><table style="white-space:nowrap">
-    <thead><tr><th>#</th><th>Date</th><th>Market</th><th>Pred</th><th>Min Ask \u00A2</th><th>Fillable \u2264 ${threshold}\u00A2</th></tr></thead><tbody>`;
+    <thead><tr><th>#</th><th>Date</th><th>Market</th><th>Prediction</th><th>Result</th><th>Min Ask \u00A2</th><th>Fillable \u2264 ${threshold}\u00A2</th><th>Profit $</th></tr></thead><tbody>`;
   markets.forEach((m, i) => {
     const askTxt = m.min_ask_cents != null ? m.min_ask_cents.toFixed(2)+'\u00A2' : '\u2014';
     const fillBadge = m.min_ask_cents == null
@@ -2674,13 +2710,18 @@ function ompRenderMarkets(data){
     const slugEsc = String(m.slug||'').replace(/'/g,"\\'");
     const linkUrl = buildPolyMarketUrl(m.slug);
     const linkAttr = (linkUrl || '').replace(/"/g,'&quot;');
+    const resultBadge = m.correct ? '<span class="badge badge-up">Correct</span>' : '<span class="badge badge-down">Incorrect</span>';
+    const profitVal = m.profit_usd != null ? (m.profit_usd >= 0 ? `+$${m.profit_usd.toFixed(3)}` : `-$${Math.abs(m.profit_usd).toFixed(3)}`) : '—';
+    const profitCls = m.profit_usd != null ? (m.profit_usd >= 0 ? 'text-green-400' : 'text-red-400') : 'text-slate-400';
     html += `<tr>
       <td class="font-mono text-xs text-slate-500">${i+1}</td>
       <td class="font-mono text-xs">${m.day}</td>
       <td class="font-mono text-xs"><a href="${linkAttr}" target="_blank" rel="noopener" class="text-blue-400 hover:underline">${m.slug}</a></td>
       <td class="font-mono text-xs"><span class="badge badge-${m.prediction.toLowerCase()}">${m.prediction}</span></td>
+      <td class="font-mono text-xs">${resultBadge}</td>
       <td class="font-mono text-xs font-bold ${askCls}">${askTxt}</td>
       <td>${fillBadge}</td>
+      <td class="font-mono text-xs ${profitCls}">${profitVal}</td>
     </tr>`;
   });
   html += '</tbody></table></div>';

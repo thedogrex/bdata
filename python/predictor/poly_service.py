@@ -2983,7 +2983,6 @@ async def get_order_market_pricing(
         "pr.error IS NULL",
         "pm.resolved_outcome IS NOT NULL",
         "pm.resolved_outcome IN ('UP','DOWN')",
-        "pr.prediction = pm.resolved_outcome",
         "pr.started_at < FROM_UNIXTIME(pm.ts)",
     ]
     params: list = []
@@ -3046,30 +3045,63 @@ async def get_order_market_pricing(
 
     threshold = float(price_threshold_cents)
 
-    total_correct = len(rows)
-    fillable_count = 0
-    no_data_count = 0
+    total_predictions = len(rows)
+    total_correct = 0
+    total_incorrect = 0
+    correct_no_data = 0
+    incorrect_no_data = 0
+    fillable_correct = 0
+    fillable_incorrect = 0
+    profit_total = 0.0
+    profit_trades = 0
     markets: List[Dict[str, Any]] = []
 
-    per_day_raw: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
-        "correct": 0,
-        "fillable": 0,
-        "no_data": 0,
-        "min_asks": [],
-    })
+    per_day_raw: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {
+            "correct": 0,
+            "incorrect": 0,
+            "correct_no_data": 0,
+            "incorrect_no_data": 0,
+            "fillable_correct": 0,
+            "fillable_incorrect": 0,
+            "min_asks": [],
+            "profit": 0.0,
+        }
+    )
 
     for row in rows:
         slug, prediction, resolved_outcome, market_ts, day, template_name, asset_id, min_ask = row
         day_str = str(day) if day else ""
 
+        is_correct = bool(prediction == resolved_outcome)
+        if is_correct:
+            total_correct += 1
+        else:
+            total_incorrect += 1
+
         min_ask_f = float(min_ask) if min_ask is not None else None
         is_fillable = min_ask_f is not None and min_ask_f <= threshold
         has_data = min_ask_f is not None
 
-        if is_fillable:
-            fillable_count += 1
+        trade_profit: Optional[float] = None
         if not has_data:
-            no_data_count += 1
+            if is_correct:
+                correct_no_data += 1
+            else:
+                incorrect_no_data += 1
+        if is_fillable:
+            price_dollars = threshold / 100.0
+            if price_dollars > 0:
+                profit_trades += 1
+                if is_correct:
+                    fillable_correct += 1
+                    trade_profit = (1.0 / price_dollars) - 1.0
+                else:
+                    fillable_incorrect += 1
+                    trade_profit = -1.0
+                profit_total += trade_profit
+
+        profit_value = round(trade_profit, 4) if trade_profit is not None else None
 
         markets.append({
             "slug": slug,
@@ -3081,40 +3113,75 @@ async def get_order_market_pricing(
             "asset_id": asset_id,
             "min_ask_cents": round(min_ask_f, 2) if min_ask_f is not None else None,
             "fillable": is_fillable,
+            "correct": is_correct,
+            "profit_usd": profit_value,
         })
 
         d = per_day_raw[day_str]
-        d["correct"] += 1
+        if is_correct:
+            d["correct"] += 1
+            if not has_data:
+                d["correct_no_data"] += 1
+        else:
+            d["incorrect"] += 1
+            if not has_data:
+                d["incorrect_no_data"] += 1
         if is_fillable:
-            d["fillable"] += 1
+            if is_correct:
+                d["fillable_correct"] += 1
+            else:
+                d["fillable_incorrect"] += 1
         if not has_data:
-            d["no_data"] += 1
+            pass
         if min_ask_f is not None:
             d["min_asks"].append(min_ask_f)
+        if trade_profit is not None:
+            d["profit"] += trade_profit
 
-    with_data = total_correct - no_data_count
-    fillable_pct = round(fillable_count / with_data * 100, 1) if with_data > 0 else None
+    with_data_correct = total_correct - correct_no_data
+    with_data_incorrect = total_incorrect - incorrect_no_data
+    with_data = with_data_correct + with_data_incorrect
+
+    fillable_pct_correct = round(fillable_correct / with_data_correct * 100, 1) if with_data_correct > 0 else None
+    fillable_pct_incorrect = (
+        round(fillable_incorrect / with_data_incorrect * 100, 1) if with_data_incorrect > 0 else None
+    )
 
     per_day = []
     for day_str in sorted(per_day_raw.keys()):
         d = per_day_raw[day_str]
-        wd = d["correct"] - d["no_data"]
-        pct = round(d["fillable"] / wd * 100, 1) if wd > 0 else None
+        wd_correct = d["correct"] - d["correct_no_data"]
+        wd_incorrect = d["incorrect"] - d["incorrect_no_data"]
+        pct_correct = (
+            round(d["fillable_correct"] / wd_correct * 100, 1) if wd_correct > 0 else None
+        )
+        pct_incorrect = (
+            round(d["fillable_incorrect"] / wd_incorrect * 100, 1) if wd_incorrect > 0 else None
+        )
+        profit_trades_day = d["fillable_correct"] + d["fillable_incorrect"]
+        avg_profit_day = (
+            round(d["profit"] / profit_trades_day, 3) if profit_trades_day > 0 else None
+        )
         avg_min = round(sum(d["min_asks"]) / len(d["min_asks"]), 2) if d["min_asks"] else None
         per_day.append({
             "day": day_str,
             "correct": d["correct"],
-            "with_data": wd,
-            "fillable": d["fillable"],
-            "fillable_pct": pct,
-            "no_data": d["no_data"],
+            "incorrect": d["incorrect"],
+            "with_data_correct": wd_correct,
+            "with_data_incorrect": wd_incorrect,
+            "fillable_correct": d["fillable_correct"],
+            "fillable_incorrect": d["fillable_incorrect"],
+            "fillable_pct_correct": pct_correct,
+            "fillable_pct_incorrect": pct_incorrect,
+            "profit_usd": round(d["profit"], 2) if d["profit"] else 0.0,
+            "avg_profit_usd": avg_profit_day,
             "avg_min_ask": avg_min,
         })
 
     # Distribution histogram: count markets per 0.5c bucket
     histogram: List[Dict[str, Any]] = []
     if markets:
-        asks_with_data = [m["min_ask_cents"] for m in markets if m["min_ask_cents"] is not None]
+        asks_with_data = [m["min_ask_cents"] for m in markets if m["min_ask_cents"] is not None and m["correct"]]
         if asks_with_data:
             bucket_range = [round(44.0 + i * 0.5, 1) for i in range(37)]  # 44.0 .. 62.0
             for b in bucket_range:
@@ -3125,16 +3192,35 @@ async def get_order_market_pricing(
                     "pct": round(cnt / len(asks_with_data) * 100, 1),
                 })
 
+    profit_avg = round(profit_total / profit_trades, 3) if profit_trades > 0 else None
+    profit_win_rate = fillable_correct / profit_trades if profit_trades > 0 else None
+
+    summary = {
+        "total_predictions": total_predictions,
+        "total_correct_predictions": total_correct,
+        "total_incorrect_predictions": total_incorrect,
+        "with_orderbook_data": with_data,
+        "with_data_correct": with_data_correct,
+        "with_data_incorrect": with_data_incorrect,
+        "no_data": total_predictions - with_data,
+        "fillable_count": fillable_correct,
+        "fillable_pct": fillable_pct_correct,
+        "fillable_incorrect_count": fillable_incorrect,
+        "fillable_incorrect_pct": fillable_pct_incorrect,
+        "fillable_total_count": fillable_correct + fillable_incorrect,
+        "profit_total_usd": round(profit_total, 2),
+        "profit_final_usd": round(profit_total, 2),
+        "profit_avg_per_trade_usd": profit_avg,
+        "profit_trades": profit_trades,
+        "profit_win_rate": profit_win_rate,
+        "profit_win_trades": fillable_correct,
+        "profit_loss_trades": fillable_incorrect,
+    }
+
     return {
         "price_threshold_cents": threshold,
         "interval_sec": interval,
-        "summary": {
-            "total_correct_predictions": total_correct,
-            "with_orderbook_data": with_data,
-            "no_data": no_data_count,
-            "fillable_count": fillable_count,
-            "fillable_pct": fillable_pct,
-        },
+        "summary": summary,
         "per_day": per_day,
         "histogram": histogram,
         "markets": markets,

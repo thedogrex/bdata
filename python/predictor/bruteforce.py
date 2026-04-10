@@ -16,6 +16,7 @@ from predictor.db_history import (
 )
 
 BF_COMBO_DELAY_SEC = 0.2
+THRESHOLD_SWEEP_STRATEGIES = {"lightgbm"}
 
 if TYPE_CHECKING:
     from predictor.task_manager import TaskProgress
@@ -136,6 +137,23 @@ def build_combos(param_grid: dict[str, list]) -> list[dict]:
     return combos
 
 
+def _extract_threshold_sweep(raw_values) -> list[float] | None:
+    if raw_values is None:
+        return None
+    values: list[float] = []
+    source = raw_values
+    if isinstance(raw_values, (list, tuple, set, range)):
+        source = list(raw_values)
+    else:
+        source = [raw_values]
+    for val in source:
+        try:
+            values.append(float(val))
+        except (TypeError, ValueError):
+            continue
+    return values or None
+
+
 async def _run_bf_loop(
     bf_id: int,
     strategy: str,
@@ -154,6 +172,7 @@ async def _run_bf_loop(
     initial_best_params: dict,
     elapsed_before: float,
     progress: "TaskProgress | None",
+    threshold_sweep: list[float] | None,
 ) -> dict:
     """
     Core brute-force loop shared by run_bruteforce and resume_bruteforce.
@@ -164,6 +183,23 @@ async def _run_bf_loop(
     best_params = initial_best_params.copy() if initial_best_params else {}
     best_result = None
     completed = initial_completed
+
+    normalized_thresholds = None
+    if threshold_sweep:
+        seen_keys: set[str] = set()
+        normalized_thresholds = []
+        for raw in threshold_sweep:
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            key = f"{val:.6f}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            normalized_thresholds.append(val)
+        if not normalized_thresholds:
+            normalized_thresholds = None
 
     if progress:
         progress.total = total
@@ -231,6 +267,8 @@ async def _run_bf_loop(
 
         # Build strategy params (without window_size)
         strat_params = {k: v for k, v in params.items() if k != "window_size"}
+        if normalized_thresholds and "threshold" not in strat_params:
+            strat_params["threshold"] = normalized_thresholds[0]
 
         try:
             combo_t0 = time.time()
@@ -264,18 +302,62 @@ async def _run_bf_loop(
                     window_size=ws,
                     retrain_every=retrain_every,
                     preloaded=preloaded,
+                    threshold_sweep=normalized_thresholds,
                 )
 
             if isinstance(result, dict) and result.get("error"):
                 raise RuntimeError(str(result.get("error")))
 
+            threshold_variants = result.pop("threshold_variants", None)
             result["is_bruteforce"] = True
             result["bruteforce_id"] = bf_id
-            result["params"] = params  # Save full combo params (incl. window_size) for resume matching
-            await save_backtest_run(result)
 
-            h_data = result.get("horizons", {}).get(str(horizon), {})
-            acc = h_data.get("accuracy_pct", 0)
+            combo_best_acc = -1.0
+            combo_best_thr = None
+
+            if threshold_variants:
+                base_common = {
+                    k: v for k, v in result.items()
+                    if k not in {"threshold_variants", "horizons", "params"}
+                }
+                for thr_key, horizon_map in threshold_variants.items():
+                    try:
+                        thr_val = float(thr_key)
+                    except (TypeError, ValueError):
+                        continue
+                    variant_params = dict(params)
+                    variant_params["threshold"] = thr_val
+                    variant_result = dict(base_common)
+                    variant_result["params"] = variant_params
+                    variant_result["horizons"] = horizon_map
+                    variant_result["is_bruteforce"] = True
+                    variant_result["bruteforce_id"] = bf_id
+                    await save_backtest_run(variant_result)
+
+                    h_data = horizon_map.get(str(horizon), {})
+                    acc_candidate = h_data.get("accuracy_pct", 0)
+                    if acc_candidate > combo_best_acc:
+                        combo_best_acc = acc_candidate
+                        combo_best_thr = thr_val
+                    if acc_candidate > best_accuracy:
+                        best_accuracy = acc_candidate
+                        best_params = variant_params
+                        best_result = variant_result
+
+                acc = combo_best_acc if combo_best_acc >= 0 else 0
+            else:
+                result["params"] = params
+                await save_backtest_run(result)
+                h_data = result.get("horizons", {}).get(str(horizon), {})
+                acc = h_data.get("accuracy_pct", 0)
+                if acc > best_accuracy:
+                    best_accuracy = acc
+                    best_params = params
+                    best_result = result
+
+            if combo_best_thr is not None and progress:
+                progress.extra["last_threshold"] = combo_best_thr
+
             combo_elapsed = time.time() - combo_t0
             progress_last_phase = (
                 f"BF {round(((completed+1)/max(total,1))*100,1)}% | "
@@ -283,11 +365,6 @@ async def _run_bf_loop(
                 f"acc: {acc}% | best: {best_accuracy}% | "
                 f"combo: {round(combo_elapsed,1)}s"
             )
-
-            if acc > best_accuracy:
-                best_accuracy = acc
-                best_params = params
-                best_result = result
 
             completed += 1
 
@@ -390,7 +467,12 @@ async def run_bruteforce(
     Brute-force search over hyperparameter grid with pause/cancel support.
     Checkpoints every combo to MySQL for resume after server restart.
     """
-    combos = build_combos(param_grid)
+    grid_for_combos = dict(param_grid)
+    threshold_sweep = None
+    if strategy in THRESHOLD_SWEEP_STRATEGIES and "threshold" in grid_for_combos:
+        threshold_sweep = _extract_threshold_sweep(grid_for_combos.pop("threshold"))
+
+    combos = build_combos(grid_for_combos)
     if len(combos) > max_combos:
         step = len(combos) // max_combos
         combos = combos[::step][:max_combos]
@@ -431,6 +513,7 @@ async def run_bruteforce(
         initial_best_params={},
         elapsed_before=0.0,
         progress=progress,
+        threshold_sweep=threshold_sweep,
     )
 
 
@@ -454,7 +537,16 @@ async def resume_bruteforce(
         raise ValueError(f"Session {bf_id} has no saved combo list — cannot resume")
 
     # Find which combos are already done
-    completed_params_set = await get_completed_combo_indices(bf_id)
+    threshold_sweep = None
+    if session["strategy"] in THRESHOLD_SWEEP_STRATEGIES and "threshold" in (session.get("param_grid") or {}):
+        threshold_sweep = _extract_threshold_sweep(session["param_grid"].get("threshold"))
+
+    ignore_keys = {"threshold"} if threshold_sweep else None
+    completed_params_set = await get_completed_combo_indices(
+        bf_id,
+        ignore_keys=ignore_keys,
+        required_thresholds=threshold_sweep,
+    )
     remaining = sum(
         1 for c in combos
         if json.dumps(c, sort_keys=True, ensure_ascii=False) not in completed_params_set
@@ -484,4 +576,5 @@ async def resume_bruteforce(
         initial_best_params=session["best_params"],
         elapsed_before=session.get("elapsed_before_pause", 0.0),
         progress=progress,
+        threshold_sweep=threshold_sweep,
     )

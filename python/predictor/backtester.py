@@ -33,6 +33,7 @@ async def run_backtest(
     retrain_every: int = 500,
     progress: "TaskProgress | None" = None,
     preloaded: dict | None = None,
+    threshold_sweep: list[float] | None = None,
 ) -> dict:
     """
     Moving-window backtest with progress tracking and pause/cancel support.
@@ -42,6 +43,18 @@ async def run_backtest(
         horizons = [1]
 
     t0 = time.time()
+
+    default_strategy = None
+    if not strategy_params or "threshold" not in (strategy_params or {}):
+        default_strategy = get_strategy(strategy_name)
+    if strategy_params and "threshold" in strategy_params:
+        base_threshold = float(strategy_params["threshold"])
+    else:
+        fallback_params = default_strategy.params if default_strategy else get_strategy(strategy_name).params
+        base_threshold = float(fallback_params.get("threshold", 0.5))
+
+    sweep_thresholds = _normalize_threshold_sweep(threshold_sweep, base_threshold) if threshold_sweep else []
+    threshold_variant_results: dict[str, dict[str, dict]] = {}
 
     if preloaded:
         # Reuse preloaded data (skip expensive data loading + feature computation)
@@ -282,72 +295,61 @@ async def run_backtest(
         actuals = arr[:, 3].astype(int)
         idxs = arr[:, 0].astype(int)
 
-        valid_mask = preds != -1
         total_candles_tested = len(arr)
 
-        if valid_mask.sum() == 0:
-            results_by_horizon[str(horizon)] = {
-                "error": "All predictions were SKIP (confidence too low)",
-                "total_candles": total_candles_tested,
-                "signals": 0,
-            }
-            continue
+        base_metrics = _evaluate_predictions_metrics(
+            preds,
+            probas,
+            actuals,
+            idxs,
+            df_raw,
+            horizon,
+            total_candles_tested,
+            fit_time,
+            train_count,
+            total_train_time,
+            threshold_value=base_threshold,
+        )
 
-        y_true = actuals[valid_mask]
-        y_pred = preds[valid_mask]
-        y_prob = probas[valid_mask]
-        y_idxs = idxs[valid_mask]
+        if not base_metrics.get("signals") and not base_metrics.get("error"):  # no valid signals
+            base_metrics["error"] = "All predictions were SKIP (confidence too low)"
 
-        correct = int((y_true == y_pred).sum())
-        total_signals = int(valid_mask.sum())
-        accuracy = correct / total_signals
+        results_by_horizon[str(horizon)] = base_metrics
 
-        up_pred_mask = y_pred == 1
-        down_pred_mask = y_pred == 0
-        up_correct = int((y_true[up_pred_mask] == 1).sum()) if up_pred_mask.sum() > 0 else 0
-        down_correct = int((y_true[down_pred_mask] == 0).sum()) if down_pred_mask.sum() > 0 else 0
-        up_total = int(up_pred_mask.sum())
-        down_total = int(down_pred_mask.sum())
+        if sweep_thresholds:
+            base_key = _format_threshold_key(base_threshold)
+            for thr in sweep_thresholds:
+                thr_preds = _apply_threshold_to_probs(probas, thr)
+                thr_metrics = _evaluate_predictions_metrics(
+                    thr_preds,
+                    probas,
+                    actuals,
+                    idxs,
+                    df_raw,
+                    horizon,
+                    total_candles_tested,
+                    fit_time,
+                    train_count,
+                    total_train_time,
+                    threshold_value=thr,
+                )
+                thr_key = _format_threshold_key(thr)
+                threshold_variant_results.setdefault(thr_key, {})[str(horizon)] = thr_metrics
 
-        # Date-based breakdowns
-        test_times = pd.to_datetime(df_raw["open_time"].iloc[y_idxs].values, unit="us")
-        monthly = _monthly_breakdown(test_times.values, y_true, y_pred)
-        daily = _daily_breakdown(test_times.values, y_true, y_pred)
-        conf_dist = _confidence_distribution(y_prob)
-        streaks = _streak_analysis(y_true, y_pred)
-
-        results_by_horizon[str(horizon)] = {
-            "accuracy": round(accuracy, 6),
-            "accuracy_pct": round(accuracy * 100, 2),
-            "total_candles": total_candles_tested,
-            "signals": total_signals,
-            "skipped": total_candles_tested - total_signals,
-            "correct": correct,
-            "wrong": total_signals - correct,
-            "up_predictions": up_total,
-            "up_correct": up_correct,
-            "up_accuracy": round(up_correct / up_total * 100, 2) if up_total > 0 else 0,
-            "down_predictions": down_total,
-            "down_correct": down_correct,
-            "down_accuracy": round(down_correct / down_total * 100, 2) if down_total > 0 else 0,
-            "monthly": monthly,
-            "daily": daily,
-            "confidence_distribution": conf_dist,
-            "streaks": streaks,
-            "fit_time_sec": round(fit_time, 2),
-            "train_count": train_count,
-            "total_train_time_sec": round(total_train_time, 2),
-            "predict_time_sec": round(fit_time - total_train_time, 2),
-        }
+            if base_key in threshold_variant_results:
+                results_by_horizon[str(horizon)] = threshold_variant_results[base_key][str(horizon)]
 
     total_time = time.time() - t0
 
-    resolved_params = strategy_params if strategy_params else get_strategy(strategy_name).params
+    if strategy_params:
+        resolved_params = strategy_params
+    else:
+        resolved_params = default_strategy.params if default_strategy else get_strategy(strategy_name).params
 
     if progress:
         progress.update(total_work, total_work, "Done")
 
-    return {
+    result = {
         "strategy": strategy_name,
         "params": resolved_params,
         "train_start": train_start,
@@ -366,6 +368,11 @@ async def run_backtest(
         "load_time_sec": round(load_time, 2),
         "feature_time_sec": round(feat_time, 2),
     }
+
+    if threshold_variant_results:
+        result["threshold_variants"] = threshold_variant_results
+
+    return result
 
 
 async def preload_backtest_data(
@@ -648,3 +655,114 @@ def _max_streak(arr, value) -> int:
         else:
             current = 0
     return max_s
+
+
+def _format_threshold_key(value: float) -> str:
+    formatted = f"{value:.6f}".rstrip("0").rstrip(".")
+    return formatted if formatted else "0"
+
+
+def _normalize_threshold_sweep(thresholds: list[float], base_threshold: float) -> list[float]:
+    values: list[float] = []
+    for t in thresholds:
+        if t is None:
+            continue
+        try:
+            values.append(float(t))
+        except (TypeError, ValueError):
+            continue
+    values.append(float(base_threshold))
+    seen: set[str] = set()
+    normalized: list[float] = []
+    for val in sorted(values):
+        key = _format_threshold_key(val)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(val)
+    return normalized
+
+
+def _apply_threshold_to_probs(probas: np.ndarray, threshold: float) -> np.ndarray:
+    preds = np.full(len(probas), -1, dtype=np.int8)
+    up_thr = float(threshold)
+    down_thr = 1.0 - up_thr
+    preds[probas > up_thr] = 1
+    preds[probas < down_thr] = 0
+    return preds
+
+
+def _evaluate_predictions_metrics(
+    y_pred: np.ndarray,
+    probas: np.ndarray,
+    actuals: np.ndarray,
+    idxs: np.ndarray,
+    df_raw: pd.DataFrame,
+    horizon: int,
+    total_candles: int,
+    fit_time: float,
+    train_count: int,
+    total_train_time: float,
+    threshold_value: float | None = None,
+) -> dict:
+    valid_mask = y_pred != -1
+    if valid_mask.sum() == 0:
+        result = {
+            "error": "All predictions were SKIP (confidence too low)",
+            "total_candles": total_candles,
+            "signals": 0,
+        }
+        if threshold_value is not None:
+            result["threshold"] = float(threshold_value)
+        return result
+
+    y_true = actuals[valid_mask]
+    y_probs = probas[valid_mask]
+    y_idxs = idxs[valid_mask]
+    y_pred_valid = y_pred[valid_mask]
+
+    correct = int((y_true == y_pred_valid).sum())
+    total_signals = int(valid_mask.sum())
+    accuracy = correct / total_signals if total_signals else 0.0
+
+    up_pred_mask = y_pred_valid == 1
+    down_pred_mask = y_pred_valid == 0
+    up_correct = int((y_true[up_pred_mask] == 1).sum()) if up_pred_mask.sum() > 0 else 0
+    down_correct = int((y_true[down_pred_mask] == 0).sum()) if down_pred_mask.sum() > 0 else 0
+    up_total = int(up_pred_mask.sum())
+    down_total = int(down_pred_mask.sum())
+
+    test_times = pd.to_datetime(df_raw["open_time"].iloc[y_idxs].values, unit="us")
+    monthly = _monthly_breakdown(test_times.values, y_true, y_pred_valid)
+    daily = _daily_breakdown(test_times.values, y_true, y_pred_valid)
+    conf_dist = _confidence_distribution(y_probs)
+    streaks = _streak_analysis(y_true, y_pred_valid)
+
+    result = {
+        "accuracy": round(accuracy, 6),
+        "accuracy_pct": round(accuracy * 100, 2),
+        "total_candles": total_candles,
+        "signals": total_signals,
+        "skipped": total_candles - total_signals,
+        "correct": correct,
+        "wrong": total_signals - correct,
+        "up_predictions": up_total,
+        "up_correct": up_correct,
+        "up_accuracy": round(up_correct / up_total * 100, 2) if up_total > 0 else 0,
+        "down_predictions": down_total,
+        "down_correct": down_correct,
+        "down_accuracy": round(down_correct / down_total * 100, 2) if down_total > 0 else 0,
+        "monthly": monthly,
+        "daily": daily,
+        "confidence_distribution": conf_dist,
+        "streaks": streaks,
+        "fit_time_sec": round(fit_time, 2),
+        "train_count": train_count,
+        "total_train_time_sec": round(total_train_time, 2),
+        "predict_time_sec": round(max(fit_time - total_train_time, 0.0), 2),
+    }
+
+    if threshold_value is not None:
+        result["threshold"] = float(threshold_value)
+
+    return result

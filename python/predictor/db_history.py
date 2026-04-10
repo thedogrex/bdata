@@ -513,21 +513,45 @@ async def get_bruteforce_session_by_id(bf_id: int) -> Optional[dict]:
     }
 
 
-async def get_completed_combo_indices(bf_id: int) -> set[str]:
+async def get_completed_combo_indices(
+    bf_id: int,
+    ignore_keys: set[str] | None = None,
+    required_thresholds: list[float] | None = None,
+) -> set[str]:
     """Get set of normalized params JSON strings for completed combos in a BF session."""
     rows = await db.fetchall(
         "SELECT params_json FROM backtest_runs WHERE bruteforce_id = %s",
         (bf_id,)
     )
     result = set()
+    threshold_seen: dict[str, set[str]] = {}
+    required_thr_keys: set[str] | None = None
+    if required_thresholds:
+        required_thr_keys = {f"{float(t):.6f}" for t in required_thresholds}
     for r in rows:
         if r[0]:
             try:
                 # Normalize: parse and re-dump with sort_keys for consistent matching
                 parsed = json.loads(r[0])
-                result.add(json.dumps(parsed, sort_keys=True, ensure_ascii=False))
+                filtered = parsed
+                if ignore_keys:
+                    filtered = {k: v for k, v in parsed.items() if k not in ignore_keys}
+                normalized = json.dumps(filtered, sort_keys=True, ensure_ascii=False)
+                if required_thr_keys:
+                    thr_val = parsed.get("threshold")
+                    try:
+                        thr_key = f"{float(thr_val):.6f}"
+                    except (TypeError, ValueError):
+                        continue
+                    threshold_seen.setdefault(normalized, set()).add(thr_key)
+                else:
+                    result.add(normalized)
             except (json.JSONDecodeError, TypeError):
                 result.add(r[0])
+    if required_thr_keys:
+        for combo_key, seen in threshold_seen.items():
+            if seen.issuperset(required_thr_keys):
+                result.add(combo_key)
     return result
 
 

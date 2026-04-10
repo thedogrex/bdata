@@ -85,9 +85,9 @@ RECOMMENDED_PARAMS: dict[str, dict] = {
     },
     "lightgbm": {
         "notes": "Fast gradient boosting. Faster training than XGBoost with comparable accuracy. Good for brute-force due to speed. lambda_l1/lambda_l2 critical for noisy financial data.",
-        "fast_preset": {"n_estimators": 150, "max_depth": 5, "learning_rate": 0.05, "num_leaves": 31, "subsample": 0.8, "colsample_bytree": 0.8, "min_child_samples": 20, "lambda_l1": 0.0, "lambda_l2": 0.0, "threshold": 0.53},
-        "balanced_preset": {"n_estimators": 300, "max_depth": 5, "learning_rate": 0.03, "num_leaves": 31, "subsample": 0.8, "colsample_bytree": 0.8, "min_child_samples": 20, "lambda_l1": 0.1, "lambda_l2": 0.1, "threshold": 0.54},
-        "thorough_preset": {"n_estimators": 400, "max_depth": 7, "learning_rate": 0.02, "num_leaves": 63, "subsample": 0.8, "colsample_bytree": 0.8, "min_child_samples": 20, "lambda_l1": 0.5, "lambda_l2": 0.5, "threshold": 0.55},
+        "fast_preset": {"n_estimators": 150, "max_depth": 5, "learning_rate": 0.05, "num_leaves": 31, "subsample": 0.8, "colsample_bytree": 0.8, "min_child_samples": 20, "lambda_l1": 0.0, "lambda_l2": 0.0, "threshold": 0.53, "deterministic": False},
+        "balanced_preset": {"n_estimators": 300, "max_depth": 5, "learning_rate": 0.03, "num_leaves": 31, "subsample": 0.8, "colsample_bytree": 0.8, "min_child_samples": 20, "lambda_l1": 0.1, "lambda_l2": 0.1, "threshold": 0.54, "deterministic": False},
+        "thorough_preset": {"n_estimators": 400, "max_depth": 7, "learning_rate": 0.02, "num_leaves": 63, "subsample": 0.8, "colsample_bytree": 0.8, "min_child_samples": 20, "lambda_l1": 0.5, "lambda_l2": 0.5, "threshold": 0.55, "deterministic": False},
         "brute_force_include": ["n_estimators", "max_depth", "learning_rate", "num_leaves", "min_child_samples", "lambda_l1", "lambda_l2", "threshold"],
     },
     "random_forest": {

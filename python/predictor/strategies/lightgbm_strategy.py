@@ -38,6 +38,7 @@ class LightGBMStrategy(BaseStrategy):
             "lambda_l1": 0.0,
             "lambda_l2": 0.0,
             "threshold": 0.52,
+            "deterministic": True,
         }
 
     @staticmethod
@@ -53,6 +54,7 @@ class LightGBMStrategy(BaseStrategy):
             "lambda_l1": "L1 regularization. Encourages sparsity in leaf weights. Helps with noisy features. Typical: 0-1.",
             "lambda_l2": "L2 regularization. Smooths leaf weights. Reduces overfitting on noisy data. Typical: 0-1.",
             "threshold": "Minimum probability to emit a signal. Lower = more trades. Typical: 0.50-0.55.",
+            "deterministic": "If True, disables subsampling and forces single-threaded training for reproducible results.",
         }
 
     def fit(self, df: pd.DataFrame, horizon: int = 1) -> None:
@@ -74,18 +76,25 @@ class LightGBMStrategy(BaseStrategy):
         # Keep feature names consistent for sklearn validation + debugging
         X_scaled_df = pd.DataFrame(X_scaled, columns=self.feature_cols)
 
+        deterministic = bool(self.params.get("deterministic", True))
+        effective_subsample = 1.0 if deterministic else self.params["subsample"]
+        effective_colsample = 1.0 if deterministic else self.params["colsample_bytree"]
+
         self.model = lgb.LGBMClassifier(
             n_estimators=self.params["n_estimators"],
             max_depth=self.params["max_depth"],
             learning_rate=self.params["learning_rate"],
             num_leaves=self.params["num_leaves"],
-            subsample=self.params["subsample"],
-            colsample_bytree=self.params["colsample_bytree"],
+            subsample=effective_subsample,
+            colsample_bytree=effective_colsample,
             min_child_samples=self.params["min_child_samples"],
             reg_alpha=self.params.get("lambda_l1", 0.0),
             reg_lambda=self.params.get("lambda_l2", 0.0),
+            bagging_freq=0 if deterministic else 1,
+            bagging_seed=42,
+            feature_fraction_seed=42,
             random_state=42,
-            n_jobs=-1,
+            n_jobs=1 if deterministic else -1,
             verbose=-1,
         )
         self.model.fit(X_scaled_df, y)

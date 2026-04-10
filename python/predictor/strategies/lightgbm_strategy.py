@@ -14,6 +14,7 @@ class LightGBMStrategy(BaseStrategy):
         self.model = None
         self.scaler = StandardScaler()
         self.feature_cols = []
+        self.feature_importances_: dict[str, float] | None = None
 
     @staticmethod
     def description() -> str:
@@ -34,6 +35,8 @@ class LightGBMStrategy(BaseStrategy):
             "subsample": 0.8,
             "colsample_bytree": 0.8,
             "min_child_samples": 20,
+            "lambda_l1": 0.0,
+            "lambda_l2": 0.0,
             "threshold": 0.52,
         }
 
@@ -47,6 +50,8 @@ class LightGBMStrategy(BaseStrategy):
             "subsample": "Fraction of samples per tree. Prevents overfitting. Typical: 0.6-1.0.",
             "colsample_bytree": "Fraction of features per tree. Prevents overfitting. Typical: 0.6-1.0.",
             "min_child_samples": "Minimum samples in a leaf. Higher = more conservative. Typical: 10-50.",
+            "lambda_l1": "L1 regularization. Encourages sparsity in leaf weights. Helps with noisy features. Typical: 0-1.",
+            "lambda_l2": "L2 regularization. Smooths leaf weights. Reduces overfitting on noisy data. Typical: 0-1.",
             "threshold": "Minimum probability to emit a signal. Lower = more trades. Typical: 0.50-0.55.",
         }
 
@@ -77,11 +82,35 @@ class LightGBMStrategy(BaseStrategy):
             subsample=self.params["subsample"],
             colsample_bytree=self.params["colsample_bytree"],
             min_child_samples=self.params["min_child_samples"],
+            reg_alpha=self.params.get("lambda_l1", 0.0),
+            reg_lambda=self.params.get("lambda_l2", 0.0),
             random_state=42,
             n_jobs=-1,
             verbose=-1,
         )
         self.model.fit(X_scaled_df, y)
+        booster = getattr(self.model, "booster_", None)
+        if booster is not None:
+            gains = booster.feature_importance(importance_type="gain")
+        else:
+            gains = self.model.feature_importances_
+        self.feature_importances_ = {
+            col: float(imp)
+            for col, imp in zip(self.feature_cols, gains)
+        }
+
+    def get_feature_importance(self, top_n: int | None = None, normalize: bool = True) -> list[tuple[str, float]]:
+        """Return sorted feature importances using gain metric."""
+        if not self.feature_importances_:
+            return []
+        items = list(self.feature_importances_.items())
+        total = sum(val for _, val in items) or 1.0
+        if normalize:
+            items = [(name, val / total) for name, val in items]
+        items.sort(key=lambda x: x[1], reverse=True)
+        if top_n is not None:
+            items = items[:top_n]
+        return items
 
     def predict_proba(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
         if "rsi_14" not in df.columns:

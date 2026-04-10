@@ -147,13 +147,13 @@ def _run_prediction(
     strategy_params: dict,
     horizon: int,
 ) -> Optional[Dict[str, Any]]:
-    if len(df) < 120:
+    if len(df) < 90:
         return None
     df = add_direction(df).reset_index(drop=True)
     df_feat = add_technical_features(df)
     df_train = df_feat.iloc[:-1].reset_index(drop=True)
     df_predict = df_feat.iloc[[-1]].reset_index(drop=True)
-    if len(df_train) < 100:
+    if len(df_train) < 90:
         return None
 
     strategy = get_strategy(strategy_name, strategy_params)

@@ -123,6 +123,7 @@
     <button onclick="switchTab('best')" id="tab-best" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Best Runs</button>
     <button onclick="switchTab('poly')" id="tab-poly" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Polymarket</button>
     <button onclick="switchTab('wallet')" id="tab-wallet" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Wallet</button>
+    <button onclick="switchTab('lgbm');lgbmFiInit()" id="tab-lgbm" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">LightGBM</button>
     <button onclick="switchTab('analytics');analyticsLoad()" id="tab-analytics" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Analytics</button>
     <button onclick="switchTab('compare_asume')" id="tab-compare_asume" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Compare Asume</button>
     <button onclick="switchTab('order_pricing');ompLoad()" id="tab-order_pricing" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Orders Market Pricing</button>
@@ -135,6 +136,7 @@
   {{TAB_BEST}}
   {{TAB_POLY}}
   {{TAB_WALLET}}
+  {{TAB_LGBM}}
   {{TAB_ANALYTICS}}
   {{TAB_COMPARE_ASUME}}
   {{TAB_ORDER_PRICING}}
@@ -158,6 +160,7 @@ let polyActiveTs=null;
 {{JS_ORDERBOOKS}}
 {{JS_COMPARE_ASUME}}
 {{JS_BACKTEST}}
+{{JS_LIGHTGBM}}
 
 // ===== BOOT =====
 init();

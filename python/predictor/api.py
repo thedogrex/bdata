@@ -15,7 +15,10 @@ from predictor.backtester import (
     run_backtest_vectorized,
     RULE_BASED_STRATEGIES,
 )
+from predictor.data_loader import load_candles, add_direction, add_future_directions
+from predictor.features import add_technical_features
 from predictor.strategies import list_strategies, STRATEGY_REGISTRY
+from predictor.strategies.lightgbm_strategy import LightGBMStrategy
 from predictor.db_history import (
     save_backtest_run, get_history, get_history_detail,
     delete_run, clear_history,
@@ -150,6 +153,15 @@ class BatchPredictRequest(BaseModel):
     slug: str
     quantum: bool = False
     table: str = "c_5m"
+
+
+class LightGBMImportanceRequest(BaseModel):
+    train_start: str = "2024-01-01"
+    train_end: str = "2024-06-01"
+    table: str = "c_5m"
+    horizon: int = 2
+    params: dict | None = None
+    top_n: int = 40
 
 
 class LiveBuyRequest(BaseModel):
@@ -364,6 +376,40 @@ async def api_poly_save_settings(req: SettingsRequest):
         params=req.params,
         window_size=req.window_size,
     )
+
+
+@app.post("/api/lightgbm/feature_importance")
+async def api_lightgbm_feature_importance(req: LightGBMImportanceRequest):
+    if req.horizon < 1:
+        return JSONResponse(status_code=400, content={"error": "horizon must be >= 1"})
+
+    df = await load_candles(req.table, req.train_start, req.train_end)
+    if df is None or df.empty:
+        return JSONResponse(status_code=404, content={"error": "No candle data for selected range"})
+
+    df = add_direction(df)
+    df = add_future_directions(df, [req.horizon])
+    df = df.reset_index(drop=True)
+    df = add_technical_features(df)
+
+    strategy = LightGBMStrategy(req.params or {})
+    await asyncio.to_thread(strategy.fit, df, req.horizon)
+    feature_rows = strategy.get_feature_importance(top_n=req.top_n, normalize=True)
+    payload = [
+        {"feature": name, "weight": round(value, 6)}
+        for name, value in feature_rows
+    ]
+
+    return {
+        "strategy": "lightgbm",
+        "train_start": req.train_start,
+        "train_end": req.train_end,
+        "table": req.table,
+        "horizon": req.horizon,
+        "top_n": req.top_n,
+        "total_features": len(strategy.feature_cols or []),
+        "feature_importance": payload,
+    }
 
 
 @app.get("/api/poly/live/trade_settings")
@@ -960,11 +1006,13 @@ def _build_admin_html() -> str:
         "{{TAB_ANALYTICS}}": _load_template("tab_analytics.html"),
         "{{TAB_COMPARE_ASUME}}": _load_template("tab_compare_asume.html"),
         "{{TAB_ORDER_PRICING}}": _load_template("tab_order_pricing.html"),
+        "{{TAB_LGBM}}": _load_template("tab_lgbm.html"),
         "{{JS_COMMON}}": _load_template("js_common.js"),
         "{{JS_POLY}}": _load_template("js_poly.js"),
         "{{JS_ORDERBOOKS}}": _load_template("js_orderbooks.js"),
         "{{JS_COMPARE_ASUME}}": _load_template("js_compare_asume.js"),
         "{{JS_BACKTEST}}": "",  # included in js_common.js
+        "{{JS_LIGHTGBM}}": _load_template("js_lgbm.js"),
     }
     for key, val in replacements.items():
         base = base.replace(key, val)

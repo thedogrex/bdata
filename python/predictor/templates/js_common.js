@@ -280,7 +280,7 @@ function ensureBacktestConfig(){
 }
 
 // ===== TABS =====
-const TABS=['backtest','bruteforce','history','best','best_compare','poly','wallet','analytics','compare_asume','order_pricing'];
+const TABS=['backtest','bruteforce','history','best','best_compare','poly','wallet','lgbm','analytics','compare_asume','order_pricing'];
 
 function getInitialTab(){
   let tabParam = null;
@@ -342,7 +342,10 @@ function switchTab(tab){
     if(typeof stopLiveMarketPoll === 'function') stopLiveMarketPoll();
   }
   if(tab==='wallet') loadWallet();
+  if(tab==='lgbm' && typeof lgbmFiInit==='function') lgbmFiInit();
 }
+
+window.switchTab = switchTab;
 
 // ===== WALLET =====
 const WALLET_ORDERS_PER_PAGE = 3;

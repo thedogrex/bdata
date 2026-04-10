@@ -1,0 +1,87 @@
+<!-- ============ TAB: RSI PATTERN PROFITABILITY ============ -->
+<div id="panel-rsi_patterns" class="hidden">
+  <div class="card p-6 mb-4">
+    <h2 class="text-lg font-semibold mb-1">RSI Pattern Profitability (c_5m)</h2>
+    <p class="text-xs text-slate-400 mb-4">Analyse how the RSI Mean Reversion strategy performed on historical c_5m candles across different volatility regimes and candle patterns.</p>
+
+    <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Date From</label>
+        <input type="date" id="rsi-date-from" class="w-full">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Date To</label>
+        <input type="date" id="rsi-date-to" class="w-full">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Quick Range</label>
+        <div class="flex flex-wrap gap-2">
+          <button class="btn btn-slate text-xs" onclick="rsiPatternsSetRange(30)">30d</button>
+          <button class="btn btn-slate text-xs" onclick="rsiPatternsSetRange(90)">90d</button>
+          <button class="btn btn-slate text-xs" onclick="rsiPatternsSetRange(180)">180d</button>
+          <button class="btn btn-slate text-xs" onclick="rsiPatternsSetRange(365)">365d</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid gap-4 md:grid-cols-3 mt-4">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Horizon</label>
+        <select id="rsi-horizon" class="w-full">
+          <option value="1">H1 (next candle)</option>
+          <option value="2">H2</option>
+          <option value="3">H3</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Training Window (candles)</label>
+        <input type="number" id="rsi-window" class="w-full" value="4000" min="500" max="20000" step="500">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">RSI Period</label>
+        <input type="number" id="rsi-period" class="w-full" value="14" min="6" max="50">
+      </div>
+    </div>
+
+    <div class="grid gap-4 md:grid-cols-4 mt-4">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">RSI Oversold</label>
+        <input type="number" id="rsi-oversold" class="w-full" value="30" min="10" max="40" step="1">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">RSI Overbought</label>
+        <input type="number" id="rsi-overbought" class="w-full" value="70" min="60" max="90" step="1">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">BB Low</label>
+        <input type="number" id="rsi-bb-low" class="w-full" value="0.2" min="0.0" max="0.5" step="0.05">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">BB High</label>
+        <input type="number" id="rsi-bb-high" class="w-full" value="0.8" min="0.5" max="1.0" step="0.05">
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3 mt-4">
+      <button class="btn btn-purple text-xs" onclick="rsiPatternsLoad()">Analyse RSI Patterns</button>
+      <span id="rsi-status" class="text-xs text-slate-400"></span>
+    </div>
+    <p class="text-[11px] text-slate-500 mt-3">Methodology: loads c_5m candles, fits RSI Mean Reversion on the trailing window, then evaluates every signal in the selected range. Profit assumes $1 risk per trade (win +1, loss -1).</p>
+  </div>
+
+  <div id="rsi-summary" class="grid gap-4 mb-4" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))"></div>
+
+  <div class="grid gap-4 mb-4 lg:grid-cols-2">
+    <div id="rsi-volatility" class="card p-5"></div>
+    <div id="rsi-patterns" class="card p-5"></div>
+  </div>
+
+  <div class="grid gap-4 mb-4 lg:grid-cols-2">
+    <div id="rsi-zones" class="card p-5"></div>
+    <div id="rsi-bb" class="card p-5"></div>
+  </div>
+
+  <div id="rsi-volume" class="card p-5 mb-4"></div>
+  <div id="rsi-per-day" class="card p-5 mb-4"></div>
+  <div id="rsi-signals" class="card p-5 mb-4"></div>
+</div>

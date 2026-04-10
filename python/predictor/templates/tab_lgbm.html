@@ -1,0 +1,67 @@
+<div id="panel-lgbm" class="hidden">
+  <div class="card p-6 mb-6">
+    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between mb-4">
+      <div>
+        <h2 class="text-lg font-semibold">LightGBM Feature Importance</h2>
+        <p class="text-xs text-slate-400">Train a LightGBM snapshot on any range and inspect normalized feature weights to decide which blocks to disable.</p>
+      </div>
+      <div class="flex gap-2 flex-wrap text-[11px] text-slate-400">
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-400"></span>High weight</span>
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-slate-500"></span>Low weight</span>
+      </div>
+    </div>
+
+    <div class="grid gap-4 md:grid-cols-2">
+      <label class="text-[10px] uppercase tracking-wide text-slate-500 flex flex-col gap-1">
+        Train Start
+        <input type="date" id="lgbm-train-start" class="input input-slate text-xs px-2 py-1" />
+      </label>
+      <label class="text-[10px] uppercase tracking-wide text-slate-500 flex flex-col gap-1">
+        Train End
+        <input type="date" id="lgbm-train-end" class="input input-slate text-xs px-2 py-1" />
+      </label>
+      <label class="text-[10px] uppercase tracking-wide text-slate-500 flex flex-col gap-1">
+        Table
+        <input type="text" id="lgbm-table" value="c_5m" class="input input-slate text-xs px-2 py-1" />
+      </label>
+      <label class="text-[10px] uppercase tracking-wide text-slate-500 flex flex-col gap-1">
+        Horizon (candles)
+        <input type="number" id="lgbm-horizon" value="2" min="1" class="input input-slate text-xs px-2 py-1" />
+      </label>
+      <label class="text-[10px] uppercase tracking-wide text-slate-500 flex flex-col gap-1">
+        Top N Features
+        <input type="number" id="lgbm-topn" value="40" min="5" max="200" step="5" class="input input-slate text-xs px-2 py-1" />
+      </label>
+      <div class="flex items-end gap-2">
+        <button type="button" class="btn btn-slate text-xs" onclick="lgbmFiSetRangePreset(30)">Last 30d</button>
+        <button type="button" class="btn btn-slate text-xs" onclick="lgbmFiSetRangePreset(90)">Last 90d</button>
+        <button type="button" class="btn btn-slate text-xs" onclick="lgbmFiSetRangePreset(180)">Last 180d</button>
+      </div>
+    </div>
+
+    <div class="mt-4">
+      <label class="text-[10px] uppercase tracking-wide text-slate-500 flex flex-col gap-1">
+        Params JSON (optional)
+        <textarea id="lgbm-params" rows="4" class="w-full font-mono text-xs" placeholder='{"n_estimators":400,"learning_rate":0.02,"num_leaves":31,"subsample":0.8,"colsample_bytree":0.8,"min_child_samples":20,"lambda_l1":0.1,"lambda_l2":0.1,"threshold":0.55}'></textarea>
+      </label>
+    </div>
+
+    <div class="mt-4 flex gap-3 flex-wrap items-center">
+      <button type="button" class="btn btn-primary text-xs" onclick="lgbmFiRun()" id="lgbm-run-btn">Compute Feature Importance</button>
+      <span id="lgbm-run-status" class="text-[12px] text-slate-400"></span>
+    </div>
+  </div>
+
+  <div class="card p-6">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h3 class="text-base font-semibold">Feature Importance</h3>
+        <p class="text-[11px] text-slate-400">Weights are normalized (sum = 1). Use this to disable lowest-impact feature blocks.</p>
+      </div>
+      <button type="button" class="btn btn-slate text-xs" onclick="lgbmFiCopyJson()">Copy JSON</button>
+    </div>
+    <div id="lgbm-fi-error" class="hidden text-[12px] text-rose-400 mb-3"></div>
+    <div id="lgbm-fi-summary" class="text-[12px] text-slate-300 mb-2">Run the analyzer to see weights.</div>
+    <div id="lgbm-fi-table" class="overflow-auto text-xs"></div>
+  </div>
+</div>

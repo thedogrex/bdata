@@ -39,6 +39,7 @@ class XGBoostStrategy(BaseStrategy):
             "max_bin": 256,
             "n_jobs": 4,
             "threshold": 0.53,
+            "deterministic": True,
         }
 
     @staticmethod
@@ -57,6 +58,7 @@ class XGBoostStrategy(BaseStrategy):
             "max_bin": "Max number of bins for histogram algorithm (tree_method='hist'). Lower can be faster. Typical: 128-512.",
             "n_jobs": "CPU threads for training/prediction. Limit this to keep realtime market polling responsive. Typical: 2-8.",
             "threshold": "Minimum probability to make a prediction. Higher = fewer but more confident signals. Typical: 0.50-0.55.",
+            "deterministic": "If True, disables subsampling randomness and forces single-threaded training for reproducible runs.",
         }
 
     def fit(self, df: pd.DataFrame, horizon: int = 1) -> None:
@@ -75,12 +77,21 @@ class XGBoostStrategy(BaseStrategy):
         self.scaler.fit(X)
         X_scaled = self.scaler.transform(X)
 
+        deterministic = bool(self.params.get("deterministic", True))
+        base_subsample = float(self.params.get("subsample", 0.85))
+        base_colsample = float(self.params.get("colsample_bytree", 0.85))
+        base_n_jobs = int(self.params.get("n_jobs", 4))
+
+        effective_subsample = 0.8 if deterministic else base_subsample
+        effective_colsample = 0.8 if deterministic else base_colsample
+        effective_n_jobs = 1 if deterministic else base_n_jobs
+
         self.model = xgb.XGBClassifier(
             n_estimators=int(self.params.get("n_estimators", 200)),
             max_depth=int(self.params.get("max_depth", 3)),
             learning_rate=float(self.params.get("learning_rate", 0.08)),
-            subsample=float(self.params.get("subsample", 0.85)),
-            colsample_bytree=float(self.params.get("colsample_bytree", 0.85)),
+            subsample=effective_subsample,
+            colsample_bytree=effective_colsample,
             min_child_weight=float(self.params.get("min_child_weight", 5)),
             reg_lambda=float(self.params.get("reg_lambda", 1.0)),
             reg_alpha=float(self.params.get("reg_alpha", 0.0)),
@@ -89,8 +100,9 @@ class XGBoostStrategy(BaseStrategy):
             max_bin=int(self.params.get("max_bin", 256)),
             eval_metric="logloss",
             random_state=42,
-            n_jobs=int(self.params.get("n_jobs", 4)),
+            n_jobs=effective_n_jobs,
             verbosity=0,
+            deterministic_histogram=True
         )
         self.model.fit(X_scaled, y)
 

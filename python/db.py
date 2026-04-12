@@ -1,4 +1,5 @@
 import aiomysql
+from weakref import WeakSet
 from typing import (
     Any,
     Dict,
@@ -10,6 +11,8 @@ from typing import (
 )
 
 import app.config as config
+
+_ACTIVE_DB_PROVIDERS: "WeakSet['DbProvider']" = WeakSet()
 
 
 class DbProvider:
@@ -24,6 +27,8 @@ class DbProvider:
 
         self.__db = None
         self.__cursor = None
+
+        _ACTIVE_DB_PROVIDERS.add(self)
 
         print(f'[complete] inited Mysql provider')
 
@@ -203,9 +208,11 @@ class DbProvider:
             return []
 
     async def close(self):
-        if self.__pool is not None:
-            self.__pool.close()
-            await self.__pool.wait_closed()
+        if self.__pool is None:
+            return
+        self.__pool.close()
+        await self.__pool.wait_closed()
+        self.__pool = None
 
     # -----------------------------------------------------
     async def select_one(self, table: str,
@@ -248,3 +255,12 @@ class DbProvider:
             async with conn.cursor() as cur:
                 await cur.execute(query, params)
                 return await cur.fetchone()
+
+
+async def close_all_db_providers():
+    providers = list(_ACTIVE_DB_PROVIDERS)
+    for provider in providers:
+        try:
+            await provider.close()
+        except Exception as exc:
+            print(f"[DbProvider] close error: {exc}")

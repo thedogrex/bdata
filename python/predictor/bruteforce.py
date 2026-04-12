@@ -2,8 +2,11 @@ import time
 import asyncio
 import itertools
 import json
+import math
+from concurrent.futures import ProcessPoolExecutor
 from typing import Any, TYPE_CHECKING
 
+from db import close_all_db_providers
 from predictor.backtester import (
     run_backtest, preload_backtest_data, run_backtest_vectorized, RULE_BASED_STRATEGIES,
 )
@@ -16,7 +19,10 @@ from predictor.db_history import (
 )
 
 BF_COMBO_DELAY_SEC = 0.2
-THRESHOLD_SWEEP_STRATEGIES = {"lightgbm"}
+THRESHOLD_SWEEP_STRATEGIES = {"lightgbm", "xgboost"}
+DEFAULT_BRUTEFORCE_PROCESSES = 1
+PARALLEL_MIN_CHUNKS_PER_WORKER = 4
+PARALLEL_MAX_COMBOS_PER_CHUNK = 1
 
 if TYPE_CHECKING:
     from predictor.task_manager import TaskProgress
@@ -154,6 +160,101 @@ def _extract_threshold_sweep(raw_values) -> list[float] | None:
     return values or None
 
 
+def _normalize_threshold_list(thresholds: list[float] | None) -> list[float] | None:
+    if not thresholds:
+        return None
+    seen_keys: set[str] = set()
+    normalized: list[float] = []
+    for raw in thresholds:
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        key = f"{val:.6f}"
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        normalized.append(val)
+    return normalized or None
+
+
+def _prepare_combo_payload(
+    params: dict,
+    default_window_size: int,
+    normalized_thresholds: list[float] | None,
+) -> tuple[dict, int, dict]:
+    combo_params = dict(params)
+    combo_window = combo_params.pop("window_size", None)
+    ws = combo_window if combo_window is not None else default_window_size
+    if combo_window is not None:
+        combo_params["window_size"] = combo_window
+
+    strat_params = {k: v for k, v in combo_params.items() if k != "window_size"}
+    if normalized_thresholds and "threshold" not in strat_params:
+        strat_params["threshold"] = normalized_thresholds[0]
+
+    return combo_params, ws, strat_params
+
+
+async def _persist_combo_result(
+    result: dict,
+    params: dict,
+    horizon: int,
+    bf_id: int,
+    best_accuracy: float,
+    best_params: dict,
+    best_result: dict | None,
+) -> tuple[float, dict, dict | None, float, float | None]:
+    threshold_variants = result.pop("threshold_variants", None)
+    result["is_bruteforce"] = True
+    result["bruteforce_id"] = bf_id
+
+    combo_best_acc = -1.0
+    combo_best_thr = None
+
+    if threshold_variants:
+        base_common = {
+            k: v for k, v in result.items()
+            if k not in {"threshold_variants", "horizons", "params"}
+        }
+        for thr_key, horizon_map in threshold_variants.items():
+            try:
+                thr_val = float(thr_key)
+            except (TypeError, ValueError):
+                continue
+            variant_params = dict(params)
+            variant_params["threshold"] = thr_val
+            variant_result = dict(base_common)
+            variant_result["params"] = variant_params
+            variant_result["horizons"] = horizon_map
+            variant_result["is_bruteforce"] = True
+            variant_result["bruteforce_id"] = bf_id
+            await save_backtest_run(variant_result)
+
+            h_data = horizon_map.get(str(horizon), {})
+            acc_candidate = h_data.get("accuracy_pct", 0)
+            if acc_candidate > combo_best_acc:
+                combo_best_acc = acc_candidate
+                combo_best_thr = thr_val
+            if acc_candidate > best_accuracy:
+                best_accuracy = acc_candidate
+                best_params = variant_params
+                best_result = variant_result
+
+        acc = combo_best_acc if combo_best_acc >= 0 else 0
+    else:
+        result["params"] = params
+        await save_backtest_run(result)
+        h_data = result.get("horizons", {}).get(str(horizon), {})
+        acc = h_data.get("accuracy_pct", 0)
+        if acc > best_accuracy:
+            best_accuracy = acc
+            best_params = params
+            best_result = result
+
+    return best_accuracy, best_params, best_result, acc, combo_best_thr
+
+
 async def _run_bf_loop(
     bf_id: int,
     strategy: str,
@@ -173,38 +274,49 @@ async def _run_bf_loop(
     elapsed_before: float,
     progress: "TaskProgress | None",
     threshold_sweep: list[float] | None,
+    processes: int = DEFAULT_BRUTEFORCE_PROCESSES,
 ) -> dict:
     """
     Core brute-force loop shared by run_bruteforce and resume_bruteforce.
     Checkpoints to DB after every combo. Supports pause/cancel with DB persistence.
     """
+    processes = max(1, int(processes or 1))
+    if processes > 1:
+        return await _run_bf_loop_parallel(
+            bf_id=bf_id,
+            strategy=strategy,
+            combos=combos,
+            train_start=train_start,
+            train_end=train_end,
+            test_start=test_start,
+            test_end=test_end,
+            horizon=horizon,
+            table=table,
+            default_window_size=default_window_size,
+            retrain_every=retrain_every,
+            skip_params_set=skip_params_set,
+            initial_completed=initial_completed,
+            initial_best_accuracy=initial_best_accuracy,
+            initial_best_params=initial_best_params,
+            elapsed_before=elapsed_before,
+            progress=progress,
+            threshold_sweep=threshold_sweep,
+            processes=processes,
+        )
+
     total = len(combos)
     best_accuracy = initial_best_accuracy
     best_params = initial_best_params.copy() if initial_best_params else {}
     best_result = None
     completed = initial_completed
 
-    normalized_thresholds = None
-    if threshold_sweep:
-        seen_keys: set[str] = set()
-        normalized_thresholds = []
-        for raw in threshold_sweep:
-            try:
-                val = float(raw)
-            except (TypeError, ValueError):
-                continue
-            key = f"{val:.6f}"
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            normalized_thresholds.append(val)
-        if not normalized_thresholds:
-            normalized_thresholds = None
+    normalized_thresholds = _normalize_threshold_list(threshold_sweep)
 
     if progress:
         progress.total = total
         progress.extra["bruteforce_id"] = bf_id
         progress.extra["state"] = "preloading"
+        progress.extra["total_combos"] = total
         progress.phase = "Preloading data (candles + features)..."
 
     # ── Preload data once for ALL combos ──
@@ -226,6 +338,12 @@ async def _run_bf_loop(
         params_key = json.dumps(params, sort_keys=True, ensure_ascii=False)
         if params_key in skip_params_set:
             continue
+
+        combo_params, ws, strat_params = _prepare_combo_payload(
+            params,
+            default_window_size,
+            normalized_thresholds,
+        )
 
         # Check pause/cancel before each combo
         if progress:
@@ -250,25 +368,13 @@ async def _run_bf_loop(
                     f"BF {round((completed/max(total,1))*100,1)}% | "
                     f"Combo {completed+1}/{total} | "
                     f"best: {best_accuracy}% | "
-                    f"params: {json.dumps(params, ensure_ascii=False)[:160]}"
+                    f"params: {json.dumps(combo_params, ensure_ascii=False)[:160]}"
                 )
             )
             progress.extra["best_accuracy"] = best_accuracy
             progress.extra["best_params"] = best_params
             progress.extra["completed"] = completed
-            progress.extra["current_params"] = params
-
-        # Extract window_size from combo params if present
-        combo_window = params.pop("window_size", None) if "window_size" in params else None
-        ws = combo_window if combo_window is not None else default_window_size
-        # Put it back for saving
-        if combo_window is not None:
-            params["window_size"] = combo_window
-
-        # Build strategy params (without window_size)
-        strat_params = {k: v for k, v in params.items() if k != "window_size"}
-        if normalized_thresholds and "threshold" not in strat_params:
-            strat_params["threshold"] = normalized_thresholds[0]
+            progress.extra["current_params"] = combo_params
 
         try:
             combo_t0 = time.time()
@@ -308,52 +414,15 @@ async def _run_bf_loop(
             if isinstance(result, dict) and result.get("error"):
                 raise RuntimeError(str(result.get("error")))
 
-            threshold_variants = result.pop("threshold_variants", None)
-            result["is_bruteforce"] = True
-            result["bruteforce_id"] = bf_id
-
-            combo_best_acc = -1.0
-            combo_best_thr = None
-
-            if threshold_variants:
-                base_common = {
-                    k: v for k, v in result.items()
-                    if k not in {"threshold_variants", "horizons", "params"}
-                }
-                for thr_key, horizon_map in threshold_variants.items():
-                    try:
-                        thr_val = float(thr_key)
-                    except (TypeError, ValueError):
-                        continue
-                    variant_params = dict(params)
-                    variant_params["threshold"] = thr_val
-                    variant_result = dict(base_common)
-                    variant_result["params"] = variant_params
-                    variant_result["horizons"] = horizon_map
-                    variant_result["is_bruteforce"] = True
-                    variant_result["bruteforce_id"] = bf_id
-                    await save_backtest_run(variant_result)
-
-                    h_data = horizon_map.get(str(horizon), {})
-                    acc_candidate = h_data.get("accuracy_pct", 0)
-                    if acc_candidate > combo_best_acc:
-                        combo_best_acc = acc_candidate
-                        combo_best_thr = thr_val
-                    if acc_candidate > best_accuracy:
-                        best_accuracy = acc_candidate
-                        best_params = variant_params
-                        best_result = variant_result
-
-                acc = combo_best_acc if combo_best_acc >= 0 else 0
-            else:
-                result["params"] = params
-                await save_backtest_run(result)
-                h_data = result.get("horizons", {}).get(str(horizon), {})
-                acc = h_data.get("accuracy_pct", 0)
-                if acc > best_accuracy:
-                    best_accuracy = acc
-                    best_params = params
-                    best_result = result
+            best_accuracy, best_params, best_result, acc, combo_best_thr = await _persist_combo_result(
+                result,
+                combo_params,
+                horizon,
+                bf_id,
+                best_accuracy,
+                best_params,
+                best_result,
+            )
 
             if combo_best_thr is not None and progress:
                 progress.extra["last_threshold"] = combo_best_thr
@@ -449,6 +518,320 @@ async def _run_bf_loop(
     }
 
 
+async def _run_bf_loop_parallel(
+    bf_id: int,
+    strategy: str,
+    combos: list[dict],
+    train_start: str,
+    train_end: str,
+    test_start: str,
+    test_end: str,
+    horizon: int,
+    table: str,
+    default_window_size: int,
+    retrain_every: int,
+    skip_params_set: set[str],
+    initial_completed: int,
+    initial_best_accuracy: float,
+    initial_best_params: dict,
+    elapsed_before: float,
+    progress: "TaskProgress | None",
+    threshold_sweep: list[float] | None,
+    processes: int,
+) -> dict:
+    total = len(combos)
+    best_accuracy = initial_best_accuracy
+    best_params = initial_best_params.copy() if initial_best_params else {}
+    best_result = None
+    completed = initial_completed
+    normalized_thresholds = _normalize_threshold_list(threshold_sweep)
+
+    pending_combos: list[dict] = []
+    skip_keys = skip_params_set or set()
+    for combo in combos:
+        combo_key = json.dumps(combo, sort_keys=True, ensure_ascii=False)
+        if combo_key in skip_keys:
+            continue
+        pending_combos.append(combo)
+
+    worker_count = max(1, min(processes, len(pending_combos) or 1))
+    t0 = time.time()
+
+    if not pending_combos:
+        total_time = elapsed_before + (time.time() - t0)
+        await update_bruteforce_session(bf_id, {
+            "completed": completed,
+            "best_accuracy": best_accuracy,
+            "best_params_json": best_params,
+            "status": "done",
+            "total_time_sec": round(total_time, 2),
+        })
+        if progress:
+            progress.update(total, total, "Done (nothing to process)")
+            progress.extra["best_accuracy"] = best_accuracy
+            progress.extra["best_params"] = best_params
+        return {
+            "bruteforce_id": bf_id,
+            "strategy": strategy,
+            "total_combos": total,
+            "completed": completed,
+            "best_accuracy": best_accuracy,
+            "best_params": best_params,
+            "best_result": best_result,
+            "total_time_sec": round(total_time, 2),
+        }
+
+    chunk_target = max(worker_count * PARALLEL_MIN_CHUNKS_PER_WORKER, 1)
+    chunk_size = max(1, math.ceil(len(pending_combos) / chunk_target))
+    if PARALLEL_MAX_COMBOS_PER_CHUNK:
+        chunk_size = min(chunk_size, PARALLEL_MAX_COMBOS_PER_CHUNK)
+    chunks = [
+        pending_combos[i:i + chunk_size]
+        for i in range(0, len(pending_combos), chunk_size)
+    ]
+    chunks_total = len(chunks)
+    chunks_done = 0
+
+    if progress:
+        progress.total = total
+        progress.extra["bruteforce_id"] = bf_id
+        progress.extra["state"] = "parallel"
+        progress.extra["completed"] = completed
+        progress.extra["total_combos"] = total
+        progress.extra["parallel_workers"] = worker_count
+        progress.extra["parallel_chunk_size"] = chunk_size
+        progress.extra["parallel_chunks_total"] = chunks_total
+        progress.extra["parallel_chunks_done"] = chunks_done
+        progress.phase = (
+            f"Parallel mode: {worker_count} worker(s), {chunks_total} chunk(s) (~{chunk_size} combos each)"
+        )
+
+    loop = asyncio.get_running_loop()
+    futures = []
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        for chunk in chunks:
+            payload = {
+                "bf_id": bf_id,
+                "strategy": strategy,
+                "combos": chunk,
+                "train_start": train_start,
+                "train_end": train_end,
+                "test_start": test_start,
+                "test_end": test_end,
+                "horizon": horizon,
+                "table": table,
+                "default_window_size": default_window_size,
+                "retrain_every": retrain_every,
+                "threshold_sweep": normalized_thresholds,
+            }
+            futures.append(loop.run_in_executor(executor, _bf_worker_entry, payload))
+
+        for fut in asyncio.as_completed(futures):
+            try:
+                worker_result = await fut
+            except Exception:
+                # Propagate after marking session paused
+                elapsed_now = time.time() - t0
+                await update_bruteforce_session(bf_id, {
+                    "completed": completed,
+                    "best_accuracy": best_accuracy,
+                    "best_params_json": best_params,
+                    "status": "paused",
+                    "elapsed_before_pause": elapsed_before + elapsed_now,
+                    "total_time_sec": round(elapsed_before + elapsed_now, 2),
+                })
+                raise
+
+            processed = worker_result.get("processed", 0)
+            completed += processed
+
+            worker_best_acc = worker_result.get("best_accuracy", -1)
+            if worker_best_acc is not None and worker_best_acc > best_accuracy:
+                best_accuracy = worker_best_acc
+                candidate_params = worker_result.get("best_params")
+                if candidate_params:
+                    best_params = candidate_params
+                candidate_result = worker_result.get("best_result")
+                if candidate_result:
+                    best_result = candidate_result
+
+            elapsed_now = time.time() - t0
+            await update_bruteforce_session(bf_id, {
+                "completed": completed,
+                "best_accuracy": best_accuracy,
+                "best_params_json": best_params,
+                "total_time_sec": round(elapsed_before + elapsed_now, 2),
+            })
+
+            last_accuracy = worker_result.get("last_accuracy", 0)
+            print(
+                f"[BF {bf_id}] chunk finished +{processed} | "
+                f"{completed}/{total} combos | last {round(last_accuracy,2)}% | "
+                f"best {round(best_accuracy,2)}%",
+                flush=True,
+            )
+
+            chunks_done += 1
+
+            if progress:
+                last_params = worker_result.get("last_params")
+                last_accuracy = worker_result.get("last_accuracy", 0)
+                if last_params:
+                    progress.extra["current_params"] = last_params
+                if worker_result.get("last_threshold") is not None:
+                    progress.extra["last_threshold"] = worker_result["last_threshold"]
+                progress.extra["last_accuracy"] = last_accuracy
+                progress.extra["last_combo_time_sec"] = round(worker_result.get("elapsed", 0), 2)
+                progress.extra["completed"] = completed
+                progress.extra["remaining"] = max(total - completed, 0)
+                progress.extra["best_accuracy"] = best_accuracy
+                progress.extra["parallel_chunks_done"] = chunks_done
+                progress.extra["parallel_chunks_total"] = chunks_total
+                progress.phase = (
+                    f"BF {round((completed/max(total,1))*100,1)}% | "
+                    f"Combos {completed}/{total} | "
+                    f"last acc: {round(last_accuracy, 2)}% | best: {round(best_accuracy, 2)}%"
+                )
+                progress.update(completed, total, progress.phase)
+
+            for err in worker_result.get("errors", []):
+                print(f"[BF {bf_id}] Worker error: {err}", flush=True)
+
+    total_time = elapsed_before + (time.time() - t0)
+    await update_bruteforce_session(bf_id, {
+        "completed": completed,
+        "best_accuracy": best_accuracy,
+        "best_params_json": best_params,
+        "status": "done",
+        "total_time_sec": round(total_time, 2),
+    })
+
+    if progress:
+        progress.update(total, total, "Done")
+        progress.extra["best_accuracy"] = best_accuracy
+        progress.extra["best_params"] = best_params
+
+    return {
+        "bruteforce_id": bf_id,
+        "strategy": strategy,
+        "total_combos": total,
+        "completed": completed,
+        "best_accuracy": best_accuracy,
+        "best_params": best_params,
+        "best_result": best_result,
+        "total_time_sec": round(total_time, 2),
+    }
+
+
+def _bf_worker_entry(payload: dict) -> dict:
+    return asyncio.run(_bf_worker_async(payload))
+
+
+async def _bf_worker_async(payload: dict) -> dict:
+    try:
+        combos = payload.get("combos") or []
+        start = time.time()
+        processed = 0
+        best_accuracy = -1.0
+        best_params: dict[str, Any] = {}
+        best_result: dict | None = None
+        last_params: dict | None = None
+        last_accuracy = 0.0
+        last_threshold = None
+        errors: list[str] = []
+
+        normalized_thresholds = _normalize_threshold_list(payload.get("threshold_sweep"))
+        is_fast = payload["strategy"] in RULE_BASED_STRATEGIES
+
+        preloaded = await preload_backtest_data(
+            payload["train_start"],
+            payload["train_end"],
+            payload["test_start"],
+            payload["test_end"],
+            [payload["horizon"]],
+            payload["table"],
+        )
+        if not preloaded["test_indices"]:
+            raise RuntimeError("No test data found in the given range")
+
+        for combo in combos:
+            combo_params = None
+            try:
+                combo_params, ws, strat_params = _prepare_combo_payload(
+                    combo,
+                    payload["default_window_size"],
+                    normalized_thresholds,
+                )
+
+                if is_fast:
+                    result = run_backtest_vectorized(
+                        strategy_name=payload["strategy"],
+                        strategy_params=strat_params,
+                        preloaded=preloaded,
+                        horizons=[payload["horizon"]],
+                        window_size=ws,
+                        retrain_every=payload["retrain_every"],
+                        train_start=payload["train_start"],
+                        train_end=payload["train_end"],
+                        test_start=payload["test_start"],
+                        test_end=payload["test_end"],
+                        table=payload["table"],
+                    )
+                else:
+                    result = await run_backtest(
+                        strategy_name=payload["strategy"],
+                        strategy_params=strat_params,
+                        train_start=payload["train_start"],
+                        train_end=payload["train_end"],
+                        test_start=payload["test_start"],
+                        test_end=payload["test_end"],
+                        horizons=[payload["horizon"]],
+                        table=payload["table"],
+                        window_size=ws,
+                        retrain_every=payload["retrain_every"],
+                        preloaded=preloaded,
+                        threshold_sweep=normalized_thresholds,
+                    )
+
+                if isinstance(result, dict) and result.get("error"):
+                    raise RuntimeError(str(result.get("error")))
+
+                best_accuracy, best_params, best_result, acc, combo_best_thr = await _persist_combo_result(
+                    result,
+                    combo_params,
+                    payload["horizon"],
+                    payload["bf_id"],
+                    best_accuracy,
+                    best_params,
+                    best_result,
+                )
+
+                last_params = combo_params
+                last_accuracy = acc
+                last_threshold = combo_best_thr
+
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{combo_params or combo} -> {exc}")
+                print(f"[BF {payload['bf_id']}] Worker combo error: {exc}", flush=True)
+            finally:
+                processed += 1
+
+        elapsed = time.time() - start
+        return {
+            "processed": processed,
+            "best_accuracy": best_accuracy,
+            "best_params": best_params,
+            "best_result": best_result,
+            "elapsed": elapsed,
+            "last_params": last_params,
+            "last_accuracy": last_accuracy,
+            "last_threshold": last_threshold,
+            "errors": errors,
+        }
+    finally:
+        await close_all_db_providers()
+
+
 async def run_bruteforce(
     strategy: str,
     param_grid: dict[str, list],
@@ -461,6 +844,7 @@ async def run_bruteforce(
     window_size: int = 5000,
     retrain_every: int = 500,
     max_combos: int = 200,
+    processes: int = DEFAULT_BRUTEFORCE_PROCESSES,
     progress: "TaskProgress | None" = None,
 ) -> dict:
     """
@@ -480,6 +864,11 @@ async def run_bruteforce(
     total = len(combos)
 
     # Save session with full combo list for resume
+    combo_payload = {
+        "items": combos,
+        "processes": max(1, int(processes or 1)),
+    }
+
     bf_id = await save_bruteforce_session({
         "strategy": strategy,
         "param_grid": param_grid,
@@ -492,7 +881,7 @@ async def run_bruteforce(
         "window_size": window_size,
         "retrain_every": retrain_every,
         "total_combos": total,
-        "combos": combos,
+        "combos": combo_payload,
     })
 
     return await _run_bf_loop(
@@ -514,6 +903,7 @@ async def run_bruteforce(
         elapsed_before=0.0,
         progress=progress,
         threshold_sweep=threshold_sweep,
+        processes=processes,
     )
 
 
@@ -533,6 +923,7 @@ async def resume_bruteforce(
         raise ValueError(f"Session {bf_id} is already completed")
 
     combos = session["combos"]
+    processes = session["processes"]
     if not combos:
         raise ValueError(f"Session {bf_id} has no saved combo list — cannot resume")
 
@@ -577,4 +968,5 @@ async def resume_bruteforce(
         elapsed_before=session.get("elapsed_before_pause", 0.0),
         progress=progress,
         threshold_sweep=threshold_sweep,
+        processes=processes,
     )

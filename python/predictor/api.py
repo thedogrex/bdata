@@ -3,6 +3,7 @@ import time
 import asyncio
 import pathlib
 import traceback
+import logging
 from typing import Optional
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
@@ -34,6 +35,12 @@ from predictor import predict_4s
 from predictor.binance_snapshot import start_snapshot_collector, stop_snapshot_collector
 import app.config as config
 
+BRUTEFORCE_ONLY_MODE = bool(getattr(config, "ONLY_BRUTEFORCE", False))
+logger = logging.getLogger("predictor.api")
+POLY_DISABLED_MESSAGE = {
+    "error": "Polymarket endpoints are disabled when ONLY_BRUTEFORCE mode is enabled",
+}
+
 app = FastAPI(title="Candle Predictor & Backtester", version="3.0.0", root_path=config.FASTAPI_ROOT)
 
 app.add_middleware(
@@ -42,6 +49,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def block_poly_when_bruteforce_only(request: Request, call_next):
+    if BRUTEFORCE_ONLY_MODE:
+        path = request.url.path
+        if path.startswith("/api/poly") or path.startswith("/api/analytics") or path.startswith("/api/compare_asume"):
+            return JSONResponse(status_code=503, content=POLY_DISABLED_MESSAGE)
+    return await call_next(request)
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -90,10 +106,12 @@ class BruteforceRequest(BaseModel):
     test_start: str = "2025-07-01"
     test_end: str = "2026-01-31"
     horizon: int = 1
+    horizons: list[int] | None = None
     table: str = "c_5m"
     window_size: int = 5000
     retrain_every: int = 500
     max_combos: int = 100
+    processes: int = 1  # See predictor.bruteforce.DEFAULT_BRUTEFORCE_PROCESSES
 
 
 class SettingsRequest(BaseModel):
@@ -196,6 +214,9 @@ async def api_list_strategies():
 @app.on_event("startup")
 async def startup_event():
     global poly_stop_event
+    if BRUTEFORCE_ONLY_MODE:
+        logger.info("ONLY_BRUTEFORCE mode enabled: skipping Polymarket polling/telegram/snapshots startup")
+        return
     poly_stop_event = asyncio.Event()
     asyncio.create_task(poly_service.poll_loop(poly_stop_event, orderbook_interval_sec=3))
     telegram_bot.start_polling()
@@ -205,6 +226,8 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     global poly_stop_event
+    if BRUTEFORCE_ONLY_MODE:
+        return
     if poly_stop_event is not None:
         poly_stop_event.set()
     await telegram_bot.stop_polling()
@@ -638,8 +661,15 @@ async def api_best_runs(
     horizon: int = Query(1),
     signals_min: int | None = Query(None),
     signals_max: int | None = Query(None),
+    bruteforce_id: int | None = Query(None),
 ):
-    return await get_best_runs(limit, horizon, signals_min=signals_min, signals_max=signals_max)
+    return await get_best_runs(
+        limit,
+        horizon,
+        signals_min=signals_min,
+        signals_max=signals_max,
+        bruteforce_id=bruteforce_id,
+    )
 
 
 @app.post("/api/best/compare")
@@ -696,6 +726,15 @@ async def api_run_bruteforce(req: BruteforceRequest):
     combos_count = len(build_combos(grid))
     actual_count = min(combos_count, req.max_combos)
 
+    selected_horizon = req.horizon
+    if (selected_horizon is None or selected_horizon <= 0) and req.horizons:
+        for h in req.horizons:
+            if h and h > 0:
+                selected_horizon = h
+                break
+    if selected_horizon is None or selected_horizon <= 0:
+        selected_horizon = 1
+
     async def _run(progress):
         return await run_bruteforce(
             strategy=req.strategy,
@@ -704,15 +743,16 @@ async def api_run_bruteforce(req: BruteforceRequest):
             train_end=req.train_end,
             test_start=req.test_start,
             test_end=req.test_end,
-            horizon=req.horizon,
+            horizon=selected_horizon,
             table=req.table,
             window_size=req.window_size,
             retrain_every=req.retrain_every,
             max_combos=req.max_combos,
+            processes=req.processes,
             progress=progress,
         )
 
-    label = f"BruteForce {req.strategy} H{req.horizon} ({actual_count} combos)"
+    label = f"BruteForce {req.strategy} H{selected_horizon} ({actual_count} combos)"
     task_id = task_mgr.enqueue("bruteforce", label, _run, total=actual_count)
     return {"task_id": task_id, "status": "queued", "label": label, "combos": actual_count}
 

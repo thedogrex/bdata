@@ -426,7 +426,8 @@ async def get_bruteforce_sessions(limit: int = 50) -> list[dict]:
         f"s.test_start, s.test_end, s.tbl, s.horizon, s.window_size, s.retrain_every, "
         f"s.total_combos, s.completed, s.best_accuracy, s.best_params_json, "
         f"s.status, s.total_time_sec, s.elapsed_before_pause, s.created_at, "
-        f"COALESCE(h.signals, 0) as total_signals "
+        f"COALESCE(h.signals, 0) as total_signals, "
+        f"(SELECT COUNT(*) FROM backtest_runs br WHERE br.bruteforce_id = s.id) AS run_count "
         f"FROM bruteforce_sessions s "
         f"LEFT JOIN backtest_runs r ON r.id = ( "
         f"  SELECT r2.id "
@@ -474,6 +475,7 @@ async def get_bruteforce_sessions(limit: int = 50) -> list[dict]:
             "created_at": str(r[18]) if r[18] else "",
             "signals": r[19] or None,
             "avg_signals_per_month": avg_signals_per_month,
+            "run_count": r[20] or 0,
         })
     return results
 
@@ -502,7 +504,7 @@ async def get_bruteforce_session_by_id(bf_id: int) -> Optional[dict]:
         "window_size": row[9],
         "retrain_every": row[10],
         "total_combos": row[11],
-        "combos": json.loads(row[12]) if row[12] else [],
+        **_parse_combos_payload(row[12]),
         "completed": row[13],
         "best_accuracy": row[14],
         "best_params": json.loads(row[15]) if row[15] else {},
@@ -511,6 +513,24 @@ async def get_bruteforce_session_by_id(bf_id: int) -> Optional[dict]:
         "elapsed_before_pause": row[18],
         "created_at": str(row[19]) if row[19] else "",
     }
+
+
+def _parse_combos_payload(raw_json: str | None) -> dict:
+    if not raw_json:
+        return {"combos": [], "processes": 1}
+    try:
+        decoded = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return {"combos": [], "processes": 1}
+    if isinstance(decoded, dict):
+        combos = decoded.get("items")
+        if not isinstance(combos, list):
+            combos = []
+        processes = decoded.get("processes", 1)
+        return {"combos": combos, "processes": max(1, int(processes or 1))}
+    if isinstance(decoded, list):
+        return {"combos": decoded, "processes": 1}
+    return {"combos": [], "processes": 1}
 
 
 async def get_completed_combo_indices(
@@ -612,6 +632,7 @@ async def get_best_runs(
     horizon: int = 1,
     signals_min: int | None = None,
     signals_max: int | None = None,
+    bruteforce_id: int | None = None,
 ) -> list[dict]:
     """Get top N runs sorted by accuracy for a given horizon."""
     where = ["h.horizon = %s", "h.signals > 0"]
@@ -622,6 +643,9 @@ async def get_best_runs(
     if signals_max is not None:
         where.append("h.signals <= %s")
         params.append(int(signals_max))
+    if bruteforce_id is not None:
+        where.append("r.bruteforce_id = %s")
+        params.append(int(bruteforce_id))
 
     rows = await db.fetchall(f"""
         SELECT r.id, r.strategy, r.params_json, r.train_start, r.train_end,

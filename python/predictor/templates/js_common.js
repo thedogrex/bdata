@@ -2,6 +2,8 @@ function fmtTime(s){if(!s||s<=0)return'--';const m=Math.floor(s/60);const sec=Ma
 function accClass(a){return a>=54?'accuracy-good':a>=51?'accuracy-ok':'accuracy-bad'}
 function statusBadge(s){const m={running:'badge-run',paused:'badge-pause',done:'badge-done',error:'badge-err',cancelled:'badge-cancel',queued:'badge-queue'};return `<span class="badge ${m[s]||'badge-queue'}">${s}</span>`}
 
+const DEFAULT_BRUTEFORCE_PROCESSES = 6;
+
 function taskExtraLine(t){
   const e=(t&&t.extra)||{};
   const parts=[];
@@ -15,6 +17,12 @@ function taskExtraLine(t){
     parts.push('▶ Walking candles');
   } else if(state==='preloading'){
     parts.push('⏳ Preloading data...');
+  } else if(state==='parallel'){
+    const workers = e.parallel_workers != null ? e.parallel_workers : '?';
+    const chunksDone = e.parallel_chunks_done != null ? e.parallel_chunks_done : e.completed || 0;
+    const chunksTotal = e.parallel_chunks_total != null ? e.parallel_chunks_total : '';
+    const chunkInfo = chunksTotal ? `${chunksDone}/${chunksTotal} chunks` : `${chunksDone} chunks`;
+    parts.push(`⚡ Parallel x${workers} (${chunkInfo})`);
   } else if(state==='done'){
     parts.push('✓ Combo done');
   }
@@ -38,6 +46,19 @@ function taskExtraLine(t){
 
   // Horizon
   if(e.horizon!=null) parts.push(`H${e.horizon}`);
+
+  const totalCombos = e.total_combos != null ? e.total_combos : (typeof t?.total === 'number' ? t.total : null);
+  const combosDone = e.completed != null ? e.completed : (typeof t?.current === 'number' ? t.current : null);
+  if(totalCombos != null && combosDone != null){
+    parts.push(`Combos: ${combosDone}/${totalCombos}`);
+  }
+
+  if(e.best_accuracy != null){
+    parts.push(`Best ${Number(e.best_accuracy).toFixed(2)}%`);
+  }
+  if(e.last_accuracy != null){
+    parts.push(`Last ${Number(e.last_accuracy).toFixed(2)}%`);
+  }
 
   return parts.length?parts.join(' | '):'';
 }
@@ -834,6 +855,14 @@ async function loadDefaultGrid(){
   try{const res=await fetch(API+'/api/bruteforce/grid/'+s);const data=await res.json();
     const cfg=data.config||data.grid;
     document.getElementById('bf-grid').value=JSON.stringify(cfg,null,2);
+    if(cfg&&typeof cfg==='object'&&cfg.horizon!=null){
+      const hInput=document.getElementById('bf-horizon');
+      if(hInput) hInput.value=cfg.horizon;
+    }
+    if(cfg&&typeof cfg==='object'&&cfg.processes!=null){
+      const pInput=document.getElementById('bf-processes');
+      if(pInput) pInput.value=cfg.processes;
+    }
     document.getElementById('bf-combos').textContent=`Total combos: ${data.total_combos}`}catch(e){}
 }
 async function runBruteforce(){
@@ -857,7 +886,16 @@ async function runBruteforce(){
     window_size: parseInt((cfg&&cfg.window_size)!=null?cfg.window_size:5000)||5000,
     retrain_every: parseInt((cfg&&cfg.retrain_every)!=null?cfg.retrain_every:500)||500,
     max_combos: parseInt((cfg&&cfg.max_combos)!=null?cfg.max_combos:100)||100,
+    processes: parseInt((cfg&&cfg.processes)!=null?cfg.processes:DEFAULT_BRUTEFORCE_PROCESSES)||DEFAULT_BRUTEFORCE_PROCESSES,
   };
+  const manualHorizon=parseInt(document.getElementById('bf-horizon')?.value,10);
+  if(!isNaN(manualHorizon) && manualHorizon>0){
+    body.horizon=manualHorizon;
+  }
+  const manualProcesses=parseInt(document.getElementById('bf-processes')?.value,10);
+  if(!isNaN(manualProcesses) && manualProcesses>0){
+    body.processes=manualProcesses;
+  }
   const res=await fetch(API+'/api/bruteforce',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const data=await res.json();
   if(data.error){alert(data.error);return}
@@ -1068,6 +1106,8 @@ async function histLoadBfRuns(bfId){
     st.runs=Array.isArray(data.runs)?data.runs:[];
     st.total=data.total||0;
     st.page=Math.max(1,Math.min(st.page, Math.max(1, Math.ceil(st.total/st.pageSize))));
+    const countEl=document.getElementById(`hist-bf-runcount-${bfId}`);
+    if(countEl) countEl.textContent=st.total;
   }catch(e){
     st.runs=[];
     st.total=0;
@@ -1189,9 +1229,11 @@ async function loadHistory(){
       const s=it.session;
       const bfId=s.id;
       const bestAcc=s.best_accuracy||0;
+      const horizonLabel = s.horizon!=null ? `H${s.horizon}` : 'H?';
+      const summaryRuns = (s.run_count!=null ? s.run_count : (s.completed||0));
       html+=`<details class="mb-3 p-3 rounded-lg" style="background:#0f172a;border:1px solid #334155" ontoggle="histOnToggleBf(${bfId},this)">
         <summary class="cursor-pointer flex items-center justify-between">
-          <span><span class="badge badge-bf">BF#${bfId}</span> <b class="ml-2">${s.strategy}</b> <span class="text-slate-400 text-xs ml-2">${s.completed||0} runs</span></span>
+          <span><span class="badge badge-bf">BF#${bfId}</span> <b class="ml-2">${s.strategy}</b> <span class="text-slate-400 text-xs ml-2">${horizonLabel} · <span id="hist-bf-runcount-${bfId}">${summaryRuns}</span> runs</span></span>
           <span class="${accClass(bestAcc)} font-bold">Best: ${bestAcc}%</span>
         </summary>
         <div class="flex items-center justify-end mt-2">
@@ -1322,8 +1364,26 @@ async function clearAllHistory(){if(!confirm('Delete ALL?'))return;await fetch(A
 let bestCompareMode = false;
 let bestCompareSelected = new Set();
 let bestLastData = [];
+let bestBfSessionOptionsLoaded = false;
+
+async function bestEnsureBfSessionOptions(){
+  const select=document.getElementById('best-bf-session');
+  if(!select || bestBfSessionOptionsLoaded) return;
+  try{
+    const res=await fetch(API+'/api/bruteforce/sessions');
+    const data=await res.json();
+    const options=['<option value="">All sessions</option>'];
+    (Array.isArray(data)?data:[]).forEach(s=>{
+      const label=`BF#${s.id} · ${s.strategy || ''} · H${s.horizon ?? '?'}`;
+      options.push(`<option value="${s.id}">${label}</option>`);
+    });
+    select.innerHTML=options.join('');
+    bestBfSessionOptionsLoaded=true;
+  }catch(e){ /* ignore populate errors */ }
+}
 
 async function loadBest(){
+  await bestEnsureBfSessionOptions();
   const horizon=document.getElementById('best-horizon').value||1;const limit=document.getElementById('best-limit').value||20;
   const sMinRaw = document.getElementById('best-signals-min')?.value;
   const sMaxRaw = document.getElementById('best-signals-max')?.value;
@@ -1332,6 +1392,9 @@ async function loadBest(){
   const qs = new URLSearchParams({horizon: String(horizon), limit: String(limit)});
   if(sMin !== null && Number.isFinite(sMin)) qs.set('signals_min', String(Math.max(0, Math.floor(sMin))));
   if(sMax !== null && Number.isFinite(sMax)) qs.set('signals_max', String(Math.max(0, Math.floor(sMax))));
+  const bfSel=document.getElementById('best-bf-session');
+  const bfId=bfSel && bfSel.value ? bfSel.value.trim() : '';
+  if(bfId) qs.set('bruteforce_id', bfId);
   try{const res=await fetch(API+`/api/best?${qs.toString()}`);const data=await res.json();bestLastData=data;const el=document.getElementById('best-list');
     if(!data.length){el.innerHTML='<div class="card p-6 text-center text-slate-400">No results.</div>';return}
     renderBestList(data, horizon);

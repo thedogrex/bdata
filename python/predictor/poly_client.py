@@ -109,7 +109,7 @@ def _get_clob_client():
 # Market data (Gamma API — read-only, no auth needed)
 # ---------------------------------------------------------------------------
 
-GAMMA_BASE = "https://gamma-api.polymarket.com/markets?slug="
+GAMMA_BASE = "https://gamma-api.polymarket.com/markets/slug/"
 
 
 class PolymarketClient:

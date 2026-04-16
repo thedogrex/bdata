@@ -25,9 +25,8 @@ class MarketData:
     final_price: Optional[float] = None
     target_price: Optional[float] = None
 
-
 class PolymarketClient:
-    BASE_URL = "https://gamma-api.polymarket.com/markets?slug="
+    BASE_URL = "https://gamma-api.polymarket.com/markets/slug/"
 
     # ---------------------------------------------
     # 1. Вычисляем timestamp текущего рынка

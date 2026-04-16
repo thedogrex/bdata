@@ -472,7 +472,7 @@ def _get_current_ts() -> int:
 def _infer_resolved_outcome(m: MarketData) -> Optional[str]:
     """Infer resolved outcome from explicit Polymarket market resolution fields.
 
-    Uses only final_price vs target_price from Gamma market payload.
+    Uses final_price vs target_price from Gamma market payload.
     Returns 'UP' or 'DOWN' when both values are present, otherwise None.
     """
     if not m:
@@ -484,6 +484,21 @@ def _infer_resolved_outcome(m: MarketData) -> Optional[str]:
         target_price = getattr(m, "target_price", None)
         if final_price is not None and target_price is not None:
             return "DOWN" if float(final_price) < float(target_price) else "UP"
+    except Exception:
+        pass
+
+    # Fallback: check if market is closed and try to infer from outcome prices
+    try:
+        if m.closed and m.outcomes and len(m.outcomes) >= 2:
+            # For binary markets, the outcome with higher price is the winner
+            prices = [(o.name, float(o.price)) for o in m.outcomes]
+            prices.sort(key=lambda x: x[1], reverse=True)
+            if prices[0][1] > prices[1][1]:
+                winner = prices[0][0].upper()
+                if winner in ("YES", "UP"):
+                    return "UP"
+                elif winner in ("NO", "DOWN"):
+                    return "DOWN"
     except Exception:
         pass
 
@@ -500,7 +515,11 @@ async def _check_and_store_market_resolution(slug: str, now_ts: int) -> Optional
     try:
         m = await asyncio.to_thread(client.fetch_market, slug)
         resolved = _infer_resolved_outcome(m)
-    except Exception:
+        logger.debug("Resolution check for %s: closed=%s, final_price=%s, target_price=%s, inferred=%s",
+                     slug, getattr(m, 'closed', None), getattr(m, 'final_price', None),
+                     getattr(m, 'target_price', None), resolved)
+    except Exception as e:
+        logger.warning("Resolution fetch failed for %s: %s", slug, e)
         resolved = None
 
     if resolved:
@@ -868,7 +887,7 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                 interval = int(getattr(config, "POLY_INTERVAL_SECONDS", 300))
                 if interval <= 0:
                     interval = 300
-                min_auto_resolve_ts = int(current_ts) - interval * 7
+                min_auto_resolve_ts = int(current_ts) - interval * 100  # Extended to catch older markets
                 done_rows = await db.fetchall(
                     """
                     SELECT slug
@@ -882,11 +901,19 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     """,
                     (int(current_ts), int(min_auto_resolve_ts), int(current_time) - 60),
                 )
+                logger.debug("Resolution scan: found %d markets to check (current_ts=%s, min_ts=%s)",
+                             len(done_rows), current_ts, min_auto_resolve_ts)
+                resolved_count = 0
                 for (slug,) in done_rows:
                     try:
-                        await _check_and_store_market_resolution(str(slug), current_time)
-                    except Exception:
-                        pass
+                        result = await _check_and_store_market_resolution(str(slug), current_time)
+                        if result:
+                            resolved_count += 1
+                    except Exception as e:
+                        logger.warning("Resolution check error for %s: %s", slug, e)
+                if done_rows:
+                    logger.info("Resolution scan complete: checked %d markets, resolved %d",
+                                len(done_rows), resolved_count)
 
         except Exception as e:
             print(f"Error in poll loop: {e}")

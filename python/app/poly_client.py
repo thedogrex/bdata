@@ -60,7 +60,7 @@ class PolymarketClient:
         if not data:
             raise RuntimeError(f"Market not found: {slug}")
 
-        raw = data[0]
+        raw = data
 
         def _parse_float(v):
             try:

@@ -19,7 +19,7 @@ from predictor.db_history import (
 )
 
 BF_COMBO_DELAY_SEC = 0.2
-THRESHOLD_SWEEP_STRATEGIES = {"lightgbm", "xgboost"}
+THRESHOLD_SWEEP_STRATEGIES = {"lightgbm", "xgboost", "rsi_mean_reversion"}
 DEFAULT_BRUTEFORCE_PROCESSES = 1
 PARALLEL_MIN_CHUNKS_PER_WORKER = 4
 PARALLEL_MAX_COMBOS_PER_CHUNK = 1
@@ -51,6 +51,11 @@ PARAM_GRIDS: dict[str, dict[str, list]] = {
         "rsi_overbought": [65, 70, 75, 80],
         "bb_low": [0.15, 0.2, 0.25],
         "bb_high": [0.75, 0.8, 0.85],
+        "bb_period": [10, 14, 20, 30, 50],
+        "bb_std": [1.0, 1.5, 2.0, 2.5, 3.0],
+        "min_vol": [0.0005, 0.001, 0.002],
+        "max_vol": [0.005, 0.01, 0.02],
+        "vol_ratio_max": [1.2, 1.5, 2.0],
         "window_size": [2000, 3000, 5000, 8000],
     },
     "momentum": {
@@ -322,6 +327,7 @@ async def _run_bf_loop(
     # ── Preload data once for ALL combos ──
     preloaded = await preload_backtest_data(
         train_start, train_end, test_start, test_end, [horizon], table, progress,
+        strategy_name=strategy,
     )
     if not preloaded["test_indices"]:
         raise RuntimeError("No test data found in the given range")
@@ -393,6 +399,7 @@ async def _run_bf_loop(
                     test_start=test_start,
                     test_end=test_end,
                     table=table,
+                    threshold_sweep=normalized_thresholds,
                 )
             else:
                 # Moving-window with preloaded data (skip data reload)
@@ -750,6 +757,7 @@ async def _bf_worker_async(payload: dict) -> dict:
             payload["test_end"],
             [payload["horizon"]],
             payload["table"],
+            strategy_name=payload["strategy"],
         )
         if not preloaded["test_indices"]:
             raise RuntimeError("No test data found in the given range")
@@ -776,6 +784,7 @@ async def _bf_worker_async(payload: dict) -> dict:
                         test_start=payload["test_start"],
                         test_end=payload["test_end"],
                         table=payload["table"],
+                        threshold_sweep=normalized_thresholds,
                     )
                 else:
                     result = await run_backtest(

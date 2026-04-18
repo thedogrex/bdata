@@ -504,6 +504,7 @@ async def api_run_backtest(req: BacktestRequest):
                 horizons=req.horizons,
                 table=req.table,
                 progress=progress,
+                strategy_name=req.strategy,
             )
             result = run_backtest_vectorized(
                 strategy_name=req.strategy,

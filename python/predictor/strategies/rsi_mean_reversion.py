@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 from predictor.strategies.base import BaseStrategy
-from predictor.features import add_technical_features
+from predictor.features import add_technical_features, bollinger_components
 
 
 class RSIMeanReversionStrategy(BaseStrategy):
@@ -24,6 +24,14 @@ class RSIMeanReversionStrategy(BaseStrategy):
             "use_bb_confirm": True,
             "bb_low": 0.2,
             "bb_high": 0.8,
+            "bb_period": 20,
+            "bb_std": 2.0,
+            "min_vol": 0.0005,
+            "max_vol": 0.02,
+            "vol_ratio_max": 1.5,
+            "vol_fast_window": 20,
+            "vol_slow_window": 50,
+            "vol_spike_multiplier": 1.5,
         }
 
     @staticmethod
@@ -35,6 +43,14 @@ class RSIMeanReversionStrategy(BaseStrategy):
             "use_bb_confirm": "Whether to require Bollinger Band position confirmation. Reduces false signals.",
             "bb_low": "Lower Bollinger Band threshold for confirmation (0-1). Price must be below this to buy. Typical: 0.15-0.25.",
             "bb_high": "Upper Bollinger Band threshold for confirmation (0-1). Price must be above this to sell. Typical: 0.75-0.85.",
+            "bb_period": "Bollinger Band lookback period for confirmation. Typical: 10-50.",
+            "bb_std": "Bollinger Band standard deviation multiplier. Typical: 1.0-3.0.",
+            "min_vol": "Minimum fast volatility (log-return std) required to take trades.",
+            "max_vol": "Maximum fast volatility allowed before pausing trades.",
+            "vol_ratio_max": "Maximum fast/slow volatility ratio (regime) to allow trades.",
+            "vol_fast_window": "Rolling window (5m candles) for fast volatility.",
+            "vol_slow_window": "Rolling window for slow regime volatility.",
+            "vol_spike_multiplier": "Reject trades when vol_fast exceeds vol_slow * multiplier.",
         }
 
     def fit(self, df: pd.DataFrame, horizon: int = 1) -> None:
@@ -50,8 +66,12 @@ class RSIMeanReversionStrategy(BaseStrategy):
             self._rsi_median = float(np.median(rsi))
             self._rsi_p10 = float(np.percentile(rsi, 10))
             self._rsi_p90 = float(np.percentile(rsi, 90))
-            bb = df["bb_pos"].dropna().values if "bb_pos" in df.columns else None
-            self._bb_median = float(np.median(bb)) if bb is not None and len(bb) > 100 else 0.5
+            bb_vals = self._compute_bb_pos(df)
+            valid_bb = bb_vals[~np.isnan(bb_vals)] if bb_vals is not None else None
+            if valid_bb is not None and len(valid_bb) > 100:
+                self._bb_median = float(np.median(valid_bb))
+            else:
+                self._bb_median = 0.5
         else:
             self._rsi_median = 50.0
             self._rsi_p10 = None
@@ -70,7 +90,7 @@ class RSIMeanReversionStrategy(BaseStrategy):
 
         rsi = df[rsi_col].values.copy()
         rsi = np.nan_to_num(rsi, nan=50.0)
-        bb_pos = df["bb_pos"].values.copy() if "bb_pos" in df.columns else np.full(len(df), 0.5)
+        bb_pos = self._compute_bb_pos(df)
 
         # Blend fixed thresholds with adaptive percentiles from fit()
         base_oversold = self.params["rsi_oversold"]
@@ -95,6 +115,29 @@ class RSIMeanReversionStrategy(BaseStrategy):
             proba[bb < self.params["bb_low"]] += 0.05
             proba[bb > self.params["bb_high"]] -= 0.05
 
+        # Volatility filter — skip signals outside desired band
+        vol_metrics = self._get_vol_metrics(df)
+        if vol_metrics is not None:
+            vol_fast = vol_metrics["fast"]
+            vol_slow = vol_metrics["slow"]
+            vol_ratio = vol_metrics["ratio"]
+
+            min_vol = float(self.params.get("min_vol", 0.0))
+            max_vol = float(self.params.get("max_vol", 1.0))
+            ratio_max = float(self.params.get("vol_ratio_max", 1.5))
+            spike_mult = float(self.params.get("vol_spike_multiplier", 1.5))
+            if max_vol <= min_vol:
+                max_vol = min_vol + 1e-6
+
+            valid = np.isfinite(vol_fast) & np.isfinite(vol_slow)
+            valid &= (vol_fast > min_vol) & (vol_fast < max_vol)
+            valid &= vol_fast < (vol_slow * spike_mult)
+            if ratio_max > 0:
+                ratio_safe = np.where(np.isfinite(vol_ratio), vol_ratio, np.inf)
+                valid &= ratio_safe < ratio_max
+
+            proba[~valid] = 0.5
+
         return np.clip(proba, 0, 1)
 
     def predict(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
@@ -103,3 +146,34 @@ class RSIMeanReversionStrategy(BaseStrategy):
         preds[proba > 0.55] = 1
         preds[proba < 0.45] = 0
         return preds
+
+    def _compute_bb_pos(self, df: pd.DataFrame) -> np.ndarray:
+        period = int(self.params.get("bb_period", 20))
+        std_mult = float(self.params.get("bb_std", 2.0))
+        if period == 20 and abs(std_mult - 2.0) < 1e-9 and "bb_pos" in df.columns:
+            return df["bb_pos"].values.astype(float, copy=True)
+
+        close = df["close"].astype(float)
+        _, _, _, pos = bollinger_components(close, period=period, std_mult=std_mult)
+        return pos.values if hasattr(pos, "values") else np.array(pos, dtype=float)
+
+    def _get_vol_metrics(self, df: pd.DataFrame) -> dict | None:
+        if "close" not in df.columns:
+            return None
+
+        close = df["close"].astype(float)
+        returns = np.log(close / close.shift(1))
+
+        fast_window = max(2, int(self.params.get("vol_fast_window", 20)))
+        slow_window = max(fast_window + 1, int(self.params.get("vol_slow_window", 50)))
+
+        vol_fast = returns.rolling(fast_window).std()
+        vol_slow = returns.rolling(slow_window).std()
+        vol_ratio = vol_fast / vol_slow.replace(0, np.nan)
+        vol_ratio = vol_ratio.replace([np.inf, -np.inf], np.nan)
+
+        return {
+            "fast": vol_fast.values,
+            "slow": vol_slow.values,
+            "ratio": vol_ratio.values,
+        }

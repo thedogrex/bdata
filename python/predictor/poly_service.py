@@ -1485,6 +1485,36 @@ async def predict_for_market(
 
     strategy = get_strategy(strategy_name, strategy_params)
     strategy.fit(df_train, horizon=horizon)
+
+    bb_series_arr = None
+    if hasattr(strategy, "_compute_bb_pos"):
+        try:
+            bb_calc = strategy._compute_bb_pos(df_feat)
+            bb_series_arr = np.array(bb_calc, dtype=float, copy=False)
+            if len(bb_series_arr) != len(df_feat):
+                bb_series_arr = None
+        except Exception:
+            bb_series_arr = None
+    if bb_series_arr is None and "bb_pos" in df_feat.columns:
+        bb_series_arr = df_feat["bb_pos"].values.astype(float, copy=True)
+
+    vol_fast_arr = vol_slow_arr = vol_ratio_arr = None
+    if hasattr(strategy, "_get_vol_metrics"):
+        try:
+            vol_metrics = strategy._get_vol_metrics(df_feat)
+            if vol_metrics:
+                vol_fast_arr = np.array(vol_metrics.get("fast"), dtype=float, copy=False)
+                vol_slow_arr = np.array(vol_metrics.get("slow"), dtype=float, copy=False)
+                vol_ratio_arr = np.array(vol_metrics.get("ratio"), dtype=float, copy=False)
+                if len(vol_fast_arr) != len(df_feat):
+                    vol_fast_arr = None
+                if len(vol_slow_arr) != len(df_feat):
+                    vol_slow_arr = None
+                if len(vol_ratio_arr) != len(df_feat):
+                    vol_ratio_arr = None
+        except Exception:
+            vol_fast_arr = vol_slow_arr = vol_ratio_arr = None
+
     pred_arr = strategy.predict(df_predict, horizon=horizon)
     prob_arr = strategy.predict_proba(df_predict, horizon=horizon)
 
@@ -1505,7 +1535,20 @@ async def predict_for_market(
     period = strategy.params.get("rsi_period", 14)
     rsi_col = f"rsi_{period}" if f"rsi_{period}" in df_predict.columns else "rsi_14"
     pred_rsi = float(np.nan_to_num(df_predict[rsi_col].values[0], nan=50.0))
-    pred_bb = float(np.nan_to_num(df_predict["bb_pos"].values[0], nan=0.5)) if "bb_pos" in df_predict.columns else 0.5
+    if bb_series_arr is not None and len(bb_series_arr) == len(df_feat):
+        pred_bb = float(np.nan_to_num(bb_series_arr[-1], nan=0.5))
+    else:
+        pred_bb = float(np.nan_to_num(df_predict.get("bb_pos", pd.Series([0.5])).values[0], nan=0.5)) if "bb_pos" in df_predict.columns else 0.5
+
+    if vol_fast_arr is not None and len(vol_fast_arr) == len(df_feat):
+        pred_vol = float(np.nan_to_num(vol_fast_arr[-1], nan=0.0))
+    else:
+        pred_vol = 0.0
+
+    if vol_ratio_arr is not None and len(vol_ratio_arr) == len(df_feat):
+        pred_vol_ratio = float(np.nan_to_num(vol_ratio_arr[-1], nan=0.0))
+    else:
+        pred_vol_ratio = 0.0
 
     base_oversold = strategy.params.get("rsi_oversold", 30)
     base_overbought = strategy.params.get("rsi_overbought", 70)
@@ -1526,7 +1569,18 @@ async def predict_for_market(
         ot = int(row["open_time"])
         dt_str = pd.Timestamp(ot, unit="us").strftime("%m-%d %H:%M")
         r_rsi = float(np.nan_to_num(row[rsi_col], nan=50.0))
-        r_bb = float(np.nan_to_num(row.get("bb_pos", 0.5), nan=0.5))
+        if bb_series_arr is not None and len(bb_series_arr) > k:
+            r_bb = float(np.nan_to_num(bb_series_arr[k], nan=0.5))
+        else:
+            r_bb = float(np.nan_to_num(row.get("bb_pos", 0.5), nan=0.5))
+        if vol_fast_arr is not None and len(vol_fast_arr) > k:
+            r_vol = float(np.nan_to_num(vol_fast_arr[k], nan=0.0))
+        else:
+            r_vol = float(np.nan_to_num(row.get("volatility_20", 0.0), nan=0.0))
+        if vol_ratio_arr is not None and len(vol_ratio_arr) > k:
+            r_ratio = float(np.nan_to_num(vol_ratio_arr[k], nan=0.0))
+        else:
+            r_ratio = None
         # Re-predict each context candle to show what backtest would have said
         df_k = df_feat.iloc[[k]].reset_index(drop=True)
         k_pred = int(strategy.predict(df_k, horizon=horizon)[0])
@@ -1535,6 +1589,8 @@ async def predict_for_market(
             "dt": dt_str,
             "rsi": round(r_rsi, 1),
             "bb": round(r_bb, 3),
+            "vol": round(r_vol, 4),
+            "vol_ratio": round(r_ratio, 4) if r_ratio is not None else None,
             "prob": round(k_prob, 4),
             "pred": k_pred,
         })
@@ -1552,6 +1608,8 @@ async def predict_for_market(
         "tail_size": len(tail_detail),
         "pred_rsi": round(pred_rsi, 1),
         "pred_bb": round(pred_bb, 3),
+        "pred_volatility": round(pred_vol, 4),
+        "pred_volatility_ratio": round(pred_vol_ratio, 4),
         "tail_rsi_min": round(min(tail_rsi_vals), 1) if tail_rsi_vals else None,
         "tail_rsi_max": round(max(tail_rsi_vals), 1) if tail_rsi_vals else None,
         "tail_rsi_last": round(tail_rsi_vals[-1], 1) if tail_rsi_vals else None,

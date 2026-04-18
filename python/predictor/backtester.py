@@ -6,8 +6,17 @@ import pandas as pd
 from typing import Optional, TYPE_CHECKING
 
 from predictor.data_loader import load_candles, add_direction, add_future_directions, date_to_us
-from predictor.features import add_technical_features
+from predictor.features import add_technical_features, set_feature_usage, FEATURE_USAGE
 from predictor.strategies import get_strategy, BaseStrategy
+
+# Minimal feature blocks needed per strategy for preloading.
+# Strategies not listed here get ALL features.
+_STRATEGY_MINIMAL_FEATURES: dict[str, set[str]] = {
+    "rsi_mean_reversion": {"rsi", "bollinger"},
+    "momentum": {"macd", "momentum", "volume", "moving_averages"},
+    "stochastic_adx": {"stochastic", "adx_dmi"},
+    "candlestick_pattern": {"candlestick_patterns", "volume", "moving_averages"},
+}
 
 if TYPE_CHECKING:
     from predictor.task_manager import TaskProgress
@@ -111,6 +120,7 @@ async def run_backtest(
         progress.phase = f"Phase 3/3: Testing {len(test_indices)} candles x {len(horizons)} horizon(s)"
 
     results_by_horizon = {}
+    threshold_variant_results: dict[str, dict[str, dict]] = {}
 
     offload_cpu = _is_cpu_heavy_strategy(strategy_name)
 
@@ -383,6 +393,7 @@ async def preload_backtest_data(
     horizons: list[int],
     table: str = "c_5m",
     progress: "TaskProgress | None" = None,
+    strategy_name: str | None = None,
 ) -> dict:
     """Load candle data and compute features once, for reuse across brute-force combos."""
     t0 = time.time()
@@ -401,8 +412,20 @@ async def preload_backtest_data(
         progress.phase = f"Computing technical features for {len(df_raw)} candles..."
         await asyncio.sleep(0)
 
+    # Optimise: only compute features the strategy actually needs
+    saved_usage = dict(FEATURE_USAGE)  # snapshot
+    minimal = _STRATEGY_MINIMAL_FEATURES.get(strategy_name) if strategy_name else None
+    if minimal:
+        for key in FEATURE_USAGE:
+            set_feature_usage(**{key: key in minimal})
+
     t_feat = time.time()
-    df_feat = add_technical_features(df_raw)
+    try:
+        df_feat = add_technical_features(df_raw)
+    finally:
+        # restore global feature flags
+        for key, val in saved_usage.items():
+            FEATURE_USAGE[key] = val
     feat_time = time.time() - t_feat
 
     test_start_us = date_to_us(test_start)
@@ -432,6 +455,7 @@ def run_backtest_vectorized(
     test_start: str,
     test_end: str,
     table: str,
+    threshold_sweep: list[float] | None = None,
 ) -> dict:
     """
     Ultra-fast backtest for rule-based strategies (RSI, Momentum).
@@ -450,6 +474,7 @@ def run_backtest_vectorized(
     actual_window = min(window_size, test_start_idx)
 
     results_by_horizon = {}
+    threshold_variant_results: dict[str, dict[str, dict]] = {}
 
     for horizon in horizons:
         t1 = time.time()
@@ -480,81 +505,65 @@ def run_backtest_vectorized(
         strategy = get_strategy(strategy_name, strategy_params)
         strategy.fit(df_train, horizon)  # learns adaptive stats from training window
         prob_arr = strategy.predict_proba(df_test, horizon)
-        # Derive predictions from probabilities directly (avoids double predict_proba call)
-        thr_val = float(strategy.params.get("threshold", 0.55))
-        up_thr = max(thr_val, 1 - thr_val)
-        down_thr = 1 - up_thr
-        pred_arr = np.full(len(prob_arr), -1, dtype=np.int8)
-        pred_arr[prob_arr > up_thr] = 1
-        pred_arr[prob_arr < down_thr] = 0
+
+        base_threshold = float(strategy.params.get("threshold", 0.55))
+        sweep_thresholds = (
+            _normalize_threshold_sweep(threshold_sweep, base_threshold)
+            if threshold_sweep
+            else []
+        )
+
+        pred_arr = _apply_threshold_to_probs(prob_arr, base_threshold)
 
         actuals = df_feat[target_col].iloc[valid_test].values.astype(int)
-        preds = pred_arr.astype(int)
         probas = prob_arr.astype(float)
-
-        valid_mask = preds != -1
-        total_candles_tested = len(preds)
-
-        if valid_mask.sum() == 0:
-            results_by_horizon[str(horizon)] = {
-                "error": "All predictions were SKIP (confidence too low)",
-                "total_candles": total_candles_tested,
-                "signals": 0,
-            }
-            continue
-
-        y_true = actuals[valid_mask]
-        y_pred = preds[valid_mask]
-        y_prob = probas[valid_mask]
-        y_idxs = valid_test[valid_mask]
-
-        correct = int((y_true == y_pred).sum())
-        total_signals = int(valid_mask.sum())
-        accuracy = correct / total_signals
-
-        up_pred_mask = y_pred == 1
-        down_pred_mask = y_pred == 0
-        up_correct = int((y_true[up_pred_mask] == 1).sum()) if up_pred_mask.sum() > 0 else 0
-        down_correct = int((y_true[down_pred_mask] == 0).sum()) if down_pred_mask.sum() > 0 else 0
-        up_total = int(up_pred_mask.sum())
-        down_total = int(down_pred_mask.sum())
-
-        test_times = pd.to_datetime(df_raw["open_time"].iloc[y_idxs].values, unit="us")
-        monthly = _monthly_breakdown(test_times.values, y_true, y_pred)
-        daily = _daily_breakdown(test_times.values, y_true, y_pred)
-        conf_dist = _confidence_distribution(y_prob)
-        streaks = _streak_analysis(y_true, y_pred)
+        total_candles_tested = len(probas)
 
         fit_time = time.time() - t1
 
-        results_by_horizon[str(horizon)] = {
-            "accuracy": round(accuracy, 6),
-            "accuracy_pct": round(accuracy * 100, 2),
-            "total_candles": total_candles_tested,
-            "signals": total_signals,
-            "skipped": total_candles_tested - total_signals,
-            "correct": correct,
-            "wrong": total_signals - correct,
-            "up_predictions": up_total,
-            "up_correct": up_correct,
-            "up_accuracy": round(up_correct / up_total * 100, 2) if up_total > 0 else 0,
-            "down_predictions": down_total,
-            "down_correct": down_correct,
-            "down_accuracy": round(down_correct / down_total * 100, 2) if down_total > 0 else 0,
-            "monthly": monthly,
-            "daily": daily,
-            "confidence_distribution": conf_dist,
-            "streaks": streaks,
-            "fit_time_sec": round(fit_time, 4),
-            "train_count": 0,
-            "total_train_time_sec": 0,
-            "predict_time_sec": round(fit_time, 4),
-        }
+        base_metrics = _evaluate_predictions_metrics(
+            y_pred=pred_arr,
+            probas=probas,
+            actuals=actuals,
+            idxs=valid_test,
+            df_raw=df_raw,
+            horizon=horizon,
+            total_candles=total_candles_tested,
+            fit_time=fit_time,
+            train_count=0,
+            total_train_time=0.0,
+            threshold_value=base_threshold,
+        )
+
+        results_by_horizon[str(horizon)] = base_metrics
+
+        if sweep_thresholds:
+            base_key = _format_threshold_key(base_threshold)
+            for thr in sweep_thresholds:
+                thr_preds = _apply_threshold_to_probs(probas, thr)
+                thr_metrics = _evaluate_predictions_metrics(
+                    y_pred=thr_preds,
+                    probas=probas,
+                    actuals=actuals,
+                    idxs=valid_test,
+                    df_raw=df_raw,
+                    horizon=horizon,
+                    total_candles=total_candles_tested,
+                    fit_time=fit_time,
+                    train_count=0,
+                    total_train_time=0.0,
+                    threshold_value=thr,
+                )
+                thr_key = _format_threshold_key(thr)
+                threshold_variant_results.setdefault(thr_key, {})[str(horizon)] = thr_metrics
+
+            if base_key in threshold_variant_results:
+                results_by_horizon[str(horizon)] = threshold_variant_results[base_key][str(horizon)]
 
     total_time = time.time() - t0
     resolved_params = strategy_params if strategy_params else get_strategy(strategy_name).params
 
-    return {
+    result = {
         "strategy": strategy_name,
         "params": resolved_params,
         "train_start": train_start,
@@ -573,6 +582,11 @@ def run_backtest_vectorized(
         "load_time_sec": preloaded["load_time"],
         "feature_time_sec": preloaded["feat_time"],
     }
+
+    if threshold_variant_results:
+        result["threshold_variants"] = threshold_variant_results
+
+    return result
 
 
 def _monthly_breakdown(dates, y_true, y_pred) -> list[dict]:

@@ -76,12 +76,13 @@ def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Bollinger Bands ---
     if FEATURE_USAGE["bollinger"]:
-        sma20 = df["close"].rolling(20).mean()
-        std20 = df["close"].rolling(20).std()
-        df["bb_upper"] = sma20 + 2 * std20
-        df["bb_lower"] = sma20 - 2 * std20
-        df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / sma20
-        df["bb_pos"] = (df["close"] - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"])
+        bb_upper, bb_lower, bb_width, bb_pos = bollinger_components(
+            df["close"].astype(float), period=20, std_mult=2.0
+        )
+        df["bb_upper"] = bb_upper
+        df["bb_lower"] = bb_lower
+        df["bb_width"] = bb_width
+        df["bb_pos"] = bb_pos
 
     # --- Volatility ---
     if FEATURE_USAGE["volatility"]:
@@ -253,6 +254,19 @@ def _true_range(df: pd.DataFrame) -> pd.Series:
     high_close = (df["high"] - df["close"].shift()).abs()
     low_close = (df["low"] - df["close"].shift()).abs()
     return pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+
+
+def bollinger_components(series: pd.Series, period: int, std_mult: float) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    period = max(1, int(period))
+    std_mult = float(std_mult)
+    sma = series.rolling(period).mean()
+    std = series.rolling(period).std()
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    width = (upper - lower) / sma.replace(0, np.nan)
+    denom = (upper - lower).replace(0, np.nan)
+    pos = (series - lower) / denom
+    return upper, lower, width, pos
 
 
 def _adx(df: pd.DataFrame, period: int) -> pd.Series:

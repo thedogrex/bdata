@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 import numpy as np
 import pandas as pd
 
@@ -58,6 +61,8 @@ class RSIMeanReversionStrategy(BaseStrategy):
         if "rsi_14" not in df.columns:
             df = add_technical_features(df)
 
+        self._last_vol_skip_count = 0
+
         period = self.params["rsi_period"]
         rsi_col = f"rsi_{period}" if f"rsi_{period}" in df.columns else "rsi_14"
         rsi = df[rsi_col].dropna().values
@@ -78,7 +83,7 @@ class RSIMeanReversionStrategy(BaseStrategy):
             self._rsi_p90 = None
             self._bb_median = 0.5
 
-    def predict_proba(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
+    async def predict_proba(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
         # Use pre-computed features if available, else compute
         if "rsi_14" not in df.columns:
             df = add_technical_features(df)
@@ -102,50 +107,92 @@ class RSIMeanReversionStrategy(BaseStrategy):
             oversold = base_oversold
             overbought = base_overbought
 
-        # Vectorized RSI signal
-        proba = np.full(len(rsi), 0.5)
-        os_mask = rsi < oversold
-        ob_mask = rsi > overbought
-        proba[os_mask] = 0.5 + ((oversold - rsi[os_mask]) / oversold) * 0.3
-        proba[ob_mask] = 0.5 - ((rsi[ob_mask] - overbought) / (100 - overbought)) * 0.3
+        length = len(rsi)
+        if length == 0:
+            self._last_vol_skip_count = 0
+            return np.array([], dtype=float)
 
-        # Vectorized BB confirmation
-        if self.params["use_bb_confirm"]:
-            bb = np.nan_to_num(bb_pos, nan=0.5)
-            proba[bb < self.params["bb_low"]] += 0.05
-            proba[bb > self.params["bb_high"]] -= 0.05
-
-        # Volatility filter — skip signals outside desired band
+        proba = np.full(length, 0.5)
+        bb_arr = None if bb_pos is None else np.asarray(bb_pos, dtype=float)
         vol_metrics = self._get_vol_metrics(df)
+
+        min_vol = float(self.params.get("min_vol", 0.0))
+        max_vol = float(self.params.get("max_vol", 1.0))
+        ratio_max = float(self.params.get("vol_ratio_max", 1.5))
+        spike_mult = float(self.params.get("vol_spike_multiplier", 1.5))
+        if max_vol <= min_vol:
+            max_vol = min_vol + 1e-6
+
+        vol_fast = vol_slow = vol_ratio = None
         if vol_metrics is not None:
-            vol_fast = vol_metrics["fast"]
-            vol_slow = vol_metrics["slow"]
-            vol_ratio = vol_metrics["ratio"]
+            vol_fast = np.asarray(vol_metrics["fast"], dtype=float)
+            vol_slow = np.asarray(vol_metrics["slow"], dtype=float)
+            vol_ratio = np.asarray(vol_metrics["ratio"], dtype=float)
 
-            min_vol = float(self.params.get("min_vol", 0.0))
-            max_vol = float(self.params.get("max_vol", 1.0))
-            ratio_max = float(self.params.get("vol_ratio_max", 1.5))
-            spike_mult = float(self.params.get("vol_spike_multiplier", 1.5))
-            if max_vol <= min_vol:
-                max_vol = min_vol + 1e-6
+        chunk_size = self._determine_chunk_size(length)
+        last_yield = time.monotonic()
 
-            valid = np.isfinite(vol_fast) & np.isfinite(vol_slow)
-            valid &= (vol_fast > min_vol) & (vol_fast < max_vol)
-            valid &= vol_fast < (vol_slow * spike_mult)
-            if ratio_max > 0:
-                ratio_safe = np.where(np.isfinite(vol_ratio), vol_ratio, np.inf)
-                valid &= ratio_safe < ratio_max
+        async def maybe_yield(force: bool = False) -> None:
+            nonlocal last_yield
+            now = time.monotonic()
+            if force or (now - last_yield) >= 1.0:
+                await asyncio.sleep(0)
+                last_yield = time.monotonic()
 
-            proba[~valid] = 0.5
+        total_vol_skips = 0
 
-        return np.clip(proba, 0, 1)
+        for start in range(0, length, chunk_size):
+            end = min(start + chunk_size, length)
+            chunk = slice(start, end)
+            rsi_chunk = rsi[chunk]
+            proba_chunk = proba[chunk]
 
-    def predict(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
-        proba = self.predict_proba(df, horizon)
+            os_mask = rsi_chunk < oversold
+            ob_mask = rsi_chunk > overbought
+            if oversold > 0:
+                proba_chunk[os_mask] = 0.5 + ((oversold - rsi_chunk[os_mask]) / oversold) * 0.3
+            if overbought < 100:
+                proba_chunk[ob_mask] = 0.5 - ((rsi_chunk[ob_mask] - overbought) / (100 - overbought)) * 0.3
+
+            if self.params["use_bb_confirm"] and bb_arr is not None:
+                bb_chunk = np.nan_to_num(bb_arr[chunk], nan=0.5)
+                proba_chunk[bb_chunk < self.params["bb_low"]] += 0.05
+                proba_chunk[bb_chunk > self.params["bb_high"]] -= 0.05
+
+            if vol_fast is not None and vol_slow is not None and vol_ratio is not None:
+                vf = vol_fast[chunk]
+                vs = vol_slow[chunk]
+                ratio = vol_ratio[chunk]
+                valid = np.isfinite(vf) & np.isfinite(vs)
+                valid &= (vf > min_vol) & (vf < max_vol)
+                valid &= vf < (vs * spike_mult)
+                if ratio_max > 0:
+                    ratio_mask = np.where(np.isfinite(ratio), ratio, np.inf)
+                    valid &= ratio_mask < ratio_max
+
+                skip_mask = ~valid
+                total_vol_skips += int(np.count_nonzero(skip_mask))
+                proba_chunk[skip_mask] = 0.5
+
+            await maybe_yield()
+
+        self._last_vol_skip_count = total_vol_skips
+        await maybe_yield(force=False)
+
+        np.clip(proba, 0, 1, out=proba)
+        return proba
+
+    async def predict(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
+        proba = await self.predict_proba(df, horizon)
         preds = np.full(len(proba), -1, dtype=np.int8)
         preds[proba > 0.55] = 1
         preds[proba < 0.45] = 0
         return preds
+
+    def _determine_chunk_size(self, length: int) -> int:
+        if length <= 5000:
+            return max(512, length)
+        return min(20000, max(2048, length // 8))
 
     def _compute_bb_pos(self, df: pd.DataFrame) -> np.ndarray:
         period = int(self.params.get("bb_period", 20))

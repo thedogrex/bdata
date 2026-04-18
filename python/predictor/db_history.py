@@ -53,11 +53,11 @@ async def save_backtest_run(result: dict) -> int:
         await db.execute("""
             INSERT INTO backtest_horizons
                 (run_id, horizon, accuracy, accuracy_pct, total_candles, signals,
-                 skipped, correct, wrong, up_predictions, up_correct, up_accuracy,
+                 skipped, volatility_skips, correct, wrong, up_predictions, up_correct, up_accuracy,
                  down_predictions, down_correct, down_accuracy,
                  max_win_streak, max_lose_streak, fit_time_sec, predict_time_sec,
                  monthly_json, daily_json, confidence_json)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             run_id,
             int(horizon_str),
@@ -66,6 +66,7 @@ async def save_backtest_run(result: dict) -> int:
             h.get("total_candles", 0),
             h.get("signals", 0),
             h.get("skipped", 0),
+            h.get("volatility_skips", 0),
             h.get("correct", 0),
             h.get("wrong", 0),
             h.get("up_predictions", 0),
@@ -117,7 +118,7 @@ async def get_history(limit: int = 100, strategy: Optional[str] = None,
                r.train_candles, r.test_candles, r.total_time_sec,
                r.is_bruteforce, r.bruteforce_id, r.created_at,
                h.horizon, h.accuracy_pct, h.signals, h.correct, h.wrong,
-               h.max_win_streak, h.max_lose_streak
+               h.volatility_skips, h.max_win_streak, h.max_lose_streak
         FROM backtest_runs r
         LEFT JOIN backtest_horizons h ON h.run_id = r.id
         WHERE {where_sql}
@@ -160,9 +161,10 @@ async def get_history(limit: int = 100, strategy: Optional[str] = None,
                 "correct": row[18],
                 "wrong": row[19],
                 "streaks": {
-                    "max_win_streak": row[20],
-                    "max_lose_streak": row[21],
+                    "max_win_streak": row[21],
+                    "max_lose_streak": row[22],
                 },
+                "volatility_skips": row[20],
             }
 
     results = []
@@ -225,7 +227,7 @@ async def get_bf_runs_paginated(
                r.train_candles, r.test_candles, r.total_time_sec,
                r.is_bruteforce, r.bruteforce_id, r.created_at,
                h.horizon, h.accuracy_pct, h.signals, h.correct, h.wrong,
-               h.max_win_streak, h.max_lose_streak
+               h.volatility_skips, h.max_win_streak, h.max_lose_streak
         FROM backtest_runs r
         LEFT JOIN backtest_horizons h ON h.run_id = r.id
         WHERE r.id IN ({placeholders})
@@ -265,9 +267,10 @@ async def get_bf_runs_paginated(
                 "signals": row[17],
                 "correct": row[18],
                 "wrong": row[19],
+                "volatility_skips": row[20],
                 "streaks": {
-                    "max_win_streak": row[20],
-                    "max_lose_streak": row[21],
+                    "max_win_streak": row[21],
+                    "max_lose_streak": row[22],
                 },
             }
 
@@ -317,23 +320,24 @@ async def get_history_detail(run_id: int) -> Optional[dict]:
             "total_candles": hr[5],
             "signals": hr[6],
             "skipped": hr[7],
-            "correct": hr[8],
-            "wrong": hr[9],
-            "up_predictions": hr[10],
-            "up_correct": hr[11],
-            "up_accuracy": hr[12],
-            "down_predictions": hr[13],
-            "down_correct": hr[14],
-            "down_accuracy": hr[15],
+            "volatility_skips": hr[8],
+            "correct": hr[9],
+            "wrong": hr[10],
+            "up_predictions": hr[11],
+            "up_correct": hr[12],
+            "up_accuracy": hr[13],
+            "down_predictions": hr[14],
+            "down_correct": hr[15],
+            "down_accuracy": hr[16],
             "streaks": {
-                "max_win_streak": hr[16],
-                "max_lose_streak": hr[17],
+                "max_win_streak": hr[17],
+                "max_lose_streak": hr[18],
             },
-            "fit_time_sec": hr[18],
-            "predict_time_sec": hr[19],
-            "monthly": _safe_json_loads(hr[20], []),
-            "daily": _safe_json_loads(hr[21], []),
-            "confidence_distribution": _safe_json_loads(hr[22], {}),
+            "fit_time_sec": hr[19],
+            "predict_time_sec": hr[20],
+            "monthly": _safe_json_loads(hr[21], []),
+            "daily": _safe_json_loads(hr[22], []),
+            "confidence_distribution": _safe_json_loads(hr[23], {}),
         }
 
     return run
@@ -583,7 +587,7 @@ async def get_runs_by_ids(run_ids: list[int], horizon: int = 1) -> list[dict]:
     rows = await db.fetchall(f"""
         SELECT r.id, r.strategy, r.params_json, r.train_start, r.train_end,
                r.test_start, r.test_end, r.window_size,
-               h.accuracy_pct, h.signals, h.correct, h.wrong, h.skipped,
+               h.accuracy_pct, h.signals, h.correct, h.wrong, h.skipped, h.volatility_skips,
                h.max_win_streak, h.max_lose_streak,
                r.total_time_sec, r.created_at,
                h.monthly_json, h.up_predictions, h.up_correct, h.up_accuracy,
@@ -596,7 +600,7 @@ async def get_runs_by_ids(run_ids: list[int], horizon: int = 1) -> list[dict]:
 
     results = []
     for r in rows:
-        monthly = _safe_json_loads(r[17], [])
+        monthly = _safe_json_loads(r[18], [])
         results.append({
             "id": r[0],
             "strategy": r[1],
@@ -611,18 +615,19 @@ async def get_runs_by_ids(run_ids: list[int], horizon: int = 1) -> list[dict]:
             "correct": r[10],
             "wrong": r[11],
             "skipped": r[12],
-            "max_win_streak": r[13],
-            "max_lose_streak": r[14],
-            "total_time_sec": r[15],
-            "created_at": str(r[16]) if r[16] else "",
+            "volatility_skips": r[13],
+            "max_win_streak": r[14],
+            "max_lose_streak": r[15],
+            "total_time_sec": r[16],
+            "created_at": str(r[17]) if r[17] else "",
             "monthly": monthly,
-            "up_predictions": r[18],
-            "up_correct": r[19],
-            "up_accuracy": r[20],
-            "down_predictions": r[21],
-            "down_correct": r[22],
-            "down_accuracy": r[23],
-            "horizon": r[24],
+            "up_predictions": r[19],
+            "up_correct": r[20],
+            "up_accuracy": r[21],
+            "down_predictions": r[22],
+            "down_correct": r[23],
+            "down_accuracy": r[24],
+            "horizon": r[25],
         })
     return results
 
@@ -650,7 +655,7 @@ async def get_best_runs(
     rows = await db.fetchall(f"""
         SELECT r.id, r.strategy, r.params_json, r.train_start, r.train_end,
                r.test_start, r.test_end, r.window_size,
-               h.accuracy_pct, h.signals, h.correct, h.wrong, h.skipped,
+               h.accuracy_pct, h.signals, h.correct, h.wrong, h.skipped, h.volatility_skips,
                h.max_win_streak, h.max_lose_streak,
                r.total_time_sec, r.created_at
         FROM backtest_runs r
@@ -676,9 +681,10 @@ async def get_best_runs(
             "correct": r[10],
             "wrong": r[11],
             "skipped": r[12],
-            "max_win_streak": r[13],
-            "max_lose_streak": r[14],
-            "total_time_sec": r[15],
-            "created_at": str(r[16]) if r[16] else "",
+            "volatility_skips": r[13],
+            "max_win_streak": r[14],
+            "max_lose_streak": r[15],
+            "total_time_sec": r[16],
+            "created_at": str(r[17]) if r[17] else "",
         })
     return results

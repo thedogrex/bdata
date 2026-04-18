@@ -6,6 +6,7 @@ from predictor.strategies.xgboost_strategy import XGBoostStrategy
 from predictor.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
 from predictor.strategies.momentum_strategy import MomentumStrategy
 from predictor.strategies.pattern_sequence import PatternSequenceStrategy
+from predictor.utils.async_utils import resolve_awaitable
 
 
 class EnsembleStrategy(BaseStrategy):
@@ -87,7 +88,7 @@ class EnsembleStrategy(BaseStrategy):
         for s in self.sub_strategies:
             s.fit(df, horizon)
 
-    def predict_proba(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
+    async def predict_proba(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
         weights = [
             self.params["xgboost_weight"],
             self.params["rsi_weight"],
@@ -99,7 +100,7 @@ class EnsembleStrategy(BaseStrategy):
 
         probas = []
         for s in self.sub_strategies:
-            probas.append(s.predict_proba(df, horizon))
+            probas.append(await resolve_awaitable(s.predict_proba(df, horizon)))
 
         combined = np.zeros(len(df))
         for w, p in zip(weights, probas):
@@ -107,8 +108,8 @@ class EnsembleStrategy(BaseStrategy):
 
         return combined
 
-    def predict(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
-        proba = self.predict_proba(df, horizon)
+    async def predict(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
+        proba = await self.predict_proba(df, horizon)
         threshold = self.params["threshold"]
         preds = np.full(len(proba), -1, dtype=np.int8)
         preds[proba > threshold] = 1

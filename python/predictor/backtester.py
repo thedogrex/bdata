@@ -8,6 +8,7 @@ from typing import Optional, TYPE_CHECKING
 from predictor.data_loader import load_candles, add_direction, add_future_directions, date_to_us
 from predictor.features import add_technical_features, set_feature_usage, FEATURE_USAGE
 from predictor.strategies import get_strategy, BaseStrategy
+from predictor.utils.async_utils import resolve_awaitable
 
 # Minimal feature blocks needed per strategy for preloading.
 # Strategies not listed here get ALL features.
@@ -138,12 +139,15 @@ async def run_backtest(
         t1 = time.time()
         target_col = f"future_dir_{horizon}"
 
-        all_preds = []       # (index_in_df, prediction, proba, actual)
-        strategy = None
-        last_train_idx = -retrain_every  # force first train
+        all_preds: list[tuple[int, int, float, int]] = []
+        strategy: BaseStrategy | None = None
         train_count = 0
         total_train_time = 0.0
-        train_total_est = max(1, math.ceil(len(test_indices) / max(retrain_every, 1)))
+        last_train_idx = -retrain_every
+        train_total_est = math.ceil(len(test_indices) / retrain_every)
+        work_done = 0
+        volatility_skip_total = 0
+
         if progress:
             progress.extra["train_total"] = train_total_est
             progress.extra["train_count"] = 0
@@ -266,16 +270,18 @@ async def run_backtest(
                 x_row = df_feat.loc[i, cols].to_numpy()
                 pred = int(strategy.predict_row(x_row))
                 prob = float(strategy.predict_proba_row(x_row))
+                volatility_skip_total += int(getattr(strategy, "_last_vol_skip_count", 0) or 0)
             else:
                 df_single = df_feat.iloc[[i]]
                 if offload_cpu:
                     pred_arr = await asyncio.to_thread(strategy.predict, df_single, horizon)
                     prob_arr = await asyncio.to_thread(strategy.predict_proba, df_single, horizon)
                 else:
-                    pred_arr = strategy.predict(df_single, horizon)
-                    prob_arr = strategy.predict_proba(df_single, horizon)
+                    pred_arr = await resolve_awaitable(strategy.predict(df_single, horizon))
+                    prob_arr = await resolve_awaitable(strategy.predict_proba(df_single, horizon))
                 pred = int(pred_arr[0])
                 prob = float(prob_arr[0])
+                volatility_skip_total += int(getattr(strategy, "_last_vol_skip_count", 0) or 0)
 
             all_preds.append((i, pred, prob, int(actual_val)))
 
@@ -324,6 +330,7 @@ async def run_backtest(
         if not base_metrics.get("signals") and not base_metrics.get("error"):  # no valid signals
             base_metrics["error"] = "All predictions were SKIP (confidence too low)"
 
+        base_metrics["volatility_skips"] = int(volatility_skip_total)
         results_by_horizon[str(horizon)] = base_metrics
 
         if sweep_thresholds:
@@ -343,6 +350,7 @@ async def run_backtest(
                     total_train_time,
                     threshold_value=thr,
                 )
+                thr_metrics["volatility_skips"] = int(volatility_skip_total)
                 thr_key = _format_threshold_key(thr)
                 threshold_variant_results.setdefault(thr_key, {})[str(horizon)] = thr_metrics
 
@@ -443,7 +451,7 @@ async def preload_backtest_data(
     }
 
 
-def run_backtest_vectorized(
+async def run_backtest_vectorized(
     strategy_name: str,
     strategy_params: dict | None,
     preloaded: dict,
@@ -504,7 +512,8 @@ def run_backtest_vectorized(
         # Create strategy, fit on training window, predict on full test set
         strategy = get_strategy(strategy_name, strategy_params)
         strategy.fit(df_train, horizon)  # learns adaptive stats from training window
-        prob_arr = strategy.predict_proba(df_test, horizon)
+        prob_arr = await resolve_awaitable(strategy.predict_proba(df_test, horizon))
+        volatility_skips = int(getattr(strategy, "_last_vol_skip_count", 0) or 0)
 
         base_threshold = float(strategy.params.get("threshold", 0.55))
         sweep_thresholds = (
@@ -535,6 +544,8 @@ def run_backtest_vectorized(
             threshold_value=base_threshold,
         )
 
+        base_metrics["volatility_skips"] = volatility_skips
+
         results_by_horizon[str(horizon)] = base_metrics
 
         if sweep_thresholds:
@@ -554,6 +565,7 @@ def run_backtest_vectorized(
                     total_train_time=0.0,
                     threshold_value=thr,
                 )
+                thr_metrics["volatility_skips"] = volatility_skips
                 thr_key = _format_threshold_key(thr)
                 threshold_variant_results.setdefault(thr_key, {})[str(horizon)] = thr_metrics
 

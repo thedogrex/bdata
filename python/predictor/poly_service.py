@@ -15,6 +15,7 @@ from db import DbProvider
 import app.config as config
 from predictor import telegram_bot
 from predictor.poly_client import PolymarketClient, MarketData
+from predictor.utils.async_utils import resolve_awaitable
 
 db = DbProvider()
 logger = logging.getLogger("poly_service")
@@ -1515,8 +1516,8 @@ async def predict_for_market(
         except Exception:
             vol_fast_arr = vol_slow_arr = vol_ratio_arr = None
 
-    pred_arr = strategy.predict(df_predict, horizon=horizon)
-    prob_arr = strategy.predict_proba(df_predict, horizon=horizon)
+    pred_arr = await resolve_awaitable(strategy.predict(df_predict, horizon=horizon))
+    prob_arr = await resolve_awaitable(strategy.predict_proba(df_predict, horizon=horizon))
 
     pred = int(pred_arr[0])
     prob = float(prob_arr[0])
@@ -1583,8 +1584,8 @@ async def predict_for_market(
             r_ratio = None
         # Re-predict each context candle to show what backtest would have said
         df_k = df_feat.iloc[[k]].reset_index(drop=True)
-        k_pred = int(strategy.predict(df_k, horizon=horizon)[0])
-        k_prob = float(strategy.predict_proba(df_k, horizon=horizon)[0])
+        k_pred = int((await resolve_awaitable(strategy.predict(df_k, horizon=horizon)))[0])
+        k_prob = float((await resolve_awaitable(strategy.predict_proba(df_k, horizon=horizon)))[0])
         tail_detail.append({
             "dt": dt_str,
             "rsi": round(r_rsi, 1),
@@ -2192,8 +2193,8 @@ async def quantum_predict_for_market(
         try:
             strategy = get_strategy(strategy_name, strategy_params)
             strategy.fit(df_train, horizon=horizon)
-            pred_arr = strategy.predict(df_predict, horizon=horizon)
-            prob_arr = strategy.predict_proba(df_predict, horizon=horizon)
+            pred_arr = await resolve_awaitable(strategy.predict(df_predict, horizon=horizon))
+            prob_arr = await resolve_awaitable(strategy.predict_proba(df_predict, horizon=horizon))
 
             pred = int(pred_arr[0])
             prob = float(prob_arr[0])

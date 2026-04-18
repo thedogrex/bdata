@@ -17,7 +17,8 @@ from typing import Dict, List, Any, Optional
 from db import DbProvider
 from predictor.data_loader import add_direction
 from predictor.features import add_technical_features
-from predictor.strategies import get_strategy
+from predictor.strategies import get_strategy, STRATEGY_REGISTRY
+from predictor.utils.async_utils import resolve_awaitable
 from predictor.poly_service import list_pred_templates
 
 db = DbProvider()
@@ -223,7 +224,7 @@ async def _upsert_cached_offset(
     )
 
 
-def _predict_last_candle(
+async def _predict_last_candle(
     df_window: pd.DataFrame,
     strategy_name: str,
     strategy_params: dict,
@@ -242,8 +243,10 @@ def _predict_last_candle(
     strategy = get_strategy(strategy_name, strategy_params)
     strategy.fit(df_train, horizon=horizon)
 
-    pred = int(strategy.predict(df_predict, horizon=horizon)[0])
-    prob = float(strategy.predict_proba(df_predict, horizon=horizon)[0])
+    pred_arr = await resolve_awaitable(strategy.predict(df_predict, horizon=horizon))
+    prob_arr = await resolve_awaitable(strategy.predict_proba(df_predict, horizon=horizon))
+    pred = int(pred_arr[0])
+    prob = float(prob_arr[0])
     label = "UP" if pred == 1 else ("DOWN" if pred == 0 else "UNDEFINED")
 
     period = strategy.params.get("rsi_period", 14)
@@ -258,7 +261,7 @@ def _predict_last_candle(
     }
 
 
-def _predict_at_row(
+async def _predict_at_row(
     df_window: pd.DataFrame,
     strategy_name: str,
     strategy_params: dict,
@@ -280,8 +283,10 @@ def _predict_at_row(
     strategy = get_strategy(strategy_name, strategy_params)
     strategy.fit(df_train, horizon=horizon)
 
-    pred = int(strategy.predict(df_predict, horizon=horizon)[0])
-    prob = float(strategy.predict_proba(df_predict, horizon=horizon)[0])
+    pred_arr = await resolve_awaitable(strategy.predict(df_predict, horizon=horizon))
+    prob_arr = await resolve_awaitable(strategy.predict_proba(df_predict, horizon=horizon))
+    pred = int(pred_arr[0])
+    prob = float(prob_arr[0])
     label = "UP" if pred == 1 else ("DOWN" if pred == 0 else "UNDEFINED")
 
     period = strategy.params.get("rsi_period", 14)
@@ -426,7 +431,7 @@ async def run_compare(
         signal_row_idx = ridx_arr[-1]
         signal_open_us = int(base_window.at[signal_row_idx, "open_time"])
 
-        base_pred = _predict_at_row(
+        base_pred = await _predict_at_row(
             df_window=base_window,
             strategy_name=strategy_name,
             strategy_params=strategy_params,
@@ -558,7 +563,7 @@ async def run_compare(
                     continue
                 hybrid.at[ridx, col] = off[col]
 
-            off_pred = _predict_at_row(
+            off_pred = await _predict_at_row(
                 df_window=hybrid,
                 strategy_name=strategy_name,
                 strategy_params=strategy_params,

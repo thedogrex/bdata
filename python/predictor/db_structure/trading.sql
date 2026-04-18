@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS `backtest_horizons` (
   `total_candles` int NOT NULL DEFAULT '0',
   `signals` int NOT NULL DEFAULT '0',
   `skipped` int NOT NULL DEFAULT '0',
+  `volatility_skips` int NOT NULL DEFAULT '0',
   `correct` int NOT NULL DEFAULT '0',
   `wrong` int NOT NULL DEFAULT '0',
   `up_predictions` int NOT NULL DEFAULT '0',

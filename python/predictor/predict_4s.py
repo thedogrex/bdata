@@ -31,6 +31,7 @@ from db import DbProvider
 from predictor.data_loader import add_direction
 from predictor.features import add_technical_features
 from predictor.strategies import get_strategy, STRATEGY_REGISTRY
+from predictor.utils.async_utils import resolve_awaitable
 
 logger = logging.getLogger("predict_4s")
 logger.setLevel(logging.DEBUG)
@@ -141,7 +142,7 @@ def _build_df(rows: List) -> pd.DataFrame:
     return df
 
 
-def _run_prediction(
+async def _run_prediction(
     df: pd.DataFrame,
     strategy_name: str,
     strategy_params: dict,
@@ -158,8 +159,10 @@ def _run_prediction(
 
     strategy = get_strategy(strategy_name, strategy_params)
     strategy.fit(df_train, horizon=horizon)
-    pred = int(strategy.predict(df_predict, horizon=horizon)[0])
-    prob = float(strategy.predict_proba(df_predict, horizon=horizon)[0])
+    pred_arr = await resolve_awaitable(strategy.predict(df_predict, horizon=horizon))
+    prob_arr = await resolve_awaitable(strategy.predict_proba(df_predict, horizon=horizon))
+    pred = int(pred_arr[0])
+    prob = float(prob_arr[0])
     label = "UP" if pred == 1 else ("DOWN" if pred == 0 else "UNDEFINED")
 
     period = strategy.params.get("rsi_period", 14)
@@ -265,7 +268,7 @@ async def predict_for_market_4s(
     rows_with_offset = base_rows + [offset_row]
 
     df = _build_df(rows_with_offset)
-    result = _run_prediction(df, strategy_name, strategy_params, horizon)
+    result = await _run_prediction(df, strategy_name, strategy_params, horizon)
     if result is None:
         return {"error": "Prediction failed (insufficient data after feature engineering)"}
 

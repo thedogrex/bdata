@@ -506,7 +506,7 @@ async def api_run_backtest(req: BacktestRequest):
                 progress=progress,
                 strategy_name=req.strategy,
             )
-            result = run_backtest_vectorized(
+            result = await run_backtest_vectorized(
                 strategy_name=req.strategy,
                 strategy_params=req.params,
                 preloaded=preloaded,
@@ -568,7 +568,7 @@ async def api_compare_strategies(req: CompareRequest):
             progress.update(idx, len(strats), f"Running {strategy_name} ({idx+1}/{len(strats)})")
             try:
                 if strategy_name in RULE_BASED_STRATEGIES and preloaded is not None:
-                    result = run_backtest_vectorized(
+                    result = await run_backtest_vectorized(
                         strategy_name=strategy_name,
                         strategy_params=None,
                         preloaded=preloaded,

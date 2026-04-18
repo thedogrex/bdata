@@ -387,7 +387,7 @@ async def _run_bf_loop(
 
             if is_fast:
                 # Vectorized: single predict call on full test set (~0.01s)
-                result = run_backtest_vectorized(
+                result = await run_backtest_vectorized(
                     strategy_name=strategy,
                     strategy_params=strat_params,
                     preloaded=preloaded,
@@ -772,7 +772,7 @@ async def _bf_worker_async(payload: dict) -> dict:
                 )
 
                 if is_fast:
-                    result = run_backtest_vectorized(
+                    result = await run_backtest_vectorized(
                         strategy_name=payload["strategy"],
                         strategy_params=strat_params,
                         preloaded=preloaded,

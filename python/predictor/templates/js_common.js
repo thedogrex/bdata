@@ -755,12 +755,13 @@ function renderResult(data,targetId){
     if(r.error){html+=`<div class="text-red-400 mb-4">H${horizon}: ${r.error}</div>`;continue}
     html+=`<div class="mb-6 p-4 rounded-lg" style="background:#0f172a">
       <h3 class="font-semibold mb-3">Horizon ${horizon}</h3>
-      <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
+      <div class="grid grid-cols-2 md:grid-cols-6 gap-4 mb-4">
         <div class="text-center"><div class="text-3xl font-bold ${accClass(r.accuracy_pct)}">${r.accuracy_pct}%</div><div class="text-xs text-slate-400">Accuracy</div></div>
         <div class="text-center"><div class="text-2xl font-bold">${r.signals?.toLocaleString()}</div><div class="text-xs text-slate-400">Signals</div></div>
         <div class="text-center"><div class="text-2xl font-bold text-green-400">${r.correct?.toLocaleString()}</div><div class="text-xs text-slate-400">Correct</div></div>
         <div class="text-center"><div class="text-2xl font-bold text-red-400">${r.wrong?.toLocaleString()}</div><div class="text-xs text-slate-400">Wrong</div></div>
         <div class="text-center"><div class="text-2xl font-bold text-slate-300">${r.skipped?.toLocaleString()}</div><div class="text-xs text-slate-400">Skipped</div></div>
+        <div class="text-center"><div class="text-2xl font-bold text-amber-400">${r.volatility_skips?.toLocaleString()}</div><div class="text-xs text-slate-400">Vol Skips</div></div>
       </div>
       <div class="grid grid-cols-2 gap-4 mb-3">
         <div class="p-2 rounded text-sm" style="background:#1e293b"><span class="badge badge-up">UP</span> ${r.up_predictions} preds, ${r.up_correct} correct (${r.up_accuracy}%)</div>
@@ -842,9 +843,9 @@ function renderCompare(results){
   let html='<div class="card p-6 mb-6"><h2 class="text-lg font-semibold mb-4">Comparison</h2>';
   for(const h of horizons){
     html+=`<h3 class="font-medium mt-4 mb-2">Horizon ${h}</h3>`;
-    html+='<table><thead><tr><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Correct</th><th>Wrong</th><th>Skipped</th><th>W/L Streak</th></tr></thead><tbody>';
+    html+='<table><thead><tr><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Correct</th><th>Wrong</th><th>Skipped</th><th>Vol Skips</th><th>W/L Streak</th></tr></thead><tbody>';
     const sorted=[...results].filter(r=>r.horizons&&r.horizons[h]&&!r.horizons[h].error).sort((a,b)=>(b.horizons[h].accuracy_pct||0)-(a.horizons[h].accuracy_pct||0));
-    for(const r of sorted){const d=r.horizons[h];html+=`<tr><td class="font-medium">${r.strategy}</td><td class="${accClass(d.accuracy_pct)} font-bold">${d.accuracy_pct}%</td><td>${d.signals?.toLocaleString()}</td><td class="text-green-400">${d.correct?.toLocaleString()}</td><td class="text-red-400">${d.wrong?.toLocaleString()}</td><td>${d.skipped?.toLocaleString()}</td><td>${d.streaks?.max_win_streak||0}/${d.streaks?.max_lose_streak||0}</td></tr>`}
+    for(const r of sorted){const d=r.horizons[h];html+=`<tr><td class="font-medium">${r.strategy}</td><td class="${accClass(d.accuracy_pct)} font-bold">${d.accuracy_pct}%</td><td>${d.signals?.toLocaleString()}</td><td class="text-green-400">${d.correct?.toLocaleString()}</td><td class="text-red-400">${d.wrong?.toLocaleString()}</td><td>${d.skipped?.toLocaleString()}</td><td class="text-amber-400">${d.volatility_skips?.toLocaleString()}</td><td>${d.streaks?.max_win_streak||0}/${d.streaks?.max_lose_streak||0}</td></tr>`}
     html+='</tbody></table>'}
   html+='</div>';el.innerHTML=html;
 }
@@ -1019,7 +1020,9 @@ function histHorizonsHtml(run, selectedHorizons){
     if(!d){parts.push(`H${k}:--`);return;}
     if(d.error){parts.push(`H${k}:err`);return;}
     const a=(d.accuracy_pct!=null)?Number(d.accuracy_pct):0;
-    parts.push(`H${k}:<span class="${accClass(a)}">${a}%</span>`);
+    const volSkip=(d.volatility_skips!=null)?Number(d.volatility_skips):0;
+    const volHtml=volSkip>0?` <span class="text-amber-400" title="Vol skips">(${volSkip})</span>`:'';
+    parts.push(`H${k}:<span class="${accClass(a)}">${a}%</span>${volHtml}`);
   });
   return parts.join(' | ');
 }
@@ -1406,14 +1409,14 @@ function renderBestList(data, horizon){
   const cmp = bestCompareMode;
   let html='<div class="card p-6"><div class="flex items-center justify-between mb-4"><h2 class="text-lg font-semibold">Top Runs (H'+horizon+')</h2><button onclick="event.stopPropagation();toggleConfigModal(0, \'Best List\', {horizon:'+horizon+', limit:'+data.length+'})" class="text-blue-400 hover:text-blue-200 text-xs px-2 py-1 rounded border border-slate-600" title="View Config">⚙ Config</button></div><table><thead><tr>';
   if(cmp) html+='<th style="width:32px"><input type="checkbox" onchange="bestToggleAll(this.checked)" title="Select all"></th>';
-  html+='<th>#</th><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Correct</th><th>Wrong</th><th>W/L</th><th>Win</th><th>Params</th></tr></thead><tbody>';
-  data.forEach((r,i)=>{const ps=JSON.stringify(r.params||{}).substring(0,60);
+  html+='<th>#</th><th>Strategy</th><th>Accuracy</th><th>Signals</th><th>Correct</th><th>Wrong</th><th>Vol Skips</th><th>W/L</th><th>Win</th><th>Params</th><th></th></tr></thead><tbody>';
+  data.forEach((r,i)=>{const ps=JSON.stringify(r.params||{}).substring(0,60);const fullParamsJson=JSON.stringify(r.params||{},null,2).replace(/"/g,'&quot;');
     const checked = bestCompareSelected.has(r.id) ? 'checked' : '';
     const rowClick = cmp ? `bestToggleSelect(${r.id})` : `showDetail(${r.id})`;
     const selectedBg = (cmp && bestCompareSelected.has(r.id)) ? 'background:rgba(139,92,246,0.12)' : '';
     html+=`<tr class="cursor-pointer" onclick="${rowClick}" style="${selectedBg}">`;
     if(cmp) html+=`<td><input type="checkbox" ${checked} onclick="event.stopPropagation();bestToggleSelect(${r.id})" data-best-cb="${r.id}"></td>`;
-    html+=`<td>${i+1}</td><td class="font-medium">${r.strategy}</td><td class="${accClass(r.accuracy_pct)} font-bold text-lg">${r.accuracy_pct}%</td><td>${r.signals}</td><td class="text-green-400">${r.correct}</td><td class="text-red-400">${r.wrong}</td><td>${r.max_win_streak}/${r.max_lose_streak}</td><td>${r.window_size}</td><td class="text-xs text-slate-400 max-w-xs truncate">${ps}</td></tr>`});
+    html+=`<td>${i+1}</td><td class="font-medium">${r.strategy}</td><td class="${accClass(r.accuracy_pct)} font-bold text-lg">${r.accuracy_pct}%</td><td>${r.signals}</td><td class="text-green-400">${r.correct}</td><td class="text-red-400">${r.wrong}</td><td class="text-amber-400">${r.volatility_skips||0}</td><td>${r.max_win_streak}/${r.max_lose_streak}</td><td>${r.window_size}</td><td class="text-xs text-slate-400 max-w-xs truncate" title="${fullParamsJson}">${ps}</td><td><button onclick="event.stopPropagation();navigator.clipboard.writeText(this.getAttribute('data-json'))" class="text-blue-400 hover:text-blue-200 text-xs" data-json="${fullParamsJson}" title="Copy JSON config">📋</button></td></tr>`});
   html+='</tbody></table></div>';el.innerHTML=html;
 }
 

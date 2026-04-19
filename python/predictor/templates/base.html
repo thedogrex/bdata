@@ -122,6 +122,7 @@
     <button onclick="switchTab('history')" id="tab-history" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">History</button>
     <button onclick="switchTab('best')" id="tab-best" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Best Runs</button>
     <button onclick="switchTab('poly')" id="tab-poly" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Polymarket</button>
+    <button onclick="switchTab('poly_batch')" id="tab-poly_batch" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Poly Batch</button>
     <button onclick="switchTab('wallet')" id="tab-wallet" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Wallet</button>
     <button onclick="switchTab('lgbm');lgbmFiInit()" id="tab-lgbm" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">LightGBM</button>
     <button onclick="switchTab('analytics');analyticsLoad()" id="tab-analytics" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Analytics</button>
@@ -135,6 +136,7 @@
   {{TAB_HISTORY}}
   {{TAB_BEST}}
   {{TAB_POLY}}
+  {{TAB_POLY_BATCH}}
   {{TAB_WALLET}}
   {{TAB_LGBM}}
   {{TAB_ANALYTICS}}
@@ -157,6 +159,7 @@ let polyActiveTs=null;
 
 {{JS_COMMON}}
 {{JS_POLY}}
+{{JS_POLY_BATCH}}
 {{JS_ORDERBOOKS}}
 {{JS_COMPARE_ASUME}}
 {{JS_BACKTEST}}

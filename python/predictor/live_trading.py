@@ -1,10 +1,14 @@
 import asyncio
 import json
 import logging
+import os
+import re
 from collections import defaultdict
 from decimal import Decimal, ROUND_CEILING
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+
+import requests
 
 import app.config as config
 from db import DbProvider
@@ -19,6 +23,9 @@ if not logger.handlers:
 
 db = DbProvider()
 trading_client = PolymarketClient()
+
+POLY_VALUE_API_URL = "https://data-api.polymarket.com/value"
+_WALLET_ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 
 def format_order_flow_totals_message(totals: Dict[str, Any], day_label: str) -> str:
@@ -68,6 +75,7 @@ MAX_LIMIT_PRICE_USD = 0.53
 PRICE_RETRY_WINDOW_SEC = 300
 PRICE_RETRY_INTERVAL_SEC = 10
 DEFAULT_BET_SIZE_USD = 3.0
+DEFAULT_BET_SIZE_PCT = 0.035
 MSK_UTC_OFFSET_HOURS = 3
 MSK_UTC_OFFSET = timedelta(hours=MSK_UTC_OFFSET_HOURS)
 MSK_UTC_OFFSET_SECONDS = int(MSK_UTC_OFFSET.total_seconds())
@@ -88,6 +96,87 @@ def _set_cached_collateral_balance_usd(value: Optional[float]) -> None:
 
 def get_cached_collateral_balance_usd() -> Optional[float]:
     return _last_collateral_balance_usd
+
+
+def _normalize_wallet_address(addr: Optional[str]) -> Optional[str]:
+    if not addr:
+        return None
+    if not isinstance(addr, str):
+        addr = str(addr)
+    candidate = addr.strip()
+    if not candidate:
+        return None
+    if not _WALLET_ADDR_RE.match(candidate):
+        return None
+    return candidate.lower()
+
+
+def _resolve_wallet_address_for_positions() -> Optional[str]:
+    for cand in (
+        getattr(config, "WALLET_ADDRESS", None),
+        os.getenv("POLY_FUNDER"),
+    ):
+        norm = _normalize_wallet_address(cand)
+        if norm:
+            return norm
+    try:
+        client = trading_client._clob()
+        for attr in ("wallet_address", "walletAddress", "address", "funder"):
+            norm = _normalize_wallet_address(getattr(client, attr, None))
+            if norm:
+                return norm
+    except Exception:
+        pass
+    return None
+
+
+async def _fetch_positions_value(user_address: Optional[str]) -> Optional[float]:
+    if not user_address:
+        return None
+
+    loop = asyncio.get_event_loop()
+
+    def _request() -> Optional[float]:
+        try:
+            resp = requests.get(
+                POLY_VALUE_API_URL,
+                params={"user": user_address},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            logger.warning("fetch_positions_value failed for %s: %s", user_address, exc)
+            return None
+
+        # API returns a list of {"user": address, "value": number}
+        if isinstance(payload, list):
+            target = user_address.lower()
+            fallback: Optional[float] = None
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                val = item.get("value")
+                try:
+                    num = float(val)
+                except (TypeError, ValueError):
+                    continue
+                addr = _normalize_wallet_address(item.get("user"))
+                if addr == target:
+                    return num
+                if fallback is None:
+                    fallback = num
+            return fallback
+
+        if isinstance(payload, dict):
+            try:
+                return float(payload.get("value"))
+            except (TypeError, ValueError):
+                return None
+
+        return None
+
+    return await loop.run_in_executor(None, _request)
 
 
 async def _get_static_bet_size_usd() -> float:
@@ -385,16 +474,136 @@ _TABLES_SQL = [
       KEY `idx_opened` (`opened_at`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     """,
+    """
+    CREATE TABLE IF NOT EXISTS `poly_live_trade_settings` (
+      `id` varchar(32) NOT NULL DEFAULT 'default',
+      `auto_place` tinyint(1) NOT NULL DEFAULT '0',
+      `bet_size_usd` double NOT NULL DEFAULT '5',
+      `price_cap_cents` int NOT NULL DEFAULT '52',
+      `bet_size_pct` double NOT NULL DEFAULT '0.035',
+      `collateral_usd` double DEFAULT NULL,
+      `positions_value_usd` double DEFAULT NULL,
+      `bank_usd` double DEFAULT NULL,
+      `bank_updated_at` datetime DEFAULT NULL,
+      `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (`id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    """,
+    """ALTER TABLE `poly_live_trade_settings` ADD COLUMN `bet_size_pct` double NOT NULL DEFAULT 0.035 AFTER `price_cap_cents`""",
+    """ALTER TABLE `poly_live_trade_settings` ADD COLUMN `collateral_usd` double DEFAULT NULL AFTER `bet_size_pct`""",
+    """ALTER TABLE `poly_live_trade_settings` ADD COLUMN `positions_value_usd` double DEFAULT NULL AFTER `collateral_usd`""",
+    """ALTER TABLE `poly_live_trade_settings` ADD COLUMN `bank_usd` double DEFAULT NULL AFTER `positions_value_usd`""",
+    """ALTER TABLE `poly_live_trade_settings` ADD COLUMN `bank_updated_at` datetime DEFAULT NULL AFTER `bank_usd`""",
 ]
+
+
+async def _execute_ddl(sql: str) -> None:
+    try:
+        await db.execute(sql)
+    except Exception as e:
+        msg = str(e)
+        if "Duplicate column" in msg or "already exists" in msg:
+            logger.debug("ensure_tables skipped ddl: %s", msg)
+        else:
+            logger.warning("ensure_tables: %s", e)
+
+
+async def _ensure_trade_settings_row() -> None:
+    await db.execute(
+        """
+        INSERT INTO poly_live_trade_settings (id, auto_place, bet_size_usd, price_cap_cents, bet_size_pct)
+        VALUES ('default', 0, %s, 52, %s)
+        ON DUPLICATE KEY UPDATE id=id
+        """,
+        (DEFAULT_BET_SIZE_USD, DEFAULT_BET_SIZE_PCT),
+    )
 
 
 async def ensure_tables():
     """Create trading tables if they don't exist."""
     for sql in _TABLES_SQL:
-        try:
-            await db.execute(sql)
-        except Exception as e:
-            logger.warning("ensure_tables: %s", e)
+        await _execute_ddl(sql)
+    await _ensure_trade_settings_row()
+
+
+async def _get_bet_size_pct() -> float:
+    row = await db.fetchone("SELECT bet_size_pct FROM poly_live_trade_settings WHERE id='default'")
+    if not row or row[0] is None:
+        return DEFAULT_BET_SIZE_PCT
+    try:
+        pct = float(row[0])
+    except (TypeError, ValueError):
+        return DEFAULT_BET_SIZE_PCT
+    return max(0.0, pct)
+
+
+async def get_current_bank_snapshot() -> Dict[str, Any]:
+    loop = asyncio.get_event_loop()
+    balance = await loop.run_in_executor(None, trading_client.get_balance_allowance)
+    collateral = _extract_collateral_balance_usd(balance)
+    wallet_address = _resolve_wallet_address_for_positions()
+    positions_value = await _fetch_positions_value(wallet_address)
+    bank = None
+    if collateral is not None or positions_value is not None:
+        bank = float(collateral or 0.0) + float(positions_value or 0.0)
+    return {
+        "collateral_usd": collateral,
+        "positions_value_usd": positions_value,
+        "bank_usd": bank,
+        "wallet_address": wallet_address,
+    }
+
+
+async def update_bank_snapshot(snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    data = snapshot or await get_current_bank_snapshot()
+    await _ensure_trade_settings_row()
+    pct = await _get_bet_size_pct()
+    bank = data.get("bank_usd")
+    bet_size_usd = None
+    if bank is not None:
+        bet_size_usd = round(float(bank) * pct, 2)
+    await db.execute(
+        """
+        UPDATE poly_live_trade_settings
+        SET
+            bet_size_usd = COALESCE(%s, bet_size_usd),
+            bet_size_pct = %s,
+            collateral_usd = %s,
+            positions_value_usd = %s,
+            bank_usd = %s,
+            bank_updated_at = NOW()
+        WHERE id='default'
+        """,
+        (
+            bet_size_usd,
+            pct,
+            data.get("collateral_usd"),
+            data.get("positions_value_usd"),
+            data.get("bank_usd"),
+        ),
+    )
+    row = await db.fetchone(
+        """
+        SELECT bet_size_usd, bet_size_pct, collateral_usd, positions_value_usd, bank_usd, bank_updated_at
+        FROM poly_live_trade_settings
+        WHERE id='default'
+        """
+    )
+    if row:
+        data.update({
+            "bet_size_usd": row[0],
+            "bet_size_pct": row[1],
+            "collateral_usd": row[2] if data.get("collateral_usd") is None else data.get("collateral_usd"),
+            "positions_value_usd": row[3] if data.get("positions_value_usd") is None else data.get("positions_value_usd"),
+            "bank_usd": row[4] if data.get("bank_usd") is None else data.get("bank_usd"),
+            "bank_updated_at": row[5].isoformat() if row[5] else None,
+        })
+    else:
+        data.update({
+            "bet_size_usd": bet_size_usd,
+            "bet_size_pct": pct,
+        })
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -784,12 +993,39 @@ async def wallet_summary(limit: int = 25) -> Dict[str, Any]:
     """Wallet summary for monitoring: balances, open positions, recent orders."""
     loop = asyncio.get_event_loop()
     balance = await loop.run_in_executor(None, trading_client.get_balance_allowance)
+    collateral_usd = _extract_collateral_balance_usd(balance)
     positions = await list_open_positions()
     orders = await list_orders(limit=limit)
+    wallet_address = _resolve_wallet_address_for_positions()
+    positions_value = await _fetch_positions_value(wallet_address)
+    snapshot_payload = {
+        "collateral_usd": collateral_usd,
+        "positions_value_usd": positions_value,
+    }
+    if snapshot_payload["collateral_usd"] is not None or snapshot_payload["positions_value_usd"] is not None:
+        snapshot_payload["bank_usd"] = float(snapshot_payload.get("collateral_usd") or 0.0) + float(snapshot_payload.get("positions_value_usd") or 0.0)
+    bank_snapshot = await update_bank_snapshot(snapshot_payload)
+    settings_row = await db.fetchone(
+        "SELECT auto_place, price_cap_cents FROM poly_live_trade_settings WHERE id='default'"
+    )
+    settings_payload = {
+        "auto_place": bool(settings_row[0]) if settings_row else False,
+        "price_cap_cents": int(settings_row[1]) if settings_row and settings_row[1] is not None else None,
+        "bet_size_usd": bank_snapshot.get("bet_size_usd"),
+        "bet_size_pct": bank_snapshot.get("bet_size_pct"),
+    }
     return {
         "balance": balance,
         "positions": positions,
         "orders": orders,
+        "positions_value": bank_snapshot.get("positions_value_usd"),
+        "positions_value_address": wallet_address,
+        "collateral_usd": bank_snapshot.get("collateral_usd"),
+        "bank_usd": bank_snapshot.get("bank_usd"),
+        "bank_updated_at": bank_snapshot.get("bank_updated_at"),
+        "bet_size_usd": bank_snapshot.get("bet_size_usd"),
+        "bet_size_pct": bank_snapshot.get("bet_size_pct"),
+        "settings": settings_payload,
     }
 
 

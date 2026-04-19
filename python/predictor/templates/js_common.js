@@ -301,7 +301,7 @@ function ensureBacktestConfig(){
 }
 
 // ===== TABS =====
-const TABS=['backtest','bruteforce','history','best','best_compare','poly','wallet','lgbm','analytics','compare_asume','order_pricing'];
+const TABS=['backtest','bruteforce','history','best','best_compare','poly','poly_batch','wallet','lgbm','analytics','compare_asume','order_pricing'];
 
 function getInitialTab(){
   let tabParam = null;
@@ -356,8 +356,11 @@ function switchTab(tab){
   if(tab==='history')loadHistory();
   if(tab==='best')loadBest();
   if(tab==='bruteforce')loadBfSessions();
-  if(tab==='poly'){loadPolyMarkets();}
-  else{
+  if(tab==='poly'){
+    loadPolyMarkets();
+  }else if(tab==='poly_batch'){
+    polyBatchLoadLatest();
+  }else{
     clearPolySelectionComplete();
     stopPolyOrderBookUpdates();
     if(typeof stopLiveMarketPoll === 'function') stopLiveMarketPoll();
@@ -374,6 +377,8 @@ let walletOrdersCache = [];
 let walletOrdersPage = 1;
 let walletAnalyticsInitialized = false;
 let walletAnalyticsRange = {from: null, to: null};
+let walletBankSnapshot = null;
+let walletBetPct = 3.5;
 
 function walletFormatDateInput(d){
   if(!(d instanceof Date)) return '';
@@ -667,35 +672,151 @@ function renderWallet(data){
     return null;
   };
 
-  // Extract and display a friendly USDC balance line
-  let friendlyBalance = '';
-  const coll = balance?.collateral;
-  if(coll){
-    let usd = null;
-    if(typeof coll === 'number' || typeof coll === 'string'){
-      usd = normUsdc(coll);
-    } else if(typeof coll === 'object'){
-      for(const k of ['availableBalance','available_balance','balance','totalBalance','total_balance','amount','value']){
-        if(coll[k] !== undefined && coll[k] !== null){
-          const v = normUsdc(coll[k]);
-          if(v !== null && Number.isFinite(v)){ usd = v; break; }
+  walletBankSnapshot = {
+    collateral_usd: data?.collateral_usd,
+    positions_value_usd: data?.positions_value,
+    bank_usd: data?.bank_usd,
+    bet_size_usd: data?.bet_size_usd,
+    bet_size_pct: data?.bet_size_pct,
+    bank_updated_at: data?.bank_updated_at,
+  };
+  if(Number.isFinite(Number(walletBankSnapshot?.bet_size_pct))){
+    walletBetPct = Number(walletBankSnapshot.bet_size_pct) * 100;
+  }
+  const summaryBlocks = [];
+  if(Number.isFinite(Number(walletBankSnapshot?.collateral_usd))){
+    summaryBlocks.push(`<div class="mb-2"><div class="text-slate-400 text-[11px]">Balance (USDC)</div><div class="text-green-400 text-[12px] font-semibold">$${Number(walletBankSnapshot.collateral_usd).toFixed(2)}</div></div>`);
+  }else{
+    const coll = balance?.collateral;
+    if(coll){
+      let usd = null;
+      if(typeof coll === 'number' || typeof coll === 'string'){
+        usd = normUsdc(coll);
+      } else if(typeof coll === 'object'){
+        for(const k of ['availableBalance','available_balance','balance','totalBalance','total_balance','amount','value']){
+          if(coll[k] !== undefined && coll[k] !== null){
+            const v = normUsdc(coll[k]);
+            if(v !== null && Number.isFinite(v)){ usd = v; break; }
+          }
         }
       }
-    }
-    if(usd !== null && Number.isFinite(usd)){
-      friendlyBalance = `<div class="mb-2"><div class="text-slate-400 text-[11px]">Balance (USDC)</div><div class="text-green-400 text-[12px] font-semibold">$${usd.toFixed(2)}</div></div>`;
+      if(usd !== null && Number.isFinite(usd)){
+        summaryBlocks.push(`<div class="mb-2"><div class="text-slate-400 text-[11px]">Balance (USDC)</div><div class="text-green-400 text-[12px] font-semibold">$${usd.toFixed(2)}</div></div>`);
+      }
     }
   }
 
-  const balanceBlock = (title, obj) => {
-    const content = obj ? JSON.stringify(obj, null, 2) : '{}';
-    return `<div class="mb-2"><div class="text-slate-400 text-[11px]">${title}</div><pre class="text-[11px] font-mono whitespace-pre-wrap">${content}</pre></div>`;
-  };
-  balEl.innerHTML = friendlyBalance || '<div class="text-slate-500 text-xs">No balance data.</div>';
+  if(Number.isFinite(Number(walletBankSnapshot?.positions_value_usd))){
+    summaryBlocks.push(`<div class="mb-2"><div class="text-slate-400 text-[11px]">Open Positions Value</div><div class="text-indigo-300 text-[12px] font-semibold">$${Number(walletBankSnapshot.positions_value_usd).toFixed(2)}</div></div>`);
+  } else if(data?.positions_value !== undefined && data?.positions_value !== null){
+    const num = Number(data.positions_value);
+    const formatted = Number.isFinite(num) ? `$${num.toFixed(2)}` : `${data.positions_value}`;
+    summaryBlocks.push(`<div class="mb-2"><div class="text-slate-400 text-[11px]">Open Positions Value</div><div class="text-indigo-300 text-[12px] font-semibold">${formatted}</div></div>`);
+  }
+
+  if(Number.isFinite(Number(walletBankSnapshot?.bank_usd))){
+    summaryBlocks.push(`<div class="mb-2"><div class="text-slate-400 text-[11px]">Current Bank</div><div class="text-slate-100 text-[13px] font-semibold">$${Number(walletBankSnapshot.bank_usd).toFixed(2)}</div><div class="text-[10px] text-slate-500">Updated ${walletBankSnapshot.bank_updated_at || '—'}</div></div>`);
+  }
+
+  if(data?.positions_value_address){
+    summaryBlocks.push(`<div class="text-[10px] text-slate-500">Address: <span class="font-mono text-slate-300">${data.positions_value_address}</span></div>`);
+  }
+
+  balEl.innerHTML = summaryBlocks.length ? summaryBlocks.join('') : '<div class="text-slate-500 text-xs">No balance data.</div>';
+  const betValueEl = document.getElementById('wallet-bet-size-value');
+  if(betValueEl){
+    if(Number.isFinite(Number(walletBankSnapshot?.bet_size_usd))){
+      betValueEl.textContent = `$${Number(walletBankSnapshot.bet_size_usd).toFixed(2)} (${(walletBetPct||0).toFixed(2)}%)`;
+    }else{
+      betValueEl.textContent = '—';
+    }
+  }
+  const autoPill = document.getElementById('wallet-auto-place-pill');
+  if(autoPill){
+    const auto = !!data?.settings?.auto_place;
+    autoPill.textContent = auto ? 'Enabled' : 'Disabled';
+    autoPill.classList.toggle('bg-emerald-500/20', auto);
+    autoPill.classList.toggle('text-emerald-200', auto);
+    autoPill.classList.toggle('bg-slate-800', !auto);
+  }
 
   if(ordEl){
     walletOrdersCache = orders.slice();
     walletRenderOrders(ordEl);
+  }
+}
+
+function walletOpenBetSizeDialog(){
+  const dlg = document.getElementById('wallet-bet-dialog');
+  if(!dlg) return;
+  const input = document.getElementById('wallet-bet-pct-input');
+  if(input){
+    input.value = (walletBetPct || 3.5).toFixed(2);
+  }
+  const preview = document.getElementById('wallet-bet-pct-preview');
+  if(preview && Number.isFinite(Number(walletBankSnapshot?.bank_usd))){
+    const pct = Number(input?.value || walletBetPct || 3.5)/100;
+    const bet = Number(walletBankSnapshot.bank_usd) * pct;
+    preview.textContent = `$${bet.toFixed(2)}`;
+  }
+  dlg.showModal();
+  if(input){
+    input.removeEventListener('input', walletOnBetPctInput);
+    input.addEventListener('input', walletOnBetPctInput);
+  }
+}
+
+function walletCloseBetSizeDialog(){
+  const dlg = document.getElementById('wallet-bet-dialog');
+  if(dlg) dlg.close();
+}
+
+function walletOnBetPctInput(){
+  const input = document.getElementById('wallet-bet-pct-input');
+  const preview = document.getElementById('wallet-bet-pct-preview');
+  if(!input || !preview) return;
+  const pct = Math.max(0.001, Math.min(20, Number(input.value)||0));
+  if(Number.isFinite(Number(walletBankSnapshot?.bank_usd))){
+    const bet = Number(walletBankSnapshot.bank_usd) * (pct/100);
+    preview.textContent = `$${bet.toFixed(2)}`;
+  }else{
+    preview.textContent = '—';
+  }
+}
+
+async function walletConfirmBetPct(){
+  const input = document.getElementById('wallet-bet-pct-input');
+  const statusEl = document.getElementById('wallet-bet-pct-status');
+  if(!input) return;
+  const pct = Math.max(0.001, Math.min(20, Number(input.value)||0));
+  walletBetPct = pct;
+  if(statusEl){
+    statusEl.textContent = 'Saving…';
+    statusEl.classList.remove('text-green-300','text-red-300');
+    statusEl.classList.add('text-slate-400');
+  }
+  try{
+    const res = await fetch(API + '/api/poly/live/bet_pct',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bet_size_pct:pct/100})});
+    if(!res.ok) throw new Error('Save failed');
+    const data = await res.json();
+    if(data?.settings){
+      walletBankSnapshot = walletBankSnapshot || {};
+      Object.assign(walletBankSnapshot, data.settings);
+    }
+    if(statusEl){
+      statusEl.textContent = 'Updated';
+      statusEl.classList.remove('text-slate-400','text-red-300');
+      statusEl.classList.add('text-green-300');
+    }
+    walletCloseBetSizeDialog();
+    loadWallet();
+  }catch(err){
+    console.error('walletConfirmBetPct error', err);
+    if(statusEl){
+      statusEl.textContent = 'Error updating bet %';
+      statusEl.classList.remove('text-slate-400','text-green-300');
+      statusEl.classList.add('text-red-300');
+    }
   }
 }
 
@@ -769,8 +890,8 @@ function renderResult(data,targetId){
       </div>
       <div class="p-2 rounded text-xs mb-3" style="background:#1e293b">Win streak: <b class="text-green-400">${r.streaks?.max_win_streak||0}</b> | Lose streak: <b class="text-red-400">${r.streaks?.max_lose_streak||0}</b>${r.train_count?` | Trains: <b>${r.train_count}</b> (${r.total_train_time_sec}s) | Predict: ${r.predict_time_sec}s`:''}</div>`;
     if(r.monthly?.length){
-      html+=`<details class="mb-2"><summary class="text-xs text-slate-400 cursor-pointer">Monthly (${r.monthly.length})</summary><table class="mt-1"><thead><tr><th>Month</th><th>Total</th><th>Correct</th><th>Acc</th></tr></thead><tbody>`;
-      r.monthly.forEach(m=>{html+=`<tr><td>${m.month}</td><td>${m.total}</td><td>${m.correct}</td><td class="${accClass(m.accuracy)}">${m.accuracy}%</td></tr>`});
+      html+=`<details class="mb-2"><summary class="text-xs text-slate-400 cursor-pointer">Monthly (${r.monthly.length})</summary><table class="mt-1"><thead><tr><th>Month</th><th>Total</th><th>Correct</th><th>Acc</th><th>Vol Skips</th></tr></thead><tbody>`;
+      r.monthly.forEach(m=>{const vs=Number(m.volatility_skips||0);html+=`<tr><td>${m.month}</td><td>${m.total}</td><td>${m.correct}</td><td class="${accClass(m.accuracy)}">${m.accuracy}%</td><td class="text-amber-400">${vs}</td></tr>`});
       html+=`</tbody></table></details>`}
     if(r.confidence_distribution){
       html+=`<details><summary class="text-xs text-slate-400 cursor-pointer">Confidence</summary><div class="grid grid-cols-7 gap-1 mt-1">`;
@@ -1140,6 +1261,7 @@ function histRenderBfBody(bfId){
       <div class="flex items-end gap-3">
         <div>
           <label class="block text-xs text-slate-400 mb-1">Window Size</label>
+          <input type="number" id="wallet-bet-pct-input" min="0.1" max="20" step="0.1" class="w-full mb-4" placeholder="3.5" oninput="walletOnBetPctInput()" />
           <input type="number" value="${winVal}" placeholder="5000" class="w-32" oninput="histSetBfWin(${bfId},this.value)" />
         </div>
         <button onclick="bfToggleCompareMode(${bfId})" class="btn ${cmpBtnClass} text-xs">${cmpBtnLabel}</button>
@@ -1636,7 +1758,8 @@ function bestSimKelly(run, startBank, buyPriceCents, maxBet, betPct, betFeeRate)
       edge_signals: res.edgeSignals,
       avg_stake: res.avgStake,
       max_stake: res.maxStakeUsed,
-      accuracy: (m.accuracy||0)
+      accuracy: (m.accuracy||0),
+      volatility_skips: Number(m.volatility_skips||0)
     });
   }
   return {run, label, kellyHalf: kellyFull/2, kellyFull, kellyApplied, b, monthEntries, finalBank: bank};
@@ -1793,9 +1916,9 @@ function bestRenderCompareTable(simResults, startBank, targetElId, title){
   // Detail table with signals breakdown
   html += '<details class="mt-4"><summary class="text-xs text-slate-400 cursor-pointer font-semibold">Monthly Signal Details</summary>';
   html += '<div style="overflow-x:auto" class="mt-2"><table><thead><tr><th>Run</th>';
-  allMonths.forEach(m => html += `<th colspan="2">${m}</th>`);
+  allMonths.forEach(m => html += `<th colspan="3">${m}</th>`);
   html += '</tr><tr><th></th>';
-  allMonths.forEach(() => html += '<th class="text-xs text-slate-500">Sig</th><th class="text-xs text-slate-500">Acc%</th>');
+  allMonths.forEach(() => html += '<th class="text-xs text-slate-500">Sig</th><th class="text-xs text-slate-500">Acc%</th><th class="text-xs text-slate-500">Vol</th>');
   html += '</tr></thead><tbody>';
 
   simResults.forEach((s, i) => {
@@ -1805,9 +1928,10 @@ function bestRenderCompareTable(simResults, startBank, targetElId, title){
       const entry = s.monthEntries.find(e => e.month === month);
       if(entry){
         const a = entry.accuracy != null ? entry.accuracy : (entry.wins/Math.max(1,entry.signals)*100);
-        html += `<td class="text-xs font-mono">${entry.signals}</td><td class="text-xs ${accClass(a)}">${a.toFixed(1)}%</td>`;
+        const vol = entry.volatility_skips != null ? entry.volatility_skips : 0;
+        html += `<td class="text-xs font-mono">${entry.signals}</td><td class="text-xs ${accClass(a)}">${a.toFixed(1)}%</td><td class="text-xs text-amber-400">${vol}</td>`;
       } else {
-        html += '<td>—</td><td>—</td>';
+        html += '<td>—</td><td>—</td><td>—</td>';
       }
     });
     html += '</tr>';
@@ -2358,13 +2482,14 @@ async function analyticsKellyLoad(){
     const el=document.getElementById(id);
     if(el) el.innerHTML='<div class="text-slate-500 text-xs">Loading…</div>';
   });
-
   try{
     const res = await fetch(url);
     const data = await res.json();
     analyticsKellyRenderSummary(data);
-    analyticsKellyRenderTable(data);
-  }catch(e){ console.error('Kelly sim error',e); }
+    analyticsKellyRenderWallet(data);
+  }catch(e){
+    console.error('Kelly sim error',e);
+  }
 }
 
 function analyticsKellyRenderSummary(d){

@@ -62,6 +62,7 @@ class RSIMeanReversionStrategy(BaseStrategy):
             df = add_technical_features(df)
 
         self._last_vol_skip_count = 0
+        self._last_vol_skip_flags = np.array([], dtype=bool)
 
         period = self.params["rsi_period"]
         rsi_col = f"rsi_{period}" if f"rsi_{period}" in df.columns else "rsi_14"
@@ -110,11 +111,13 @@ class RSIMeanReversionStrategy(BaseStrategy):
         length = len(rsi)
         if length == 0:
             self._last_vol_skip_count = 0
+            self._last_vol_skip_flags = np.array([], dtype=bool)
             return np.array([], dtype=float)
 
         proba = np.full(length, 0.5)
         bb_arr = None if bb_pos is None else np.asarray(bb_pos, dtype=float)
         vol_metrics = self._get_vol_metrics(df)
+        vol_skip_flags = np.zeros(length, dtype=bool)
 
         min_vol = float(self.params.get("min_vol", 0.0))
         max_vol = float(self.params.get("max_vol", 1.0))
@@ -171,12 +174,17 @@ class RSIMeanReversionStrategy(BaseStrategy):
                     valid &= ratio_mask < ratio_max
 
                 skip_mask = ~valid
-                total_vol_skips += int(np.count_nonzero(skip_mask))
-                proba_chunk[skip_mask] = 0.5
+                if np.any(skip_mask):
+                    total_vol_skips += int(np.count_nonzero(skip_mask))
+                    chunk_flags = vol_skip_flags[start:end]
+                    chunk_flags[skip_mask] = True
+                    vol_skip_flags[start:end] = chunk_flags
+                    proba_chunk[skip_mask] = 0.5
 
             await maybe_yield()
 
         self._last_vol_skip_count = total_vol_skips
+        self._last_vol_skip_flags = vol_skip_flags
         await maybe_yield(force=False)
 
         np.clip(proba, 0, 1, out=proba)

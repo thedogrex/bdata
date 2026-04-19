@@ -39,10 +39,19 @@ _request_cleanup_deadline: Optional[datetime] = None
 _daily_balance_date: Optional[date] = None
 _daily_balance_start_usd: Optional[float] = None
 _last_balance_report_day: Optional[date] = None
+_recent_batch_results: Dict[str, Any] = {
+    "updated_at": None,
+    "limit": 0,
+    "markets": [],
+    "summary": {"UP": 0, "DOWN": 0, "UNDEFINED": 0, "ERROR": 0},
+}
 
+BET_SIZE_PCT_MIN = 0.001
+BET_SIZE_PCT_MAX = 0.2
 DEFAULT_LIVE_TRADE_SETTINGS = {
     "auto_place": False,
     "bet_size_usd": 5.0,
+    "bet_size_pct": 0.035,
     "price_cap_cents": 52,
 }
 
@@ -337,11 +346,22 @@ def _has_pending_request() -> bool:
     return status == "pending"
 
 
-async def request_bet_size_change(auto_place: bool, bet_size_usd: float, price_cap_cents: int) -> Dict[str, Any]:
+async def request_bet_size_change(
+    auto_place: bool,
+    bet_size_usd: float,
+    price_cap_cents: int,
+    bet_size_pct: float | None = None,
+) -> Dict[str, Any]:
     global _current_bet_size_request
 
     current_settings = await get_live_trade_settings()
     prev_bet = float(current_settings.get("bet_size_usd", DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"]))
+    if bet_size_pct is None:
+        bank_val = current_settings.get("bank_usd")
+        if bank_val and float(bank_val) > 0:
+            bet_size_pct = max(BET_SIZE_PCT_MIN, min(BET_SIZE_PCT_MAX, float(bet_size_usd) / float(bank_val)))
+        else:
+            bet_size_pct = current_settings.get("bet_size_pct", DEFAULT_LIVE_TRADE_SETTINGS["bet_size_pct"])
     bet_changed = float(bet_size_usd) != float(prev_bet)
 
     if not bet_changed:
@@ -349,6 +369,7 @@ async def request_bet_size_change(auto_place: bool, bet_size_usd: float, price_c
             auto_place=auto_place,
             bet_size_usd=bet_size_usd,
             price_cap_cents=price_cap_cents,
+            bet_size_pct=bet_size_pct,
         )
         _reset_request_if_done()
         return {"status": "saved", "settings": saved}
@@ -363,6 +384,7 @@ async def request_bet_size_change(auto_place: bool, bet_size_usd: float, price_c
         "id": request_id,
         "requested_bet_size": float(bet_size_usd),
         "previous_bet_size": prev_bet,
+        "requested_bet_size_pct": float(bet_size_pct or DEFAULT_LIVE_TRADE_SETTINGS["bet_size_pct"]),
         "status": "pending",
         "requested_at": _utcnow(),
         "expires_at": expires_at,
@@ -397,6 +419,7 @@ async def approve_bet_size_request(request_id: str, actor: Optional[str] = None)
         auto_place=_current_bet_size_request.get("auto_place", False),
         bet_size_usd=float(_current_bet_size_request["requested_bet_size"]),
         price_cap_cents=int(_current_bet_size_request.get("price_cap_cents", DEFAULT_LIVE_TRADE_SETTINGS["price_cap_cents"])),
+        bet_size_pct=float(_current_bet_size_request.get("requested_bet_size_pct", DEFAULT_LIVE_TRADE_SETTINGS["bet_size_pct"])),
     )
     try:
         await _notify_info_change(
@@ -731,6 +754,7 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
     last_resolution_scan = 0
     last_active_missing_refresh = 0
     last_balance_refresh = 0
+    last_bank_snapshot_refresh = 0
     last_daily_report_check = 0
     last_order_flow_report = 0
     last_seen_active_ts: Optional[int] = None
@@ -784,6 +808,16 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     logger.warning("[poll_loop] failed to refresh collateral balance: %s", exc)
                 finally:
                     last_balance_refresh = current_time
+
+            if current_time - last_bank_snapshot_refresh >= 60:
+                try:
+                    from predictor import live_trading  # local import to avoid circular dep
+
+                    await live_trading.update_bank_snapshot()
+                except Exception as exc:
+                    logger.warning("[poll_loop] failed to refresh bank snapshot: %s", exc)
+                finally:
+                    last_bank_snapshot_refresh = current_time
             
             # Get current active timestamp
             current_ts = _get_current_ts()
@@ -970,32 +1004,55 @@ async def save_settings(autopredict: bool, strategy: str, params: Optional[dict]
 def _normalize_live_trade_settings(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     merged = dict(DEFAULT_LIVE_TRADE_SETTINGS)
     if data:
-        merged.update({k: data.get(k) for k in merged.keys() if data.get(k) is not None})
+        for key, value in data.items():
+            if value is not None:
+                merged[key] = value
 
     bet_size = float(merged.get("bet_size_usd", DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"]) or DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"])
     bet_size = max(0.0, bet_size)
     price_cap = int(merged.get("price_cap_cents", DEFAULT_LIVE_TRADE_SETTINGS["price_cap_cents"]) or DEFAULT_LIVE_TRADE_SETTINGS["price_cap_cents"])
     price_cap = max(1, min(MAX_PRICE_CAP_CENTS, price_cap))
+    bet_size_pct = merged.get("bet_size_pct", DEFAULT_LIVE_TRADE_SETTINGS["bet_size_pct"])
+    try:
+        bet_size_pct = float(bet_size_pct)
+    except (TypeError, ValueError):
+        bet_size_pct = DEFAULT_LIVE_TRADE_SETTINGS["bet_size_pct"]
+    bet_size_pct = max(BET_SIZE_PCT_MIN, min(BET_SIZE_PCT_MAX, bet_size_pct))
 
-    return {
+    normalized = {
         "auto_place": bool(merged.get("auto_place", False)),
         "bet_size_usd": bet_size,
+        "bet_size_pct": bet_size_pct,
         "price_cap_cents": price_cap,
     }
+    for extra_key in ("collateral_usd", "positions_value_usd", "bank_usd", "bank_updated_at"):
+        if extra_key in merged and merged[extra_key] is not None:
+            normalized[extra_key] = merged[extra_key]
+    return normalized
 
 
 async def get_live_trade_settings() -> Dict[str, Any]:
     row = await db.fetchone(
-        "SELECT auto_place, bet_size_usd, price_cap_cents FROM poly_live_trade_settings WHERE id='default'"
+        """
+        SELECT auto_place, bet_size_usd, price_cap_cents, bet_size_pct,
+               collateral_usd, positions_value_usd, bank_usd, bank_updated_at
+        FROM poly_live_trade_settings
+        WHERE id='default'
+        """
     )
     if not row:
         return dict(DEFAULT_LIVE_TRADE_SETTINGS)
-    auto_place, bet_size, price_cap = row
+    auto_place, bet_size, price_cap, bet_pct, coll, pos_val, bank, bank_ts = row
     return _normalize_live_trade_settings(
         {
             "auto_place": bool(auto_place),
             "bet_size_usd": bet_size,
             "price_cap_cents": price_cap,
+            "bet_size_pct": bet_pct,
+            "collateral_usd": coll,
+            "positions_value_usd": pos_val,
+            "bank_usd": bank,
+            "bank_updated_at": bank_ts.isoformat() if bank_ts else None,
         }
     )
 
@@ -1004,33 +1061,81 @@ async def save_live_trade_settings(
     auto_place: bool,
     bet_size_usd: float,
     price_cap_cents: int,
+    bet_size_pct: float | None = None,
 ) -> Dict[str, Any]:
+    if bet_size_pct is None:
+        row = await db.fetchone("SELECT bank_usd FROM poly_live_trade_settings WHERE id='default'")
+        bank_val = None
+        if row and row[0] is not None:
+            try:
+                bank_val = float(row[0])
+            except (TypeError, ValueError):
+                bank_val = None
+        if bank_val and bank_val > 0:
+            bet_size_pct = max(BET_SIZE_PCT_MIN, min(BET_SIZE_PCT_MAX, float(bet_size_usd) / bank_val))
+        else:
+            bet_size_pct = DEFAULT_LIVE_TRADE_SETTINGS["bet_size_pct"]
+
     normalized = _normalize_live_trade_settings(
         {
             "auto_place": auto_place,
             "bet_size_usd": bet_size_usd,
             "price_cap_cents": price_cap_cents,
+            "bet_size_pct": bet_size_pct,
         }
     )
 
     await db.execute(
         """
         INSERT INTO poly_live_trade_settings
-            (id, auto_place, bet_size_usd, price_cap_cents)
-        VALUES ('default', %s, %s, %s) AS new
+            (id, auto_place, bet_size_usd, price_cap_cents, bet_size_pct)
+        VALUES ('default', %s, %s, %s, %s) AS new
         ON DUPLICATE KEY UPDATE
             auto_place=new.auto_place,
             bet_size_usd=new.bet_size_usd,
-            price_cap_cents=new.price_cap_cents
+            price_cap_cents=new.price_cap_cents,
+            bet_size_pct=new.bet_size_pct
         """,
         (
             int(bool(normalized["auto_place"])),
             float(normalized["bet_size_usd"]),
             int(normalized["price_cap_cents"]),
+            float(normalized["bet_size_pct"]),
         ),
     )
+    try:
+        from predictor import live_trading
+
+        await live_trading.update_bank_snapshot()
+    except Exception:
+        logger.debug("save_live_trade_settings: bank snapshot refresh skipped", exc_info=True)
 
     return await get_live_trade_settings()
+
+
+async def set_bet_size_pct(bet_size_pct: float) -> Dict[str, Any]:
+    try:
+        pct = float(bet_size_pct)
+    except (TypeError, ValueError):
+        return {"error": "bet_size_pct must be a number"}
+    pct = max(BET_SIZE_PCT_MIN, min(BET_SIZE_PCT_MAX, pct))
+    await db.execute(
+        "UPDATE poly_live_trade_settings SET bet_size_pct=%s WHERE id='default'",
+        (pct,),
+    )
+    snapshot = None
+    try:
+        from predictor import live_trading
+
+        snapshot = await live_trading.update_bank_snapshot()
+    except Exception as exc:
+        logger.warning("set_bet_size_pct: update snapshot failed: %s", exc)
+    settings = await get_live_trade_settings()
+    if snapshot:
+        for key in ("bank_usd", "bet_size_usd", "bet_size_pct", "bank_updated_at", "collateral_usd", "positions_value_usd"):
+            if key in snapshot and snapshot[key] is not None:
+                settings[key] = snapshot[key]
+    return {"status": "ok", "settings": settings}
 
 
 async def list_markets(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
@@ -1908,6 +2013,7 @@ async def batch_predict_for_market(
     slug: str,
     quantum: bool = False,
     table: str = "c_5m",
+    persist: bool = True,
 ) -> Dict[str, Any]:
     """Run predictions for all active templates on a market.
     If quantum=True, simulate missing candle as green/red scenarios.
@@ -1951,21 +2057,22 @@ async def batch_predict_for_market(
                 "quantum": True,
                 "result": qr,
             })
-            if qr.get("error"):
-                await db.execute(_RUN_SQL, (
-                    slug, batch_id, tpl["id"], tpl["name"], tpl["strategy"], params_json_str,
-                    tpl["window_size"], tpl["horizon"], 1, None,
-                    None, None, started_at, finished_at, duration_ms, qr["error"], None,
-                ))
-            else:
-                for sc_name, sc in (qr.get("scenarios") or {}).items():
+            if persist:
+                if qr.get("error"):
                     await db.execute(_RUN_SQL, (
                         slug, batch_id, tpl["id"], tpl["name"], tpl["strategy"], params_json_str,
-                        tpl["window_size"], tpl["horizon"], 1, sc_name,
-                        sc.get("prediction"), sc.get("probability"),
-                        started_at, finished_at, duration_ms, None,
-                        json.dumps(sc, ensure_ascii=False),
+                        tpl["window_size"], tpl["horizon"], 1, None,
+                        None, None, started_at, finished_at, duration_ms, qr["error"], None,
                     ))
+                else:
+                    for sc_name, sc in (qr.get("scenarios") or {}).items():
+                        await db.execute(_RUN_SQL, (
+                            slug, batch_id, tpl["id"], tpl["name"], tpl["strategy"], params_json_str,
+                            tpl["window_size"], tpl["horizon"], 1, sc_name,
+                            sc.get("prediction"), sc.get("probability"),
+                            started_at, finished_at, duration_ms, None,
+                            json.dumps(sc, ensure_ascii=False),
+                        ))
         else:
             r = await predict_for_market(
                 slug=slug,
@@ -1984,18 +2091,19 @@ async def batch_predict_for_market(
                 "quantum": False,
                 "result": r,
             })
-            await db.execute(_RUN_SQL, (
-                slug, batch_id, tpl["id"], tpl["name"], tpl["strategy"], params_json_str,
-                tpl["window_size"], tpl["horizon"], 0, None,
-                r.get("prediction") if not r.get("error") else None,
-                r.get("probability") if not r.get("error") else None,
-                started_at, finished_at, duration_ms,
-                r.get("error") or None,
-                json.dumps(r, ensure_ascii=False) if not r.get("error") else None,
-            ))
+            if persist:
+                await db.execute(_RUN_SQL, (
+                    slug, batch_id, tpl["id"], tpl["name"], tpl["strategy"], params_json_str,
+                    tpl["window_size"], tpl["horizon"], 0, None,
+                    r.get("prediction") if not r.get("error") else None,
+                    r.get("probability") if not r.get("error") else None,
+                    started_at, finished_at, duration_ms,
+                    r.get("error") or None,
+                    json.dumps(r, ensure_ascii=False) if not r.get("error") else None,
+                ))
 
     # For non-quantum: cache vote summary on poly_markets row
-    if not quantum:
+    if not quantum and persist:
         up = sum(1 for e in results if e["result"].get("prediction") == "UP")
         dn = sum(1 for e in results if e["result"].get("prediction") == "DOWN")
         unk = len(results) - up - dn
@@ -2279,6 +2387,105 @@ async def get_prediction_candles(
         "total_in_window": len(list(reversed(rows))),
         "candles": candles,
     }
+
+
+def _resolve_primary_label(label_counts: Dict[str, int]) -> str:
+    up = label_counts.get("UP", 0)
+    down = label_counts.get("DOWN", 0)
+    error = label_counts.get("ERROR", 0)
+    undefined = label_counts.get("UNDEFINED", 0)
+    if up and not down:
+        return "UP"
+    if down and not up:
+        return "DOWN"
+    if not up and not down:
+        if error and not undefined:
+            return "ERROR"
+        return "UNDEFINED"
+    return "MIXED"
+
+
+def get_recent_batch_predictions() -> Dict[str, Any]:
+    return _recent_batch_results
+
+
+async def run_recent_batch_predictions(limit: int = 20, table: str = "c_5m") -> Dict[str, Any]:
+    global _recent_batch_results
+
+    try:
+        limit_int = int(limit)
+    except (TypeError, ValueError):
+        limit_int = 20
+    limit_int = max(1, limit_int)
+
+    rows = await db.fetchall(
+        """
+        SELECT slug, ts
+        FROM poly_markets
+        WHERE slug IS NOT NULL
+        ORDER BY ts DESC
+        LIMIT %s
+        """,
+        (limit_int,)
+    )
+
+    markets: List[Dict[str, Any]] = []
+    summary: Dict[str, int] = {"UP": 0, "DOWN": 0, "UNDEFINED": 0, "ERROR": 0}
+
+    for slug, ts in rows:
+        entry: Dict[str, Any] = {
+            "slug": slug,
+            "market_ts": int(ts) if ts is not None else None,
+            "market_dt": datetime.utcfromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S") if ts else None,
+            "table": table,
+            "results": [],
+        }
+        try:
+            batch = await batch_predict_for_market(
+                slug=slug,
+                quantum=False,
+                table=table,
+                persist=False,
+            )
+            entry["batch_id"] = batch.get("batch_id")
+            label_counts = {"UP": 0, "DOWN": 0, "UNDEFINED": 0, "ERROR": 0}
+            for tpl in batch.get("results", []):
+                tpl_res = tpl.get("result") or {}
+                if tpl_res.get("error"):
+                    label = "ERROR"
+                else:
+                    label = str(tpl_res.get("prediction") or "UNDEFINED").upper()
+                    if label not in {"UP", "DOWN"}:
+                        label = "UNDEFINED"
+                label_counts[label] += 1
+                summary[label] = summary.get(label, 0) + 1
+                entry["results"].append({
+                    "template_id": tpl.get("template_id"),
+                    "template_name": tpl.get("template_name"),
+                    "horizon": tpl.get("horizon"),
+                    "label": label,
+                    "probability": tpl_res.get("probability"),
+                    "error": tpl_res.get("error"),
+                })
+            entry["labels"] = [lbl for lbl, cnt in label_counts.items() if cnt > 0]
+            entry["main_label"] = _resolve_primary_label(label_counts)
+            entry["summary"] = label_counts
+        except Exception as exc:
+            entry["error"] = str(exc)
+            entry["labels"] = ["ERROR"]
+            entry["main_label"] = "ERROR"
+            entry["summary"] = {"UP": 0, "DOWN": 0, "UNDEFINED": 0, "ERROR": 1}
+            summary["ERROR"] = summary.get("ERROR", 0) + 1
+        markets.append(entry)
+
+    _recent_batch_results = {
+        "updated_at": datetime.utcnow().isoformat(),
+        "limit": limit_int,
+        "table": table,
+        "markets": markets,
+        "summary": summary,
+    }
+    return _recent_batch_results
 
 
 async def get_orderbook_analysis(slug: str, asset_id: str, minutes: int = 60) -> List[Dict[str, Any]]:

@@ -125,6 +125,11 @@ class LiveTradeSettingsRequest(BaseModel):
     auto_place: bool = False
     bet_size_usd: float = 5.0
     price_cap_cents: int = 52
+    bet_size_pct: float | None = None
+
+
+class BetSizePctRequest(BaseModel):
+    bet_size_pct: float
 
 
 class SimTradeRequest(BaseModel):
@@ -381,6 +386,16 @@ async def api_poly_batch_predict(req: BatchPredictRequest):
     )
 
 
+@app.post("/api/poly/batch_recent")
+async def api_poly_batch_recent(limit: int = Query(20, ge=1), table: str = Query("c_5m")):
+    return await poly_service.run_recent_batch_predictions(limit=limit, table=table)
+
+
+@app.get("/api/poly/batch_recent")
+async def api_poly_batch_recent_get():
+    return poly_service.get_recent_batch_predictions()
+
+
 @app.get("/api/poly/pred_runs/{slug:path}")
 async def api_get_pred_runs(slug: str, limit: int = 200):
     return await poly_service.get_pred_runs_for_market(slug=slug, limit=limit)
@@ -446,6 +461,7 @@ async def api_poly_save_live_trade_settings(req: LiveTradeSettingsRequest):
         auto_place=req.auto_place,
         bet_size_usd=req.bet_size_usd,
         price_cap_cents=req.price_cap_cents,
+        bet_size_pct=req.bet_size_pct,
     )
 
 
@@ -460,6 +476,11 @@ async def api_poly_bet_size_request_state():
 @app.post("/api/poly/live/trade_settings/cancel")
 async def api_poly_cancel_bet_size_request():
     return await poly_service.cancel_bet_size_request()
+
+
+@app.post("/api/poly/live/bet_pct")
+async def api_poly_set_bet_pct(req: BetSizePctRequest):
+    return await poly_service.set_bet_size_pct(req.bet_size_pct)
 
 
 @app.get("/api/poly/prediction/{slug}")
@@ -1042,6 +1063,7 @@ def _build_admin_html() -> str:
         "{{TAB_HISTORY}}": "",   # included in tabs_backtest.html
         "{{TAB_BEST}}": "",      # included in tabs_backtest.html
         "{{TAB_POLY}}": _load_template("tab_poly.html"),
+        "{{TAB_POLY_BATCH}}": _load_template("tab_poly_batch.html"),
         "{{TAB_WALLET}}": _load_template("tab_wallet.html"),
         "{{TAB_ORDERBOOKS}}": _load_template("tab_orderbooks.html"),
         "{{TAB_ANALYTICS}}": _load_template("tab_analytics.html"),
@@ -1050,6 +1072,7 @@ def _build_admin_html() -> str:
         "{{TAB_LGBM}}": _load_template("tab_lgbm.html"),
         "{{JS_COMMON}}": _load_template("js_common.js"),
         "{{JS_POLY}}": _load_template("js_poly.js"),
+        "{{JS_POLY_BATCH}}": _load_template("js_poly_batch.js"),
         "{{JS_ORDERBOOKS}}": _load_template("js_orderbooks.js"),
         "{{JS_COMPARE_ASUME}}": _load_template("js_compare_asume.js"),
         "{{JS_BACKTEST}}": "",  # included in js_common.js

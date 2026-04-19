@@ -3,7 +3,7 @@ import asyncio
 import math
 import numpy as np
 import pandas as pd
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 from predictor.data_loader import load_candles, add_direction, add_future_directions, date_to_us
 from predictor.features import add_technical_features, set_feature_usage, FEATURE_USAGE
@@ -139,14 +139,13 @@ async def run_backtest(
         t1 = time.time()
         target_col = f"future_dir_{horizon}"
 
-        all_preds: list[tuple[int, int, float, int]] = []
+        all_preds: list[tuple[int, int, float, int, int]] = []
         strategy: BaseStrategy | None = None
         train_count = 0
         total_train_time = 0.0
         last_train_idx = -retrain_every
         train_total_est = math.ceil(len(test_indices) / retrain_every)
         work_done = 0
-        volatility_skip_total = 0
 
         if progress:
             progress.extra["train_total"] = train_total_est
@@ -265,12 +264,13 @@ async def run_backtest(
                 await asyncio.sleep(0)
 
             # Predict single candle (optimized)
+            vol_flag = 0
             if strategy_name == "random_forest" and hasattr(strategy, "feature_cols") and hasattr(strategy, "predict_row"):
                 cols = strategy.feature_cols
                 x_row = df_feat.loc[i, cols].to_numpy()
                 pred = int(strategy.predict_row(x_row))
                 prob = float(strategy.predict_proba_row(x_row))
-                volatility_skip_total += int(getattr(strategy, "_last_vol_skip_count", 0) or 0)
+                vol_flag = int(getattr(strategy, "_last_vol_skip_count", 0) or 0)
             else:
                 df_single = df_feat.iloc[[i]]
                 if offload_cpu:
@@ -281,9 +281,10 @@ async def run_backtest(
                     prob_arr = await resolve_awaitable(strategy.predict_proba(df_single, horizon))
                 pred = int(pred_arr[0])
                 prob = float(prob_arr[0])
-                volatility_skip_total += int(getattr(strategy, "_last_vol_skip_count", 0) or 0)
+                vol_arr = _extract_vol_skip_flags(getattr(strategy, "_last_vol_skip_flags", None), len(df_single))
+                vol_flag = int(vol_arr.sum())
 
-            all_preds.append((i, pred, prob, int(actual_val)))
+            all_preds.append((i, pred, prob, int(actual_val), vol_flag))
 
         work_done += len(test_indices)
 
@@ -305,13 +306,15 @@ async def run_backtest(
             }
             continue
 
-        arr = np.array(all_preds)  # columns: idx, pred, prob, actual
+        arr = np.array(all_preds)  # columns: idx, pred, prob, actual, vol_flag
         preds = arr[:, 1].astype(int)
         probas = arr[:, 2].astype(float)
         actuals = arr[:, 3].astype(int)
+        vol_flags = arr[:, 4].astype(int)
         idxs = arr[:, 0].astype(int)
 
         total_candles_tested = len(arr)
+        total_vol_skips = int(vol_flags.sum())
 
         base_metrics = _evaluate_predictions_metrics(
             preds,
@@ -325,12 +328,13 @@ async def run_backtest(
             train_count,
             total_train_time,
             threshold_value=base_threshold,
+            vol_skip_flags=vol_flags,
         )
 
         if not base_metrics.get("signals") and not base_metrics.get("error"):  # no valid signals
             base_metrics["error"] = "All predictions were SKIP (confidence too low)"
 
-        base_metrics["volatility_skips"] = int(volatility_skip_total)
+        base_metrics["volatility_skips"] = total_vol_skips
         results_by_horizon[str(horizon)] = base_metrics
 
         if sweep_thresholds:
@@ -349,8 +353,9 @@ async def run_backtest(
                     train_count,
                     total_train_time,
                     threshold_value=thr,
+                    vol_skip_flags=vol_flags,
                 )
-                thr_metrics["volatility_skips"] = int(volatility_skip_total)
+                thr_metrics["volatility_skips"] = total_vol_skips
                 thr_key = _format_threshold_key(thr)
                 threshold_variant_results.setdefault(thr_key, {})[str(horizon)] = thr_metrics
 
@@ -513,7 +518,8 @@ async def run_backtest_vectorized(
         strategy = get_strategy(strategy_name, strategy_params)
         strategy.fit(df_train, horizon)  # learns adaptive stats from training window
         prob_arr = await resolve_awaitable(strategy.predict_proba(df_test, horizon))
-        volatility_skips = int(getattr(strategy, "_last_vol_skip_count", 0) or 0)
+        vol_skip_flags = _extract_vol_skip_flags(getattr(strategy, "_last_vol_skip_flags", None), len(df_test))
+        volatility_skips = int(vol_skip_flags.sum())
 
         base_threshold = float(strategy.params.get("threshold", 0.55))
         sweep_thresholds = (
@@ -542,10 +548,10 @@ async def run_backtest_vectorized(
             train_count=0,
             total_train_time=0.0,
             threshold_value=base_threshold,
+            vol_skip_flags=vol_skip_flags,
         )
 
         base_metrics["volatility_skips"] = volatility_skips
-
         results_by_horizon[str(horizon)] = base_metrics
 
         if sweep_thresholds:
@@ -564,6 +570,7 @@ async def run_backtest_vectorized(
                     train_count=0,
                     total_train_time=0.0,
                     threshold_value=thr,
+                    vol_skip_flags=vol_skip_flags,
                 )
                 thr_metrics["volatility_skips"] = volatility_skips
                 thr_key = _format_threshold_key(thr)
@@ -601,19 +608,47 @@ async def run_backtest_vectorized(
     return result
 
 
-def _monthly_breakdown(dates, y_true, y_pred) -> list[dict]:
-    months = pd.to_datetime(dates).to_period("M")
+def _extract_vol_skip_flags(raw_flags: Any, expected_len: int) -> np.ndarray:
+    if expected_len <= 0:
+        return np.zeros(0, dtype=int)
+    if raw_flags is None:
+        return np.zeros(expected_len, dtype=int)
+    arr = np.asarray(raw_flags)
+    if arr.ndim == 0:
+        arr = np.full(expected_len, int(arr), dtype=int)
+    else:
+        arr = arr.astype(int, copy=False)
+    if arr.size != expected_len:
+        return np.zeros(expected_len, dtype=int)
+    return arr
+
+
+def _monthly_breakdown(signal_dates, y_true, y_pred, vol_skip_dates=None) -> list[dict]:
+    if len(signal_dates) == 0 and (vol_skip_dates is None or len(vol_skip_dates) == 0):
+        return []
+
+    signal_months = pd.to_datetime(signal_dates).to_period("M") if len(signal_dates) else pd.PeriodIndex([], freq="M")
+    vol_months = pd.to_datetime(vol_skip_dates).to_period("M") if vol_skip_dates is not None and len(vol_skip_dates) else pd.PeriodIndex([], freq="M")
+
+    signal_labels = np.array(signal_months.astype(str)) if len(signal_months) else np.array([], dtype=str)
+    vol_labels = np.array(vol_months.astype(str)) if len(vol_months) else np.array([], dtype=str)
+
+    unique_months = sorted(set(signal_labels.tolist()) | set(vol_labels.tolist()))
     result = []
-    for m in months.unique():
-        mask = months == m
-        correct = (y_true[mask] == y_pred[mask]).sum()
-        total = mask.sum()
+    for month in unique_months:
+        mask = signal_labels == month
+        total = int(mask.sum())
+        correct = int((y_true[mask] == y_pred[mask]).sum()) if total > 0 else 0
+        accuracy = round(correct / total * 100, 2) if total > 0 else 0
+        vol_skips = int((vol_labels == month).sum()) if len(vol_labels) else 0
         result.append({
-            "month": str(m),
-            "total": int(total),
-            "correct": int(correct),
-            "accuracy": round(correct / total * 100, 2) if total > 0 else 0,
+            "month": month,
+            "total": total,
+            "correct": correct,
+            "accuracy": accuracy,
+            "volatility_skips": vol_skips,
         })
+
     return result
 
 
@@ -730,6 +765,7 @@ def _evaluate_predictions_metrics(
     train_count: int,
     total_train_time: float,
     threshold_value: float | None = None,
+    vol_skip_flags: np.ndarray | None = None,
 ) -> dict:
     valid_mask = y_pred != -1
     if valid_mask.sum() == 0:
@@ -759,7 +795,15 @@ def _evaluate_predictions_metrics(
     down_total = int(down_pred_mask.sum())
 
     test_times = pd.to_datetime(df_raw["open_time"].iloc[y_idxs].values, unit="us")
-    monthly = _monthly_breakdown(test_times.values, y_true, y_pred_valid)
+    if vol_skip_flags is not None and len(vol_skip_flags) == len(idxs):
+        vol_mask = np.asarray(vol_skip_flags).astype(bool)
+        all_times = pd.to_datetime(df_raw["open_time"].iloc[idxs].values, unit="us")
+        vol_skip_dates = all_times[vol_mask]
+        vol_skip_values = vol_skip_dates.values if len(vol_skip_dates) else None
+    else:
+        vol_skip_values = None
+
+    monthly = _monthly_breakdown(test_times.values, y_true, y_pred_valid, vol_skip_dates=vol_skip_values)
     daily = _daily_breakdown(test_times.values, y_true, y_pred_valid)
     conf_dist = _confidence_distribution(y_probs)
     streaks = _streak_analysis(y_true, y_pred_valid)

@@ -157,25 +157,25 @@ async def _run_prediction(
         return None
     df = add_direction(df).reset_index(drop=True)
     df_feat = add_technical_features(df)
-    df_train = df_feat.iloc[:-1].reset_index(drop=True)
-    df_predict = df_feat.iloc[[-1]].reset_index(drop=True)
-    if len(df_train) < 90:
+    if len(df_feat) < 90:
         return None
 
     logger.debug(
-        "[predict_4s] running strategy=%s horizon=%s window=%s", strategy_name, horizon, len(df_train)
+        "[predict_4s] running strategy=%s horizon=%s window=%s", strategy_name, horizon, len(df_feat)
     )
     strategy = get_strategy(strategy_name, strategy_params)
-    strategy.fit(df_train, horizon=horizon)
-    prob_arr = await resolve_awaitable(strategy.predict_proba(df_predict, horizon=horizon))
-    prob = float(prob_arr[0])
+    strategy.fit(df_feat.iloc[:-1].reset_index(drop=True), horizon=horizon)
+    prob_arr = await resolve_awaitable(strategy.predict_proba(df_feat, horizon=horizon))
+    if prob_arr is None or len(prob_arr) == 0:
+        return None
+    prob = float(prob_arr[-1])
     threshold = resolve_probability_threshold(strategy.params)
     pred = classify_probability(prob, threshold)
     label = label_from_prediction(pred)
 
     period = strategy.params.get("rsi_period", 14)
-    rsi_col = f"rsi_{period}" if f"rsi_{period}" in df_predict.columns else "rsi_14"
-    rsi_val = float(np.nan_to_num(df_predict.iloc[0][rsi_col], nan=50.0))
+    rsi_col = f"rsi_{period}" if f"rsi_{period}" in df_feat.columns else "rsi_14"
+    rsi_val = float(np.nan_to_num(df_feat.iloc[-1][rsi_col], nan=50.0))
 
     last_open_us = int(df.iloc[-1]["open_time"])
     return {

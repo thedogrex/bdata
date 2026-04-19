@@ -32,6 +32,11 @@ from predictor.data_loader import add_direction
 from predictor.features import add_technical_features
 from predictor.strategies import get_strategy, STRATEGY_REGISTRY
 from predictor.utils.async_utils import resolve_awaitable
+from predictor.utils.prediction_thresholds import (
+    classify_probability,
+    label_from_prediction,
+    resolve_probability_threshold,
+)
 
 logger = logging.getLogger("predict_4s")
 logger.setLevel(logging.DEBUG)
@@ -157,13 +162,16 @@ async def _run_prediction(
     if len(df_train) < 90:
         return None
 
+    logger.debug(
+        "[predict_4s] running strategy=%s horizon=%s window=%s", strategy_name, horizon, len(df_train)
+    )
     strategy = get_strategy(strategy_name, strategy_params)
     strategy.fit(df_train, horizon=horizon)
-    pred_arr = await resolve_awaitable(strategy.predict(df_predict, horizon=horizon))
     prob_arr = await resolve_awaitable(strategy.predict_proba(df_predict, horizon=horizon))
-    pred = int(pred_arr[0])
     prob = float(prob_arr[0])
-    label = "UP" if pred == 1 else ("DOWN" if pred == 0 else "UNDEFINED")
+    threshold = resolve_probability_threshold(strategy.params)
+    pred = classify_probability(prob, threshold)
+    label = label_from_prediction(pred)
 
     period = strategy.params.get("rsi_period", 14)
     rsi_col = f"rsi_{period}" if f"rsi_{period}" in df_predict.columns else "rsi_14"
@@ -206,6 +214,7 @@ async def predict_for_market_4s(
         # best-effort; continue if lookup fails
         pass
 
+    logger.info("[predict_4s] start slug=%s", slug)
     templates = await list_pred_templates()
     active = [t for t in templates if t["active"]]
     if not active:
@@ -261,6 +270,12 @@ async def predict_for_market_4s(
     )
     need = window_size - 1
     if not base_rows or len(base_rows) < need:
+        logger.warning(
+            "[predict_4s] insufficient base candles slug=%s need=%s have=%s",
+            slug,
+            need,
+            len(base_rows) if base_rows else 0,
+        )
         return {"error": f"Not enough candles in c_5m for {slug} (need {need}, got {len(base_rows) if base_rows else 0})"}
     base_rows = list(reversed(base_rows))
 
@@ -270,6 +285,7 @@ async def predict_for_market_4s(
     df = _build_df(rows_with_offset)
     result = await _run_prediction(df, strategy_name, strategy_params, horizon)
     if result is None:
+        logger.warning("[predict_4s] prediction returned no result slug=%s", slug)
         return {"error": "Prediction failed (insufficient data after feature engineering)"}
 
     prediction_ts = int(time.time())

@@ -41,6 +41,9 @@ let poly4sPredCache = []; // 4s-early predictions for current market
 let polyLastPredBatchId = null;
 let polyLastLiveOrderPlacedForBatchId = null;
 
+// Store current prediction undefined reason for Why? button
+let polyCurrentUndefinedReason = null;
+
 let polyLastConfirmPromptKey = null;
 let polyManualResolveCtx = { slug: null, btn: null, prevText: '' };
 
@@ -1860,6 +1863,78 @@ function polyHidePredDetails(){
   polyRenderBetSizePendingMessage(null);
 }
 
+function polyShowUndefinedReason(){
+  const reason = polyCurrentUndefinedReason;
+  if(!reason){
+    alert('No undefined reason details available.');
+    return;
+  }
+  // Build detailed reasons list
+  const reasonLabels = {
+    volatility_filter: 'Volatility filter skipped this candle',
+    rsi_neutral: 'RSI is within the neutral band',
+    bb_not_low_enough: 'Bollinger Band confirmation not met (price not low enough)',
+    bb_not_high_enough: 'Bollinger Band confirmation not met (price not high enough)',
+    probability_threshold: 'Probability did not exceed decision threshold',
+  };
+  const code = reason.reason || 'unknown';
+  const title = reasonLabels[code] || code.replace(/_/g, ' ');
+
+  let checksHtml = '';
+  if(Array.isArray(reason.checks) && reason.checks.length){
+    checksHtml = `<table style="width:100%;border-collapse:collapse;margin-top:12px;font-size:12px">
+      <thead>
+        <tr style="border-bottom:1px solid #475569;color:#94a3b8;text-align:left">
+          <th style="padding:6px">Check</th>
+          <th style="padding:6px">Condition</th>
+          <th style="padding:6px">Value</th>
+          <th style="padding:6px">Status</th>
+        </tr>
+      </thead>
+      <tbody>`;
+    reason.checks.forEach(c => {
+      const passed = !!c.passed;
+      const statusColor = passed ? '#22c55e' : '#ef4444';
+      const statusText = passed ? 'PASS' : 'FAIL';
+      checksHtml += `<tr style="border-bottom:1px solid #334155;color:${passed ? '#e2e8f0' : '#fecaca'}">
+        <td style="padding:6px">${c.name || '-'}</td>
+        <td style="padding:6px;color:#94a3b8">${c.condition || '-'}</td>
+        <td style="padding:6px">${c.value !== undefined ? c.value : '-'}</td>
+        <td style="padding:6px;font-weight:700;color:${statusColor}">${statusText}</td>
+      </tr>`;
+    });
+    checksHtml += `</tbody></table>`;
+  }
+
+  const messageHtml = reason.message ? `<div style="margin-top:10px;color:#fbbf24;font-size:13px">${reason.message}</div>` : '';
+  const probHtml = reason.probability !== undefined ? `<div style="margin-top:8px;color:#94a3b8;font-size:12px">Probability: <b>${(reason.probability * 100).toFixed(2)}%</b></div>` : '';
+  const thresholdHtml = reason.threshold !== undefined ? `<div style="color:#94a3b8;font-size:12px">Threshold: <b>${reason.threshold}</b></div>` : '';
+
+  const html = `<div style="max-width:500px">
+    <div style="font-size:16px;font-weight:700;color:#fbbf24;margin-bottom:8px">${title}</div>
+    ${messageHtml}
+    ${probHtml}
+    ${thresholdHtml}
+    ${checksHtml}
+  </div>`;
+
+  // Create or reuse modal
+  let modal = document.getElementById('poly-undefined-reason-modal');
+  if(!modal){
+    modal = document.createElement('div');
+    modal.id = 'poly-undefined-reason-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999';
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:20px;max-width:90vw;max-height:80vh;overflow:auto">
+    ${html}
+    <div style="margin-top:16px;text-align:right">
+      <button onclick="document.getElementById('poly-undefined-reason-modal').style.display='none'" class="btn btn-slate">Close</button>
+    </div>
+  </div>`;
+  modal.style.display = 'flex';
+}
+
 async function polyLoadPredictionDetails(slug){
   try{
     // Prefer persisted full payload (instant Analyse rendering)
@@ -1903,9 +1978,66 @@ async function polyLoadPredictionDetails(slug){
     const color = pred === 'UP' ? '#22c55e' : (pred === 'DOWN' ? '#ef4444' : '#94a3b8');
     const arrow = pred === 'UP' ? '\u25b2' : (pred === 'DOWN' ? '\u25bc' : '\u2014');
     const prob = (typeof data.probability === 'number') ? Math.round(data.probability * 100) : null;
+    // Debug: log what we received
+    console.log('[polyLoadPredictionDetails] pred:', pred, 'details_more:', data.details_more, 'diag:', data.diag);
+
+    const undefinedReason = (pred === 'UNDEFINED')
+      ? (data.details_more || (data.diag && data.diag.undefined_reason) || null)
+      : null;
+    // Store for Why? button
+    polyCurrentUndefinedReason = undefinedReason;
+
+    // Build shift note if present
+    const shiftNoteHtml = data.shift_note
+      ? `<div class="mt-2 p-2 rounded" style="background:#422006;color:#fbbf24;border:1px solid #854d0e;font-size:11px">${data.shift_note}</div>`
+      : '';
+
+    const renderUndefinedReasonBlock = (reason) => {
+      if(!reason) return '';
+      const reasonLabels = {
+        volatility_filter: 'Volatility filter skipped candle',
+        rsi_neutral: 'RSI within neutral band',
+        bb_not_low_enough: 'BB confirmation not met (low)',
+        bb_not_high_enough: 'BB confirmation not met (high)',
+        probability_threshold: 'Probability below decision threshold',
+      };
+      const code = (reason.reason || 'unknown');
+      const labelText = reasonLabels[code] || code.replace(/_/g,' ');
+      const subLines = [];
+      if(reason.message) subLines.push(reason.message);
+      if(reason.candidate) subLines.push(`Candidate: ${reason.candidate}`);
+      if(reason.rsi !== undefined) subLines.push(`RSI: ${reason.rsi}`);
+      if(reason.bb_value !== undefined) subLines.push(`BB: ${reason.bb_value}`);
+      if(reason.threshold !== undefined) subLines.push(`Threshold: ${reason.threshold}`);
+      if(Array.isArray(reason.effective_band)){
+        subLines.push(`Effective band: ${reason.effective_band[0]} - ${reason.effective_band[1]}`);
+      }
+      return `<div class="mt-3 p-3 rounded bg-slate-900/70 border border-amber-500/40">`
+        + `<div class="text-xs text-amber-300 font-semibold uppercase tracking-wide">Undefined reason: ${labelText}</div>`
+        + (subLines.length ? `<div class="text-xs text-slate-200 mt-1">${subLines.join('<br>')}</div>` : '')
+        + `</div>`;
+    };
+    let undefinedReasonHtml = '';
+    if(pred === 'UNDEFINED'){
+      if(undefinedReason){
+        undefinedReasonHtml = renderUndefinedReasonBlock(undefinedReason);
+      } else {
+        // Fallback when no reason details available
+        undefinedReasonHtml = `<div class="mt-3 p-3 rounded bg-slate-900/70 border border-amber-500/40">`
+          + `<div class="text-xs text-amber-300 font-semibold uppercase tracking-wide">Undefined reason: (not recorded)</div>`
+          + `<div class="text-xs text-slate-200 mt-1">Probability: ${prob !== null ? prob + '%' : 'N/A'} | Threshold: ${data.params && data.params.threshold ? data.params.threshold : 'default'}</div>`
+          + `</div>`;
+      }
+    }
+    // Build Why? button for UNDEFINED predictions
+    const whyBtnHtml = (pred === 'UNDEFINED' && undefinedReason)
+      ? `<button onclick="polyShowUndefinedReason()" class="btn btn-amber text-xs" style="margin-left:6px">Why?</button>`
+      : '';
+
     inlineEl.innerHTML=
       `<span style="color:${color};font-weight:700;font-size:14px">${arrow} ${pred}</span> `
       + (prob !== null ? `<span class="text-slate-400 text-xs">${prob}%</span>` : '')
+      + whyBtnHtml
       +`<button onclick="polyShowPredDetails()" class="btn btn-slate text-xs" style="margin-left:8px">Analyse</button>`;
 
     const agoText = (typeof data.candles_ago === 'number' && data.candles_ago >= 0) ? `${data.candles_ago} candles ago` : 'no signal in tail';
@@ -1921,6 +2053,9 @@ async function polyLoadPredictionDetails(slug){
       const baseOb = (d.base_overbought!==undefined && d.base_overbought!==null) ? d.base_overbought : '—';
       diagHtml += `<div class="text-xs text-slate-400">RSI base: &lt;${baseOs} / &gt;${baseOb} | effective: <b style="color:#22c55e">&lt;${d.effective_oversold}</b> / <b style="color:#ef4444">&gt;${d.effective_overbought}</b> (adaptive p10=${d.rsi_p10}, p90=${d.rsi_p90})</div>`;
       diagHtml += `<div class="text-xs text-slate-400">Tail RSI range: ${d.tail_rsi_min} — ${d.tail_rsi_max} | last: <b>${d.tail_rsi_last}</b></div>`;
+      if(undefinedReason){
+        diagHtml += renderUndefinedReasonBlock(undefinedReason);
+      }
       if(d.tail_detail && d.tail_detail.length){
         diagHtml += `<table class="mt-2 w-full text-xs"><thead><tr><th>Time</th><th>RSI</th><th>BB</th><th>Prob</th><th>Signal</th></tr></thead><tbody>`;
         d.tail_detail.forEach(r => {
@@ -1930,6 +2065,29 @@ async function polyLoadPredictionDetails(slug){
         });
         diagHtml += `</tbody></table>`;
       }
+      if(Array.isArray(d.checks) && d.checks.length){
+        diagHtml += `<div class="mt-3">`
+          + `<div class="text-xs text-slate-300 font-semibold mb-1">Rule checks</div>`
+          + `<table class="w-full text-[11px]">
+              <thead>
+                <tr class="text-slate-500"><th class="text-left">Check</th><th class="text-left">Condition</th><th>Value</th><th>Expected</th><th>Status</th></tr>
+              </thead>
+              <tbody>`;
+        d.checks.forEach((c, idx) => {
+          const passed = !!c.passed;
+          const rowColor = passed ? '#22c55e' : '#ef4444';
+          const status = passed ? 'PASS' : 'FAIL';
+          const expected = c.expected !== undefined ? c.expected : '';
+          diagHtml += `<tr style="color:${passed ? '#cbd5f5' : '#fecaca'}">
+            <td class="py-0.5">${c.name || `check-${idx+1}`}</td>
+            <td class="py-0.5 text-slate-300">${c.condition || '—'}</td>
+            <td class="py-0.5 text-center">${c.value !== undefined ? c.value : '—'}</td>
+            <td class="py-0.5 text-center">${expected}</td>
+            <td class="py-0.5 text-center"><span style="color:${rowColor};font-weight:700">${status}</span></td>
+          </tr>`;
+        });
+        diagHtml += `</tbody></table></div>`;
+      }
       diagHtml += `</div>`;
     }
 
@@ -1937,6 +2095,8 @@ async function polyLoadPredictionDetails(slug){
     resultEl.innerHTML=`<div class="p-4 rounded-lg text-center" style="background:#1e293b;border:2px solid ${color}">`
       +`<div style="font-size:48px;font-weight:800;color:${color}">${arrow} ${pred}</div>`
       + (prob !== null ? `<div class="text-lg text-slate-300 mt-1">Probability: <b>${prob}%</b></div>` : '')
+      + undefinedReasonHtml
+      + shiftNoteHtml
       +`<div class="text-xs text-slate-400 mt-2">Signal: <b>${agoText}</b> (${sigDt}) | Signals in tail: <b>${sigRate}</b></div>`
       +`<div class="text-xs text-slate-400 mt-1">Strategy: ${data.strategy||'—'} | Window: ${ws} | Last candle: ${data.last_candle_dt||'—'}</div>`
       +`<details class="mt-2 text-left">`
@@ -2292,18 +2452,36 @@ async function runPolyBatchPredict(){
 function renderRegularResults(results, inlineEl, resultEl, batchId){
   // Inline summary: count UP vs DOWN
   let upCount = 0, downCount = 0, errCount = 0;
+  let firstUndefinedReason = null;
   results.forEach(r => {
     const pred = r.result?.prediction;
     if(pred === 'UP') upCount++;
     else if(pred === 'DOWN') downCount++;
-    else errCount++;
+    else {
+      errCount++;
+      // Capture first undefined reason for Why? button
+      if(!firstUndefinedReason){
+        const reason = r.result?.details_more || (r.result?.diag && r.result?.diag.undefined_reason) || null;
+        if(reason) firstUndefinedReason = reason;
+      }
+    }
   });
+  // Store for Why? button
+  polyCurrentUndefinedReason = firstUndefinedReason;
+
   const summaryColor = upCount > downCount ? '#22c55e' : (downCount > upCount ? '#ef4444' : '#94a3b8');
   const summaryArrow = upCount > downCount ? '\u25b2' : (downCount > upCount ? '\u25bc' : '\u2014');
   const summaryLabel = upCount > downCount ? 'UP' : (downCount > upCount ? 'DOWN' : 'MIXED');
+
+  // Build Why? button if any undefined predictions exist
+  const whyBtnHtml = (errCount > 0 && firstUndefinedReason)
+    ? `<button onclick="polyShowUndefinedReason()" class="btn btn-amber text-xs" style="margin-left:6px">Why?</button>`
+    : '';
+
   if(inlineEl) inlineEl.innerHTML =
     `<span style="color:${summaryColor};font-weight:700;font-size:14px">${summaryArrow} ${summaryLabel}</span> `
     + `<span class="text-slate-400 text-xs">(${upCount}UP/${downCount}DN${errCount?' +'+errCount+'err':''})</span>`
+    + whyBtnHtml
     + `<button onclick="polyShowPredDetails()" class="btn btn-slate text-xs" style="margin-left:8px">Details</button>`;
 
   // Update markets list: write pred_votes into cache so list shows ▲N ▼M immediately

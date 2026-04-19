@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import requests
 
 from db import DbProvider
@@ -16,6 +17,11 @@ import app.config as config
 from predictor import telegram_bot
 from predictor.poly_client import PolymarketClient, MarketData
 from predictor.utils.async_utils import resolve_awaitable
+from predictor.utils.prediction_thresholds import (
+    classify_probability,
+    label_from_prediction,
+    resolve_probability_threshold,
+)
 
 db = DbProvider()
 logger = logging.getLogger("poly_service")
@@ -56,6 +62,14 @@ DEFAULT_LIVE_TRADE_SETTINGS = {
 }
 
 
+def _log_prediction_event(level: int, slug: str, message: str, **extra: Any) -> None:
+    if extra:
+        context = ", ".join(f"{k}={extra[k]}" for k in sorted(extra))
+        logger.log(level, "[predict] %s - %s | %s", slug, message, context)
+    else:
+        logger.log(level, "[predict] %s - %s", slug, message)
+
+
 def _now_ts() -> int:
     return int(time.time())
 
@@ -66,6 +80,165 @@ def _utcnow() -> datetime:
 
 def _new_request_id() -> str:
     return uuid.uuid4().hex
+
+
+def _make_check_detail(
+    name: str,
+    condition: str,
+    value: Any,
+    passed: bool,
+    *,
+    expected: Any | None = None,
+    extra: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    detail: Dict[str, Any] = {
+        "name": name,
+        "condition": condition,
+        "value": value,
+        "passed": bool(passed),
+    }
+    if expected is not None:
+        detail["expected"] = expected
+    if extra:
+        detail.update(extra)
+    return detail
+
+
+_PREDICTION_REASON_COLUMN_AVAILABLE = True
+
+
+async def _persist_prediction_payload(
+    slug: str,
+    prediction_ts: int,
+    payload: Dict[str, Any],
+    undefined_reason: Dict[str, Any] | None,
+) -> None:
+    """Persist prediction payload, attempting to store undefined reason separately."""
+
+    global _PREDICTION_REASON_COLUMN_AVAILABLE
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    reason_json = json.dumps(undefined_reason, ensure_ascii=False) if undefined_reason else None
+
+    if _PREDICTION_REASON_COLUMN_AVAILABLE:
+        try:
+            await db.execute(
+                """
+                INSERT INTO poly_predictions (slug, prediction_ts, payload_json, undefined_reason_json)
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    prediction_ts=%s,
+                    payload_json=%s,
+                    undefined_reason_json=%s
+                """,
+                (
+                    slug,
+                    int(prediction_ts),
+                    payload_json,
+                    reason_json,
+                    int(prediction_ts),
+                    payload_json,
+                    reason_json,
+                ),
+            )
+            return
+        except Exception:
+            _PREDICTION_REASON_COLUMN_AVAILABLE = False
+
+    try:
+        await db.execute(
+            """
+            INSERT INTO poly_predictions (slug, prediction_ts, payload_json)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                prediction_ts=%s,
+                payload_json=%s
+            """,
+            (slug, int(prediction_ts), payload_json, int(prediction_ts), payload_json),
+        )
+    except Exception:
+        pass
+
+
+def _build_rsi_skip_reason(
+    strategy_params: Dict[str, Any],
+    prob: float,
+    threshold: float,
+    pred_rsi: float,
+    pred_bb: float,
+    eff_oversold: float,
+    eff_overbought: float,
+    vol_flag: bool,
+    checks: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    detail: Dict[str, Any] = {
+        "reason": None,
+        "probability": round(prob, 4),
+        "checks": checks,
+    }
+
+    if vol_flag:
+        failed_vol = next((c for c in checks if c.get("type") == "vol" and not c.get("passed")), None)
+        detail.update({
+            "reason": "volatility_filter",
+            "message": (
+                f"Volatility filter skipped this candle: {failed_vol['name']} failed"
+                if failed_vol else "Volatility filter skipped this candle."
+            ),
+            "failed_check": failed_vol,
+        })
+        return detail
+
+    if pred_rsi < eff_oversold:
+        detail.update({
+            "candidate": "UP",
+            "rsi": pred_rsi,
+            "effective_threshold": eff_oversold,
+        })
+        bb_low = float(strategy_params.get("bb_low", 0.2))
+        if strategy_params.get("use_bb_confirm", True) and not (pred_bb < bb_low):
+            detail.update({
+                "reason": "bb_not_low_enough",
+                "message": "BB confirmation not met for UP signal.",
+                "bb_value": round(pred_bb, 4),
+                "bb_low": bb_low,
+            })
+            return detail
+        detail.update({
+            "reason": "probability_threshold",
+            "message": "Probability did not exceed decision threshold for UP.",
+            "threshold": threshold,
+        })
+        return detail
+
+    if pred_rsi > eff_overbought:
+        detail.update({
+            "candidate": "DOWN",
+            "rsi": pred_rsi,
+            "effective_threshold": eff_overbought,
+        })
+        bb_high = float(strategy_params.get("bb_high", 0.8))
+        if strategy_params.get("use_bb_confirm", True) and not (pred_bb > bb_high):
+            detail.update({
+                "reason": "bb_not_high_enough",
+                "message": "BB confirmation not met for DOWN signal.",
+                "bb_value": round(pred_bb, 4),
+                "bb_high": bb_high,
+            })
+            return detail
+        detail.update({
+            "reason": "probability_threshold",
+            "message": "Probability did not exceed decision threshold for DOWN.",
+            "threshold": threshold,
+        })
+        return detail
+
+    detail.update({
+        "reason": "rsi_neutral",
+        "message": "RSI within neutral band (no signal).",
+        "rsi": pred_rsi,
+        "effective_band": [eff_oversold, eff_overbought],
+    })
+    return detail
 
 
 def _maybe_log_prediction_window(
@@ -1426,9 +1599,20 @@ async def predict_for_market(
     from predictor.data_loader import add_direction
     from predictor.candle_sync import sync_candles_up_to, check_and_fill_gaps
 
+    _log_prediction_event(
+        logging.INFO,
+        slug,
+        "predict_for_market.start",
+        strategy=strategy_name,
+        horizon=horizon,
+        window=window_size,
+        table=table,
+    )
+
     horizon = max(1, min(3, int(horizon)))
 
     if strategy_name not in STRATEGY_REGISTRY:
+        _log_prediction_event(logging.WARNING, slug, "predict_for_market.invalid_strategy", strategy=strategy_name)
         return {"error": f"Unknown strategy: {strategy_name}"}
 
     # Resolve market timestamp (epoch seconds from slug)
@@ -1436,6 +1620,7 @@ async def predict_for_market(
         "SELECT ts FROM poly_markets WHERE slug=%s", (slug,)
     )
     if not m_row:
+        _log_prediction_event(logging.WARNING, slug, "predict_for_market.market_missing")
         return {"error": f"Market not found: {slug}"}
     market_ts = int(m_row[0])
 
@@ -1480,6 +1665,14 @@ async def predict_for_market(
         latest_us = int(latest_row[0]) if latest_row and latest_row[0] else 0
         latest_dt = pd.Timestamp(latest_us, unit="us").strftime("%Y-%m-%d %H:%M:%S") if latest_us else "none"
         market_dt = pd.Timestamp(market_ts_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
+        _log_prediction_event(
+            logging.WARNING,
+            slug,
+            "predict_for_market.not_enough_candles",
+            need=need,
+            have=have,
+            latest_dt=latest_dt,
+        )
         return {
             "error": f"Not enough candles before market timestamp. Need {need}, have {have}. "
                      f"Market ts: {market_dt} (epoch {market_ts}). "
@@ -1534,6 +1727,14 @@ async def predict_for_market(
         last_dt = pd.Timestamp(last_candle_open_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
         market_dt = pd.Timestamp(market_ts_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
         diff_min = round((market_ts_us - last_candle_open_us) / 1_000_000 / 60, 1)
+        _log_prediction_event(
+            logging.WARNING,
+            slug,
+            "predict_for_market.candle_missing",
+            missing=missing_candles,
+            horizon=horizon,
+            last_dt=last_dt,
+        )
         return {
             "error": f"Candle at market timestamp not found. Market ts: {market_dt}, "
                      f"latest candle: {last_dt} ({diff_min} min before). "
@@ -1567,6 +1768,14 @@ async def predict_for_market(
         gap_from_dt = pd.Timestamp(gap_from_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
         gap_to_dt = pd.Timestamp(gap_to_us, unit="us").strftime("%Y-%m-%d %H:%M:%S")
         actual_gap_min = round((gap_to_us - gap_from_us) / 1_000_000 / 60, 1)
+        _log_prediction_event(
+            logging.WARNING,
+            slug,
+            "predict_for_market.gap_detected",
+            gaps=len(bad_idx),
+            gap_from=gap_from_dt,
+            gap_to=gap_to_dt,
+        )
         return {
             "error": f"Candle gap detected at position {first_bad}: {gap_from_dt} -> {gap_to_dt} "
                      f"({actual_gap_min} min instead of 5 min). {len(bad_idx)} gap(s) total in {need} candles.",
@@ -1621,12 +1830,24 @@ async def predict_for_market(
         except Exception:
             vol_fast_arr = vol_slow_arr = vol_ratio_arr = None
 
-    pred_arr = await resolve_awaitable(strategy.predict(df_predict, horizon=horizon))
-    prob_arr = await resolve_awaitable(strategy.predict_proba(df_predict, horizon=horizon))
+    prob_arr = await resolve_awaitable(strategy.predict_proba(df_feat, horizon=horizon))
+    if prob_arr is None or len(prob_arr) == 0:
+        return {"error": "Strategy returned no probabilities."}
 
-    pred = int(pred_arr[0])
-    prob = float(prob_arr[0])
-    label = "UP" if pred == 1 else ("DOWN" if pred == 0 else "UNDEFINED")
+    prob = float(prob_arr[-1])
+    threshold = resolve_probability_threshold(strategy.params)
+    pred = classify_probability(prob, threshold)
+    label = label_from_prediction(pred)
+    down_threshold = 1.0 - threshold
+    vol_flag = False
+    vol_flags_arr = getattr(strategy, "_last_vol_skip_flags", None)
+    if vol_flags_arr is not None:
+        try:
+            vol_array = np.asarray(vol_flags_arr).astype(bool)
+            if vol_array.size:
+                vol_flag = bool(vol_array[-1])
+        except Exception:
+            vol_flag = False
 
     _maybe_log_prediction_window(
         slug=slug,
@@ -1646,16 +1867,6 @@ async def predict_for_market(
     else:
         pred_bb = float(np.nan_to_num(df_predict.get("bb_pos", pd.Series([0.5])).values[0], nan=0.5)) if "bb_pos" in df_predict.columns else 0.5
 
-    if vol_fast_arr is not None and len(vol_fast_arr) == len(df_feat):
-        pred_vol = float(np.nan_to_num(vol_fast_arr[-1], nan=0.0))
-    else:
-        pred_vol = 0.0
-
-    if vol_ratio_arr is not None and len(vol_ratio_arr) == len(df_feat):
-        pred_vol_ratio = float(np.nan_to_num(vol_ratio_arr[-1], nan=0.0))
-    else:
-        pred_vol_ratio = 0.0
-
     base_oversold = strategy.params.get("rsi_oversold", 30)
     base_overbought = strategy.params.get("rsi_overbought", 70)
     rsi_p10 = getattr(strategy, '_rsi_p10', None)
@@ -1666,6 +1877,155 @@ async def predict_for_market(
     else:
         effective_oversold = base_oversold
         effective_overbought = base_overbought
+
+    # Extract volatility metrics aligned with the prediction candle (last row of df_feat)
+    def _extract_last_value(arr: Optional[np.ndarray]) -> float:
+        if arr is None:
+            return 0.0
+        try:
+            return float(np.nan_to_num(arr[-1], nan=0.0))
+        except Exception:
+            return 0.0
+
+    pred_vol = _extract_last_value(vol_fast_arr)
+    pred_vol_slow = _extract_last_value(vol_slow_arr)
+    pred_vol_ratio = _extract_last_value(vol_ratio_arr)
+
+    reason_checks: List[Dict[str, Any]] = []
+    reason_checks.append(
+        _make_check_detail(
+            name="RSI oversold band",
+            condition=f"RSI < {round(effective_oversold, 2)}",
+            value=round(pred_rsi, 2),
+            passed=pred_rsi < effective_oversold,
+            extra={"type": "rsi", "direction": "UP"},
+        )
+    )
+    reason_checks.append(
+        _make_check_detail(
+            name="RSI overbought band",
+            condition=f"RSI > {round(effective_overbought, 2)}",
+            value=round(pred_rsi, 2),
+            passed=pred_rsi > effective_overbought,
+            extra={"type": "rsi", "direction": "DOWN"},
+        )
+    )
+    reason_checks.append(
+        _make_check_detail(
+            name="RSI neutral band",
+            condition=f"{round(effective_oversold, 2)} <= RSI <= {round(effective_overbought, 2)}",
+            value=round(pred_rsi, 2),
+            passed=effective_oversold <= pred_rsi <= effective_overbought,
+            extra={"type": "rsi", "direction": "NEUTRAL"},
+        )
+    )
+
+    use_bb_confirm = bool(strategy.params.get("use_bb_confirm", True))
+    bb_low = float(strategy.params.get("bb_low", 0.2))
+    bb_high = float(strategy.params.get("bb_high", 0.8))
+    if use_bb_confirm:
+        reason_checks.append(
+            _make_check_detail(
+                name="BB low confirmation",
+                condition=f"BB < {bb_low}",
+                value=round(pred_bb, 4),
+                passed=pred_bb < bb_low,
+                extra={"type": "bb", "direction": "UP"},
+            )
+        )
+        reason_checks.append(
+            _make_check_detail(
+                name="BB high confirmation",
+                condition=f"BB > {bb_high}",
+                value=round(pred_bb, 4),
+                passed=pred_bb > bb_high,
+                extra={"type": "bb", "direction": "DOWN"},
+            )
+        )
+
+    reason_checks.append(
+        _make_check_detail(
+            name="UP probability",
+            condition=f"prob > {round(threshold, 4)}",
+            value=round(prob, 4),
+            passed=prob > threshold,
+            expected=round(threshold, 4),
+            extra={"type": "prob", "direction": "UP"},
+        )
+    )
+    reason_checks.append(
+        _make_check_detail(
+            name="DOWN probability",
+            condition=f"prob < {round(down_threshold, 4)}",
+            value=round(prob, 4),
+            passed=prob < down_threshold,
+            expected=round(down_threshold, 4),
+            extra={"type": "prob", "direction": "DOWN"},
+        )
+    )
+
+    min_vol = float(strategy.params.get("min_vol", 0.0))
+    max_vol = float(strategy.params.get("max_vol", 1.0))
+    ratio_max = float(strategy.params.get("vol_ratio_max", 1.5))
+    spike_mult = float(strategy.params.get("vol_spike_multiplier", 1.5))
+    if max_vol <= min_vol:
+        max_vol = min_vol + 1e-6
+
+    reason_checks.append(
+        _make_check_detail(
+            name="Volatility above minimum",
+            condition=f"σ_fast > {min_vol}",
+            value=round(pred_vol, 6),
+            passed=pred_vol > min_vol,
+            extra={"type": "vol"},
+        )
+    )
+    reason_checks.append(
+        _make_check_detail(
+            name="Volatility below maximum",
+            condition=f"σ_fast < {max_vol}",
+            value=round(pred_vol, 6),
+            passed=pred_vol < max_vol,
+            extra={"type": "vol"},
+        )
+    )
+    if pred_vol_slow > 0:
+        reason_checks.append(
+            _make_check_detail(
+                name="Volatility spike",
+                condition=f"σ_fast < σ_slow * {spike_mult}",
+                value=round(pred_vol, 6),
+                passed=pred_vol < (pred_vol_slow * spike_mult),
+                expected=round(pred_vol_slow * spike_mult, 6),
+                extra={"type": "vol"},
+            )
+        )
+    if ratio_max > 0:
+        ratio_value = pred_vol_ratio if np.isfinite(pred_vol_ratio) else None
+        reason_checks.append(
+            _make_check_detail(
+                name="Volatility ratio",
+                condition=f"ratio < {ratio_max}",
+                value=round(ratio_value, 6) if ratio_value is not None else None,
+                passed=(ratio_value is not None) and (ratio_value < ratio_max),
+                expected=ratio_max,
+                extra={"type": "vol"},
+            )
+        )
+
+    details_more: Dict[str, Any] | None = None
+    if label == "UNDEFINED" and strategy_name == "rsi_mean_reversion":
+        details_more = _build_rsi_skip_reason(
+            strategy.params,
+            prob,
+            threshold,
+            pred_rsi,
+            pred_bb,
+            effective_oversold,
+            effective_overbought,
+            vol_flag,
+            reason_checks,
+        )
 
     # Also show last 10 candles context (what happened just before)
     context_start = max(0, len(df_feat) - 10)
@@ -1689,8 +2049,8 @@ async def predict_for_market(
             r_ratio = None
         # Re-predict each context candle to show what backtest would have said
         df_k = df_feat.iloc[[k]].reset_index(drop=True)
-        k_pred = int((await resolve_awaitable(strategy.predict(df_k, horizon=horizon)))[0])
         k_prob = float((await resolve_awaitable(strategy.predict_proba(df_k, horizon=horizon)))[0])
+        k_pred = classify_probability(k_prob, threshold)
         tail_detail.append({
             "dt": dt_str,
             "rsi": round(r_rsi, 1),
@@ -1720,7 +2080,10 @@ async def predict_for_market(
         "tail_rsi_max": round(max(tail_rsi_vals), 1) if tail_rsi_vals else None,
         "tail_rsi_last": round(tail_rsi_vals[-1], 1) if tail_rsi_vals else None,
         "tail_detail": tail_detail,
+        "checks": reason_checks,
     }
+    if details_more:
+        diag["undefined_reason"] = details_more
 
     signals_in_tail = sum(1 for d in tail_detail if d["pred"] != -1)
     total_in_tail = len(tail_detail)
@@ -1767,6 +2130,7 @@ async def predict_for_market(
         "shifted": shifted,
         "missing_candles": missing_candles,
         "diag": diag,
+        "details_more": details_more,
         **sync_info,
     }
     if shifted:
@@ -1775,21 +2139,23 @@ async def predict_for_market(
             f"({missing_candles * 5} min). Using H{horizon} to compensate."
         )
 
-    # Persist full payload for instant UI analysis later
-    try:
-        payload_json = json.dumps(ret, ensure_ascii=False)
-        await db.execute(
-            """
-            INSERT INTO poly_predictions (slug, prediction_ts, payload_json)
-            VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                prediction_ts=%s,
-                payload_json=%s
-            """,
-            (slug, int(prediction_ts), payload_json, int(prediction_ts), payload_json),
-        )
-    except Exception:
-        pass
+    _log_prediction_event(
+        logging.INFO,
+        slug,
+        "predict_for_market.result",
+        label=label,
+        probability=round(prob, 4),
+        missing_candles=missing_candles,
+        shifted=shifted,
+    )
+
+    # Persist full payload for instant UI analysis later (plus structured reason summary)
+    await _persist_prediction_payload(
+        slug=slug,
+        prediction_ts=int(prediction_ts),
+        payload=ret,
+        undefined_reason=details_more,
+    )
 
     # Backend auto-trade (optional): if confirmation is disabled, place order immediately.
     try:
@@ -2301,12 +2667,12 @@ async def quantum_predict_for_market(
         try:
             strategy = get_strategy(strategy_name, strategy_params)
             strategy.fit(df_train, horizon=horizon)
-            pred_arr = await resolve_awaitable(strategy.predict(df_predict, horizon=horizon))
             prob_arr = await resolve_awaitable(strategy.predict_proba(df_predict, horizon=horizon))
 
-            pred = int(pred_arr[0])
             prob = float(prob_arr[0])
-            label = "UP" if pred == 1 else ("DOWN" if pred == 0 else "UNDEFINED")
+            threshold = resolve_probability_threshold(strategy.params)
+            pred = classify_probability(prob, threshold)
+            label = label_from_prediction(pred)
         except Exception as e:
             label = "ERROR"
             prob = 0.0

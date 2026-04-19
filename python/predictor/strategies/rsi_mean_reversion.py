@@ -6,6 +6,7 @@ import pandas as pd
 
 from predictor.strategies.base import BaseStrategy
 from predictor.features import add_technical_features, bollinger_components
+from predictor.utils.prediction_thresholds import classify_probability, resolve_probability_threshold
 
 
 class RSIMeanReversionStrategy(BaseStrategy):
@@ -35,6 +36,7 @@ class RSIMeanReversionStrategy(BaseStrategy):
             "vol_fast_window": 20,
             "vol_slow_window": 50,
             "vol_spike_multiplier": 1.5,
+            "adaptive_rsi": True,
         }
 
     @staticmethod
@@ -54,6 +56,7 @@ class RSIMeanReversionStrategy(BaseStrategy):
             "vol_fast_window": "Rolling window (5m candles) for fast volatility.",
             "vol_slow_window": "Rolling window for slow regime volatility.",
             "vol_spike_multiplier": "Reject trades when vol_fast exceeds vol_slow * multiplier.",
+            "adaptive_rsi": "Blend fixed RSI thresholds with training percentiles (p10/p90). Default true; set false for fixed thresholds.",
         }
 
     def fit(self, df: pd.DataFrame, horizon: int = 1) -> None:
@@ -101,7 +104,8 @@ class RSIMeanReversionStrategy(BaseStrategy):
         # Blend fixed thresholds with adaptive percentiles from fit()
         base_oversold = self.params["rsi_oversold"]
         base_overbought = self.params["rsi_overbought"]
-        if hasattr(self, '_rsi_p10') and self._rsi_p10 is not None:
+        use_adaptive = self.params.get("adaptive_rsi", True)
+        if use_adaptive and hasattr(self, '_rsi_p10') and self._rsi_p10 is not None:
             oversold = (base_oversold + self._rsi_p10) / 2
             overbought = (base_overbought + self._rsi_p90) / 2
         else:
@@ -193,8 +197,11 @@ class RSIMeanReversionStrategy(BaseStrategy):
     async def predict(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:
         proba = await self.predict_proba(df, horizon)
         preds = np.full(len(proba), -1, dtype=np.int8)
-        preds[proba > 0.55] = 1
-        preds[proba < 0.45] = 0
+        threshold = resolve_probability_threshold(self.params)
+        up_mask = proba > threshold
+        down_mask = proba < (1.0 - threshold)
+        preds[up_mask] = 1
+        preds[down_mask] = 0
         return preds
 
     def _determine_chunk_size(self, length: int) -> int:

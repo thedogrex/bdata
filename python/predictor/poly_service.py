@@ -52,6 +52,9 @@ _recent_batch_results: Dict[str, Any] = {
     "summary": {"UP": 0, "DOWN": 0, "UNDEFINED": 0, "ERROR": 0},
 }
 
+_low_cash_alert_sent = False
+LOW_CASH_THRESHOLD_MULTIPLIER = 4.0
+
 BET_SIZE_PCT_MIN = 0.001
 BET_SIZE_PCT_MAX = 0.2
 DEFAULT_LIVE_TRADE_SETTINGS = {
@@ -105,6 +108,37 @@ def _make_check_detail(
 
 
 _PREDICTION_REASON_COLUMN_AVAILABLE = True
+
+
+async def _maybe_notify_low_cash(snapshot: Optional[Dict[str, Any]]) -> None:
+    global _low_cash_alert_sent
+    if not snapshot:
+        return
+    bet_size = snapshot.get("bet_size_usd")
+    collateral = snapshot.get("collateral_usd")
+    if bet_size is None or collateral is None:
+        _low_cash_alert_sent = False
+        return
+    try:
+        bet_size = float(bet_size)
+        collateral = float(collateral)
+    except (TypeError, ValueError):
+        return
+    if bet_size <= 0:
+        return
+    threshold = bet_size * LOW_CASH_THRESHOLD_MULTIPLIER
+    if collateral < threshold:
+        if not _low_cash_alert_sent:
+            text = (
+                "Внимание, нажмите кнопку обналички денег, осталось менее 4-х ставок.\n"
+                f"Размер ставки: {bet_size:.2f}$\n"
+                f"Текущий cash: {collateral:.2f}$"
+            )
+            await telegram_bot.notify_admin(text)
+            _low_cash_alert_sent = True
+    else:
+        if _low_cash_alert_sent:
+            _low_cash_alert_sent = False
 
 
 async def _persist_prediction_payload(
@@ -953,7 +987,11 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                 finally:
                     last_daily_report_check = current_time
 
-            if getattr(config, "TELEGRAM_ORDER_FLOW_INFO", None) and current_time - last_order_flow_report >= 3600:
+            if (
+                getattr(config, "TELEGRAM_ORDER_FLOW_ENABLED", False)
+                and getattr(config, "TELEGRAM_ORDER_FLOW_INFO", None)
+                and current_time - last_order_flow_report >= 3600
+            ):
                 last_order_flow_report = current_time
                 try:
                     from predictor import live_trading
@@ -986,7 +1024,8 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                 try:
                     from predictor import live_trading  # local import to avoid circular dep
 
-                    await live_trading.update_bank_snapshot()
+                    snapshot = await live_trading.update_bank_snapshot()
+                    await _maybe_notify_low_cash(snapshot)
                 except Exception as exc:
                     logger.warning("[poll_loop] failed to refresh bank snapshot: %s", exc)
                 finally:

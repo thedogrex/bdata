@@ -67,3 +67,4 @@ def _env_json_list(name: str) -> list[str]:
 TELEGRAM_INFO_CHAT_IDS: list[str] = _env_json_list("TELEGRAM_INFO_CHAT_IDS")
 
 TELEGRAM_ORDER_FLOW_INFO: list[str] = _env_json_list("TELEGRAM_ORDER_FLOW_INFO")
+TELEGRAM_ORDER_FLOW_ENABLED: bool = _env_bool("TELEGRAM_ORDER_FLOW_ENABLED", False)

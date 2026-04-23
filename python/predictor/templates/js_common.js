@@ -1209,6 +1209,7 @@ async function bfRunCompare(bfId){
       body: JSON.stringify({run_ids: ids, horizon})
     });
     bestCompareData = await res.json();
+    bestAssignColorPalette(bestCompareData);
     _bcSetSource('history');
     switchTab('best_compare');
     bestCompareRecalc();
@@ -1465,6 +1466,7 @@ async function histStandaloneRunCompare(){
       body: JSON.stringify({run_ids: ids, horizon})
     });
     bestCompareData = await res.json();
+    bestAssignColorPalette(bestCompareData);
     if(!Array.isArray(bestCompareData) || bestCompareData.length < 1){
       alert('Compare returned no data (check that selected runs have the chosen horizon)');
       return;
@@ -1599,6 +1601,7 @@ function bestUpdateCompareCount(){
 // ===== BEST COMPARE: Half-Kelly Simulation =====
 let bestCompareData = [];
 let bestCompareSource = 'best'; // 'best' or 'history'
+let bestCompareColorMap = new Map();
 
 function bestCompareGoBack(){
   switchTab(bestCompareSource === 'history' ? 'history' : 'best');
@@ -1618,6 +1621,37 @@ const BC_COLORS = [
   '#22d3ee','#4ade80','#fb923c','#c084fc'
 ];
 
+function bestExtractRunId(obj){
+  if(!obj) return null;
+  if(typeof obj === 'number') return obj;
+  if(typeof obj === 'object'){
+    if(obj.id != null) return String(obj.id);
+    if(obj.run && obj.run.id != null) return String(obj.run.id);
+  }
+  return null;
+}
+
+function bestAssignColorPalette(data){
+  bestCompareColorMap = new Map();
+  if(!Array.isArray(data)) return;
+  data.forEach((item, idx) => {
+    const rid = bestExtractRunId(item);
+    if(rid == null || bestCompareColorMap.has(rid)) return;
+    bestCompareColorMap.set(rid, BC_COLORS[idx % BC_COLORS.length]);
+  });
+}
+
+function bestGetColorForRun(runObj, fallbackIndex = 0){
+  const rid = bestExtractRunId(runObj);
+  if(rid != null){
+    if(bestCompareColorMap.has(rid)) return bestCompareColorMap.get(rid);
+    const color = BC_COLORS[(bestCompareColorMap.size + fallbackIndex) % BC_COLORS.length];
+    bestCompareColorMap.set(rid, color);
+    return color;
+  }
+  return BC_COLORS[fallbackIndex % BC_COLORS.length];
+}
+
 async function bestRunCompare(){
   if(bestCompareSelected.size < 2){ alert('Select at least 2 runs'); return; }
   const horizon = parseInt(document.getElementById('best-horizon').value) || 1;
@@ -1628,6 +1662,7 @@ async function bestRunCompare(){
       body: JSON.stringify({run_ids: ids, horizon})
     });
     bestCompareData = await res.json();
+    bestAssignColorPalette(bestCompareData);
     _bcSetSource('best');
     switchTab('best_compare');
     bestCompareRecalc();
@@ -1636,6 +1671,7 @@ async function bestRunCompare(){
 
 function bestCompareRecalc(){
   if(!bestCompareData.length) return;
+  bestAssignColorPalette(bestCompareData);
   const startBank = parseFloat(document.getElementById('bc-bank').value) || 1000;
   const buyPriceCents = parseFloat(document.getElementById('bc-buy-price').value) || 52;
   const maxBet = parseFloat(document.getElementById('bc-max-bet').value) || 500;
@@ -1819,7 +1855,7 @@ function bestRenderCompareChart(simResults, startBank, targetElId, title){
 
   // Lines + dots
   series.forEach((vals, si) => {
-    const color = BC_COLORS[si % BC_COLORS.length];
+    const color = bestGetColorForRun(simResults[si]?.run || simResults[si], si);
     let path = '';
     vals.forEach((v, i) => {
       const x = toX(i), y = toY(v);
@@ -1840,14 +1876,53 @@ function bestRenderCompareChart(simResults, startBank, targetElId, title){
   svg += '</svg>';
 
   // Legend
-  let legend = '<div class="flex flex-wrap gap-3 mt-3">';
+  let legend = '<div class="flex flex-col gap-2 mt-3">';
   simResults.forEach((s, i) => {
-    const color = BC_COLORS[i % BC_COLORS.length];
-    legend += `<span class="flex items-center gap-1 text-xs"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:${color}"></span>${s.label}</span>`;
+    const color = bestGetColorForRun(s.run || s, i);
+    const configPayload = encodeURIComponent(JSON.stringify({
+      id: s.run?.id,
+      strategy: s.run?.strategy,
+      params: s.run?.params || {},
+      window_size: s.run?.window_size,
+      horizon: s.run?.horizon,
+    }));
+    legend += `
+      <div class="flex items-center gap-2 text-xs bg-slate-900/40 rounded px-2 py-1">
+        <span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:${color}"></span>
+        <span class="flex-1">${s.label}</span>
+        <button onclick="bestCopyConfig(event, '${configPayload}')" class="text-amber-300 hover:text-amber-100 border border-slate-600/60 rounded px-2 py-0.5">
+          Copy JSON
+        </button>
+      </div>`;
   });
   legend += '</div>';
 
   el.innerHTML = `<div class="flex items-center justify-between mb-3"><h3 class="font-semibold">${title || 'Bank Growth'}</h3>${simResults.length === 1 ? `<button onclick="event.stopPropagation();showConfigPopover(this)" data-run-id="${simResults[0].run.id}" data-strategy="${simResults[0].run.strategy}" data-params='${JSON.stringify(simResults[0].run.params)}' class="text-blue-400 hover:text-blue-200 text-xs px-2 py-1 rounded border border-slate-600" title="View Config">⚙ ${simResults[0].run.strategy}</button>` : ''}</div>${svg}${legend}`;
+}
+
+function bestCopyConfig(event, encodedPayload){
+  if(event && typeof event.stopPropagation === 'function') event.stopPropagation();
+  let payload = null;
+  try{
+    const decoded = decodeURIComponent(encodedPayload || '');
+    payload = JSON.parse(decoded || '{}');
+  }catch(err){
+    console.error('bestCopyConfig decode error', err);
+    alert('Failed to copy config');
+    return;
+  }
+  const button = event?.currentTarget;
+  const text = JSON.stringify(payload, null, 2);
+  navigator.clipboard.writeText(text).then(()=>{
+    if(button){
+      const prev = button.textContent;
+      button.textContent = 'Copied!';
+      setTimeout(()=>{button.textContent = prev || 'Copy JSON';}, 1500);
+    }
+  }).catch(err => {
+    console.error('Clipboard copy failed', err);
+    alert('Clipboard copy failed');
+  });
 }
 
 function bestRenderCompareTable(simResults, startBank, targetElId, title){
@@ -1857,11 +1932,16 @@ function bestRenderCompareTable(simResults, startBank, targetElId, title){
 
   const isFull = (targetElId === 'bc-table-full');
   const kLabel = isFull ? 'K%' : '½K%';
+  const sortedResults = simResults.slice().sort((a,b)=>{
+    const aBank = (typeof a.finalBank === 'number') ? a.finalBank : -Infinity;
+    const bBank = (typeof b.finalBank === 'number') ? b.finalBank : -Infinity;
+    return bBank - aBank;
+  });
 
   // Collect all months
   const allMonths = [];
   const monthSet = new Set();
-  simResults.forEach(s => s.monthEntries.forEach(m => {
+  sortedResults.forEach(s => s.monthEntries.forEach(m => {
     if(!monthSet.has(m.month)){monthSet.add(m.month); allMonths.push(m.month);}
   }));
 
@@ -1881,8 +1961,8 @@ function bestRenderCompareTable(simResults, startBank, targetElId, title){
   allMonths.forEach(m => html += `<th>${m}</th>`);
   html += '<th>Final</th><th>ROI</th></tr></thead><tbody>';
 
-  simResults.forEach((s, i) => {
-    const color = BC_COLORS[i % BC_COLORS.length];
+  sortedResults.forEach((s, i) => {
+    const color = bestGetColorForRun(s.run || s, i);
     const roi = ((s.finalBank - startBank) / startBank * 100).toFixed(1);
     const roiClass = s.finalBank >= startBank ? 'text-green-400' : 'text-red-400';
     html += `<tr><td><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};margin-right:6px"></span><span class="text-xs">${s.label}</span></td>`;
@@ -1921,8 +2001,8 @@ function bestRenderCompareTable(simResults, startBank, targetElId, title){
   allMonths.forEach(() => html += '<th class="text-xs text-slate-500">Sig</th><th class="text-xs text-slate-500">Acc%</th><th class="text-xs text-slate-500">Vol</th>');
   html += '</tr></thead><tbody>';
 
-  simResults.forEach((s, i) => {
-    const color = BC_COLORS[i % BC_COLORS.length];
+  sortedResults.forEach((s, i) => {
+    const color = bestGetColorForRun(s.run || s, i);
     html += `<tr><td><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};margin-right:6px"></span><span class="text-xs">#${s.run.id}</span></td>`;
     allMonths.forEach(month => {
       const entry = s.monthEntries.find(e => e.month === month);
@@ -1961,7 +2041,7 @@ function bestRenderCompareSummary(simResults, startBank, buyPriceCents, maxBet){
     const r = s.run;
     const roi = ((s.finalBank - startBank) / startBank * 100).toFixed(1);
     const profit = s.finalBank - startBank;
-    const color = BC_COLORS[simResults.indexOf(s) % BC_COLORS.length];
+    const color = bestGetColorForRun(r || s, i);
     const roiClass = profit >= 0 ? 'text-green-400' : 'text-red-400';
     const hasEdge = r.accuracy_pct > parseFloat(breakeven);
     const kFullPct = (s.kellyFull*100);

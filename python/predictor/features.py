@@ -84,10 +84,12 @@ def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
         df["bb_width"] = bb_width
         df["bb_pos"] = bb_pos
 
-    # --- Volatility ---
+    # --- Volatility (returns-based to match rsi_mean_reversion strategy) ---
     if FEATURE_USAGE["volatility"]:
-        df["volatility_5"] = df["close"].rolling(5).std()
-        df["volatility_20"] = df["close"].rolling(20).std()
+        # Use returns-based volatility (not price-based) to match strategy calculation
+        returns = np.log(df["close"] / df["close"].shift(1))
+        df["volatility_5"] = returns.rolling(5).std()
+        df["volatility_20"] = returns.rolling(20).std()
         df["atr_14"] = _atr(df, 14)
 
     # --- Momentum ---

@@ -224,6 +224,24 @@ class RSIMeanReversionStrategy(BaseStrategy):
             return None
 
         close = df["close"].astype(float)
+        
+        # Use pre-computed volatility features if available (for single-candle predictions)
+        if "volatility_5" in df.columns and "volatility_20" in df.columns and len(df) == 1:
+            # These are now returns-based volatility (not price-based)
+            vol_fast = df["volatility_5"].astype(float).values
+            vol_slow = df["volatility_20"].astype(float).values
+            # Compute ratio, handling zeros
+            vol_ratio = np.where(
+                (vol_slow != 0) & np.isfinite(vol_slow),
+                vol_fast / vol_slow,
+                np.nan
+            )
+            return {
+                "fast": vol_fast,
+                "slow": vol_slow,
+                "ratio": vol_ratio,
+            }
+        
         returns = np.log(close / close.shift(1))
 
         fast_window = max(2, int(self.params.get("vol_fast_window", 20)))

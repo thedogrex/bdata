@@ -301,7 +301,7 @@ function ensureBacktestConfig(){
 }
 
 // ===== TABS =====
-const TABS=['backtest','bruteforce','history','best','best_compare','poly','poly_batch','wallet','lgbm','analytics','compare_asume','order_pricing'];
+const TABS=['backtest','bruteforce','history','best','best_compare','poly','poly_batch','wallet','lgbm','analytics','compare_asume','order_pricing','super_backtest'];
 
 function getInitialTab(){
   let tabParam = null;

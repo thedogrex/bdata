@@ -241,6 +241,15 @@ class DbProvider:
         return (None,) * len(params)
 
     # -----------------------------------------------------
+    async def executemany(self, query: str, params_list: List[Sequence[Any]]) -> int:
+        """Execute a query multiple times with different parameters (batch insert)."""
+        await self.__check_connection()
+        async with self.__pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.executemany(query, params_list)
+                return cur.rowcount
+
+    # -----------------------------------------------------
     async def fetchall(self, query: str, params: Optional[Sequence[Any]] = None) -> List[Sequence[Any]]:
         await self.__check_connection()
         async with self.__pool.acquire() as conn:

@@ -128,6 +128,7 @@
     <button onclick="switchTab('analytics');analyticsLoad()" id="tab-analytics" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Analytics</button>
     <button onclick="switchTab('compare_asume')" id="tab-compare_asume" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Compare Asume</button>
     <button onclick="switchTab('order_pricing');ompLoad()" id="tab-order_pricing" class="pb-3 px-1 text-sm font-medium text-slate-400 cursor-pointer">Orders Market Pricing</button>
+    <button onclick="switchTab('super_backtest');initSuperBacktest()" id="tab-super_backtest" class="pb-3 px-1 text-sm font-medium text-purple-400 cursor-pointer">Super Backtest</button>
   </div>
 
   {{TAB_BACKTEST}}
@@ -142,6 +143,7 @@
   {{TAB_ANALYTICS}}
   {{TAB_COMPARE_ASUME}}
   {{TAB_ORDER_PRICING}}
+  {{TAB_SUPER_BACKTEST}}
 
   <!-- Compare Development Dialog -->
   <div id="compare-dev-popup" class="hidden absolute bg-slate-800 border border-slate-600 rounded-md p-2 shadow-lg z-50" style="min-width:120px;">
@@ -164,6 +166,7 @@ let polyActiveTs=null;
 {{JS_COMPARE_ASUME}}
 {{JS_BACKTEST}}
 {{JS_LIGHTGBM}}
+{{JS_SUPER_BACKTEST}}
 
 // ===== BOOT =====
 init();

@@ -1,0 +1,190 @@
+  <!-- ============ TAB: SUPER BACKTEST ============ -->
+  <div id="panel-super_backtest" class="hidden">
+    <!-- Run Super Backtest -->
+    <div class="card p-6 mb-4">
+      <h2 class="text-lg font-semibold mb-4">Super Backtest — HMM Regime Analysis</h2>
+      <p class="text-xs text-slate-400 mb-4">
+        Run a detailed backtest that saves every prediction with technical features. 
+        Then apply Hidden Markov Model to detect market regimes where trading should be paused.
+      </p>
+      
+      <div class="mb-4">
+        <label class="block text-xs text-slate-400 mb-1">Config (JSON)</label>
+        <textarea id="sb-config" rows="16" class="w-full text-xs font-mono" placeholder="Paste your config here..."></textarea>
+      </div>
+      
+      <div class="flex gap-2 items-center flex-wrap">
+        <button onclick="runSuperBacktest()" id="btn-sb-run" class="btn btn-green">Run Super Backtest</button>
+        <button onclick="loadSuperBacktestList()" class="btn btn-primary">Refresh List</button>
+        <div class="flex items-center gap-2 ml-4">
+          <label class="text-xs text-slate-400">HMM States:</label>
+          <input type="number" id="sb-hmm-states" value="2" min="2" max="5" class="w-16 text-xs" />
+        </div>
+        <div class="flex items-center gap-2 ml-2">
+          <input type="checkbox" id="sb-use-prev" checked class="w-4 h-4" />
+          <label class="text-xs text-slate-400">Use prev_result</label>
+        </div>
+      </div>
+      
+      <!-- Threshold Controls for HMM Analysis -->
+      <div class="mt-4 p-3 bg-slate-800 rounded border border-slate-700">
+        <h4 class="text-xs font-semibold text-slate-300 mb-2">HMM Regime Thresholds (for Analysis)</h4>
+        <div class="flex gap-4 items-center flex-wrap">
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-slate-400">Good ≥</label>
+            <input type="number" id="sb-good-threshold" value="55" min="50" max="80" step="1" class="w-16 text-xs" />
+            <span class="text-xs text-slate-500">%</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-slate-400">Bad ≤</label>
+            <input type="number" id="sb-bad-threshold" value="45" min="20" max="50" step="1" class="w-16 text-xs" />
+            <span class="text-xs text-slate-500">%</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-slate-400">Filter P(bad) ></label>
+            <input type="number" id="sb-filter-threshold" value="0.6" min="0.3" max="0.9" step="0.1" class="w-16 text-xs" />
+          </div>
+          <button onclick="analyzeHmmWithThresholds()" class="btn btn-purple text-xs py-1">Analyze with Thresholds</button>
+        </div>
+        <p class="text-xs text-slate-500 mt-2">
+          Good: accuracy ≥ threshold | Bad: accuracy ≤ threshold | Skip trade when P(bad_state) > filter threshold
+        </p>
+      </div>
+      
+      <!-- Volatility Bruteforce -->
+      <div class="mt-4 p-3 bg-slate-800 rounded border border-slate-700">
+        <h4 class="text-xs font-semibold text-slate-300 mb-2">Volatility Parameter Bruteforce</h4>
+        <p class="text-xs text-slate-500 mb-2">
+          Test multiple volatility filter combinations in one run to find optimal parameters.
+        </p>
+        <div class="flex gap-3 items-center flex-wrap mb-2">
+          <div>
+            <label class="text-[10px] text-slate-400 block">Min Vol</label>
+            <input type="text" id="sb-vol-min" value="0, 0.001, 0.002" class="w-28 text-xs" />
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-400 block">Max Vol</label>
+            <input type="text" id="sb-vol-max" value="0.01, 0.015, 0.02" class="w-28 text-xs" />
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-400 block">Vol Ratio Max</label>
+            <input type="text" id="sb-vol-ratio" value="1.2, 1.5, 2.0" class="w-28 text-xs" />
+          </div>
+          <button onclick="runVolatilityBruteforce()" id="btn-vol-brute" class="btn btn-orange text-xs py-1 mt-3">Run Bruteforce</button>
+        </div>
+        <div id="vol-brute-results" class="hidden mt-2 p-2 bg-slate-900 rounded">
+          <h5 class="text-xs font-semibold text-orange-300 mb-1">Bruteforce Results</h5>
+          <div class="overflow-x-auto">
+            <table class="text-xs">
+              <thead>
+                <tr>
+                  <th>Rank</th>
+                  <th>Min Vol</th>
+                  <th>Max Vol</th>
+                  <th>Ratio Max</th>
+                  <th>Winrate</th>
+                  <th>Signals</th>
+                </tr>
+              </thead>
+              <tbody id="vol-brute-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Super Backtest List -->
+    <div class="card p-6 mb-4">
+      <h3 class="font-semibold mb-3">Super Backtest Runs</h3>
+      <div id="sb-list" class="overflow-x-auto">
+        <p class="text-slate-500 text-sm">Click "Refresh List" to load runs.</p>
+      </div>
+    </div>
+    
+    <!-- Selected Run Details -->
+    <div id="sb-details" class="hidden">
+      <div class="card p-6 mb-4">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-semibold" id="sb-detail-title">Run Details</h3>
+          <div class="flex gap-2">
+            <button onclick="analyzeHmmForRun()" id="btn-sb-hmm" class="btn btn-purple">Analyze with HMM</button>
+            <button onclick="closeSuperDetails()" class="btn btn-slate">Close</button>
+          </div>
+        </div>
+        
+        <div id="sb-detail-stats" class="mb-4"></div>
+        
+        <!-- Volatility Rescore -->
+        <div id="sb-vol-rescore" class="mb-4">
+          <h4 class="font-semibold text-sm mb-2 text-orange-300">Volatility Rescore (Fast)</h4>
+          <p class="text-xs text-slate-500 mb-2">Test volatility filters on saved predictions without re-running backtest.</p>
+          <div class="flex gap-2 items-center flex-wrap mb-2">
+            <div>
+              <label class="text-[10px] text-slate-400 block">Min Vol</label>
+              <input type="text" id="sb-rescore-min" value="0, 0.001, 0.002" class="w-24 text-xs" />
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-400 block">Max Vol</label>
+              <input type="text" id="sb-rescore-max" value="0.01, 0.015, 0.02" class="w-24 text-xs" />
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-400 block">Ratio Max</label>
+              <input type="text" id="sb-rescore-ratio" value="1.2, 1.5, 2.0" class="w-24 text-xs" />
+            </div>
+            <button onclick="rescoreVolatility()" id="btn-rescore-vol" class="btn btn-orange text-xs py-1 mt-3">Rescore</button>
+          </div>
+          <div id="rescore-results" class="hidden mt-2 p-2 bg-slate-900 rounded max-h-60 overflow-auto">
+            <table class="text-xs w-full">
+              <thead>
+                <tr>
+                  <th>Rank</th>
+                  <th>Min Vol</th>
+                  <th>Max Vol</th>
+                  <th>Ratio</th>
+                  <th>Winrate</th>
+                  <th>Signals</th>
+                </tr>
+              </thead>
+              <tbody id="rescore-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        
+        <!-- HMM Results -->
+        <div id="sb-hmm-results" class="hidden mb-4">
+          <h4 class="font-semibold text-sm mb-2 text-purple-300">HMM Regime Analysis</h4>
+          <div id="sb-hmm-thresholds" class="mb-2 text-xs text-slate-400"></div>
+          <div id="sb-hmm-states" class="mb-3"></div>
+          <div id="sb-hmm-transition" class="mb-3"></div>
+          <div id="sb-hmm-chart" style="min-height:200px"></div>
+        </div>
+        
+        <!-- Monthly Analysis Table -->
+        <div id="sb-monthly-analysis" class="hidden mb-4">
+          <h4 class="font-semibold text-sm mb-2 text-green-300">Month-by-Month Analysis</h4>
+          <div class="overflow-x-auto">
+            <table class="text-xs">
+              <thead>
+                <tr>
+                  <th>Month</th>
+                  <th>RSI Signals</th>
+                  <th>RSI Win Rate</th>
+                  <th>Good Regime Signals</th>
+                  <th>Good Regime Win Rate</th>
+                  <th>Good Regime %</th>
+                </tr>
+              </thead>
+              <tbody id="sb-monthly-tbody">
+              </tbody>
+            </table>
+          </div>
+        </div>
+        
+        <!-- Predictions Table -->
+        <div>
+          <h4 class="font-semibold text-sm mb-2">Predictions (first 100)</h4>
+          <div id="sb-predictions" style="max-height:400px;overflow:auto"></div>
+        </div>
+      </div>
+    </div>
+  </div>

@@ -1037,6 +1037,251 @@ async def api_live_orders_4s(
 
 # ==================== COMPARE ASUME ====================
 
+# ==================== SUPER BACKTEST (HMM Regime Analysis) ====================
+
+from pydantic import BaseModel
+
+class RescoreVolatilityRequest(BaseModel):
+    vol_min_values: list = [0.0, 0.001, 0.002]
+    vol_max_values: list = [0.01, 0.015, 0.02]
+    vol_ratio_max_values: list = [1.2, 1.5, 2.0]
+
+
+class SuperBacktestRequest(BaseModel):
+    strategy: str
+    params: dict | None = None
+    train_start: str
+    train_end: str
+    test_start: str
+    test_end: str
+    horizon: int = 1
+    table: str = "c_5m"
+    window_size: int = 5000
+    retrain_every: int = 500
+    hmm_states: int = 2
+
+
+@app.post("/api/super_backtest/run")
+async def api_run_super_backtest(req: SuperBacktestRequest):
+    """Run a super backtest that saves every prediction with features for HMM analysis."""
+    from predictor.super_backtest import run_super_backtest
+    
+    async def _run(progress):
+        result = await run_super_backtest(
+            strategy_name=req.strategy,
+            strategy_params=req.params,
+            train_start=req.train_start,
+            train_end=req.train_end,
+            test_start=req.test_start,
+            test_end=req.test_end,
+            horizon=req.horizon,
+            table=req.table,
+            window_size=req.window_size,
+            retrain_every=req.retrain_every,
+            hmm_states=req.hmm_states,
+        )
+        progress.update(1, 1, "Done")
+        return result
+    
+    label = f"Super Backtest {req.strategy} [{req.test_start} -> {req.test_end}]"
+    task_id = task_mgr.enqueue("super_backtest", label, _run, total=1)
+    return {"task_id": task_id, "status": "queued", "label": label}
+
+
+@app.post("/api/super_backtest/{super_run_id}/analyze_hmm")
+async def api_analyze_hmm(
+    super_run_id: int, 
+    n_states: int = 2,
+    use_prev_result: bool = True,
+    good_threshold: float = 55.0,
+    bad_threshold: float = 45.0,
+    filter_threshold: float = 0.6,
+):
+    """
+    Analyze a super backtest run with HMM to identify market regimes.
+    
+    Features: rsi_14, delta_rsi_14, ema_diff_20, atr_14, [prev_result]
+    Set use_prev_result=false to test without behavioral feature.
+    
+    Thresholds:
+    - good_threshold: Accuracy % to classify state as "good" regime (default 55)
+    - bad_threshold: Accuracy % to classify state as "bad" regime (default 45)
+    - filter_threshold: Skip trade if P(bad_state) > threshold (default 0.6)
+    """
+    from predictor.super_backtest import analyze_with_hmm
+    return await analyze_with_hmm(
+        super_run_id, n_states, use_prev_result,
+        good_threshold, bad_threshold, filter_threshold
+    )
+
+
+@app.post("/api/super_backtest/{super_run_id}/rescore_volatility")
+async def api_rescore_volatility(
+    super_run_id: int,
+    req: RescoreVolatilityRequest,
+):
+    """
+    Rescore existing super backtest with different volatility thresholds.
+    Uses saved predictions to calculate results without re-running backtest.
+    Much faster than running multiple backtests!
+    """
+    from predictor.db.models import get_pool
+    import numpy as np
+    
+    vol_min_values = req.vol_min_values
+    vol_max_values = req.vol_max_values
+    vol_ratio_max_values = req.vol_ratio_max_values
+    
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        # Load all predictions with volatility data
+        rows = await conn.fetch(
+            """
+            SELECT prediction, probability, actual, is_signal,
+                   volatility_short, volatility_long
+            FROM super_backtest_predictions
+            WHERE super_run_id = $1
+            ORDER BY candle_idx
+            """,
+            super_run_id
+        )
+    
+    if not rows:
+        return {"error": "No predictions found for this run"}
+    
+    # Convert to numpy arrays for fast filtering
+    predictions = np.array([r["prediction"] for r in rows])
+    actuals = np.array([r["actual"] for r in rows])
+    is_signals = np.array([r["is_signal"] for r in rows])
+    vol_short = np.array([r["volatility_short"] or 0 for r in rows], dtype=float)
+    vol_long = np.array([r["volatility_long"] or 0 for r in rows], dtype=float)
+    
+    # Calculate volatility ratio
+    vol_ratio = np.where(vol_long > 0, vol_short / vol_long, np.inf)
+    
+    results = []
+    total_combos = len(vol_min_values) * len(vol_max_values) * len(vol_ratio_max_values)
+    combo_num = 0
+    
+    for min_vol in vol_min_values:
+        for max_vol in vol_max_values:
+            if max_vol <= min_vol:
+                continue
+            for vol_ratio_max in vol_ratio_max_values:
+                combo_num += 1
+                
+                # Apply volatility filter
+                valid_mask = (
+                    (vol_short >= min_vol) &
+                    (vol_short <= max_vol) &
+                    (vol_ratio <= vol_ratio_max)
+                )
+                
+                # Only consider actual signals (prediction in [0, 1])
+                signal_mask = is_signals & valid_mask
+                
+                total_signals = int(np.sum(signal_mask))
+                correct_signals = int(np.sum(signal_mask & (predictions == actuals)))
+                winrate = round(correct_signals / total_signals * 100, 2) if total_signals > 0 else 0
+                
+                results.append({
+                    "combo_num": combo_num,
+                    "min_vol": min_vol,
+                    "max_vol": max_vol,
+                    "vol_ratio_max": vol_ratio_max,
+                    "signals": total_signals,
+                    "correct": correct_signals,
+                    "winrate": winrate,
+                })
+    
+    # Sort by winrate descending
+    results.sort(key=lambda x: x["winrate"], reverse=True)
+    
+    return {
+        "super_run_id": super_run_id,
+        "total_predictions": len(rows),
+        "total_combinations": combo_num,
+        "results": results,
+        "best": results[0] if results else None,
+    }
+
+
+@app.get("/api/super_backtest/list")
+async def api_list_super_backtests(limit: int = 50):
+    """List super backtest runs."""
+    from db import DbProvider
+    db = DbProvider()
+    
+    rows = await db.fetchall(
+        """
+        SELECT id, strategy, train_start, test_end, horizon, 
+               signals, correct, accuracy_pct, hmm_states, created_at
+        FROM super_backtest_runs
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (limit,)
+    )
+    
+    results = []
+    for row in rows:
+        results.append({
+            "id": row[0],
+            "strategy": row[1],
+            "train_start": row[2],
+            "test_end": row[3],
+            "horizon": row[4],
+            "signals": row[5],
+            "correct": row[6],
+            "accuracy_pct": row[7],
+            "hmm_states": row[8],
+            "created_at": str(row[9]) if row[9] else None,
+        })
+    
+    return results
+
+
+@app.get("/api/super_backtest/{super_run_id}")
+async def api_get_super_backtest(super_run_id: int):
+    """Get super backtest results."""
+    from predictor.super_backtest import get_super_backtest_results
+    return await get_super_backtest_results(super_run_id) or {"error": "Not found"}
+
+
+@app.get("/api/super_backtest/{super_run_id}/predictions")
+async def api_get_super_predictions(super_run_id: int, limit: int = 10000):
+    """Get detailed predictions for a super backtest."""
+    from predictor.super_backtest import get_super_predictions
+    return await get_super_predictions(super_run_id, limit)
+
+
+@app.get("/api/super_backtest/{super_run_id}/regimes")
+async def api_get_super_regimes(super_run_id: int):
+    """Get detected HMM regimes for a super backtest."""
+    from predictor.super_backtest import get_regimes
+    return await get_regimes(super_run_id)
+
+
+@app.delete("/api/super_backtest/{super_run_id}")
+async def api_delete_super_backtest(super_run_id: int):
+    """Delete a super backtest run and all its data (predictions, regimes)."""
+    from db import DbProvider
+    db = DbProvider()
+    
+    try:
+        # Delete in reverse order to respect FK constraints
+        # 1. Delete regimes
+        await db.execute("DELETE FROM super_backtest_regimes WHERE super_run_id = %s", (super_run_id,))
+        # 2. Delete predictions
+        await db.execute("DELETE FROM super_backtest_predictions WHERE super_run_id = %s", (super_run_id,))
+        # 3. Delete run
+        await db.execute("DELETE FROM super_backtest_runs WHERE id = %s", (super_run_id,))
+        
+        return {"success": True, "deleted": super_run_id}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/compare_asume")
 async def api_compare_asume(
     date_from: str | None = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
@@ -1070,6 +1315,7 @@ def _build_admin_html() -> str:
         "{{TAB_COMPARE_ASUME}}": _load_template("tab_compare_asume.html"),
         "{{TAB_ORDER_PRICING}}": _load_template("tab_order_pricing.html"),
         "{{TAB_LGBM}}": _load_template("tab_lgbm.html"),
+        "{{TAB_SUPER_BACKTEST}}": _load_template("tab_super_backtest.html"),
         "{{JS_COMMON}}": _load_template("js_common.js"),
         "{{JS_POLY}}": _load_template("js_poly.js"),
         "{{JS_POLY_BATCH}}": _load_template("js_poly_batch.js"),
@@ -1077,6 +1323,7 @@ def _build_admin_html() -> str:
         "{{JS_COMPARE_ASUME}}": _load_template("js_compare_asume.js"),
         "{{JS_BACKTEST}}": "",  # included in js_common.js
         "{{JS_LIGHTGBM}}": _load_template("js_lgbm.js"),
+        "{{JS_SUPER_BACKTEST}}": _load_template("js_super_backtest.js"),
     }
     for key, val in replacements.items():
         base = base.replace(key, val)

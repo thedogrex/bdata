@@ -26,6 +26,7 @@ class RSIMeanReversionStrategy(BaseStrategy):
             "rsi_oversold": 30,
             "rsi_overbought": 70,
             "use_bb_confirm": True,
+            "require_bb_confirm": False,  # If True, signal only if BOTH RSI and BB conditions met
             "bb_low": 0.2,
             "bb_high": 0.8,
             "bb_period": 20,
@@ -45,7 +46,8 @@ class RSIMeanReversionStrategy(BaseStrategy):
             "rsi_period": "RSI lookback period. Shorter = more sensitive. Typical: 6-21.",
             "rsi_oversold": "RSI level considered oversold (buy signal). Lower = rarer signals. Typical: 20-35.",
             "rsi_overbought": "RSI level considered overbought (sell signal). Higher = rarer signals. Typical: 65-80.",
-            "use_bb_confirm": "Whether to require Bollinger Band position confirmation. Reduces false signals.",
+            "use_bb_confirm": "Whether to use Bollinger Band position confirmation. If False, BB is ignored entirely.",
+            "require_bb_confirm": "If True, signal ONLY if both RSI AND BB conditions met (strict). If False (default), RSI can signal alone with BB as bonus.",
             "bb_low": "Lower Bollinger Band threshold for confirmation (0-1). Price must be below this to buy. Typical: 0.15-0.25.",
             "bb_high": "Upper Bollinger Band threshold for confirmation (0-1). Price must be above this to sell. Typical: 0.75-0.85.",
             "bb_period": "Bollinger Band lookback period for confirmation. Typical: 10-50.",
@@ -163,8 +165,25 @@ class RSIMeanReversionStrategy(BaseStrategy):
 
             if self.params["use_bb_confirm"] and bb_arr is not None:
                 bb_chunk = np.nan_to_num(bb_arr[chunk], nan=0.5)
-                proba_chunk[bb_chunk < self.params["bb_low"]] += 0.05
-                proba_chunk[bb_chunk > self.params["bb_high"]] -= 0.05
+                
+                if self.params.get("require_bb_confirm", False):
+                    # STRICT mode: signal ONLY if both RSI AND BB conditions met
+                    # First reset ALL proba to 0.5 (no signal)
+                    proba_chunk[:] = 0.5
+                    # Then set signals ONLY for valid combinations
+                    up_valid = os_mask & (bb_chunk < self.params["bb_low"])
+                    down_valid = ob_mask & (bb_chunk > self.params["bb_high"])
+                    # Apply RSI-based probability ONLY for valid combinations
+                    if oversold > 0:
+                        rsi_up = rsi_chunk[up_valid]
+                        proba_chunk[up_valid] = 0.5 + ((oversold - rsi_up) / oversold) * 0.3 + 0.05
+                    if overbought < 100:
+                        rsi_down = rsi_chunk[down_valid]
+                        proba_chunk[down_valid] = 0.5 - ((rsi_down - overbought) / (100 - overbought)) * 0.3 - 0.05
+                else:
+                    # LENIENT mode (default): RSI can signal alone, BB adds bonus
+                    proba_chunk[bb_chunk < self.params["bb_low"]] += 0.05
+                    proba_chunk[bb_chunk > self.params["bb_high"]] -= 0.05
 
             if vol_fast is not None and vol_slow is not None and vol_ratio is not None:
                 vf = vol_fast[chunk]

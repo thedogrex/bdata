@@ -14,7 +14,7 @@ bind = f'unix:/datas/bdata/python/gunicorn.sock'
 # workers = cpu_count() + 1
 workers = 1
 worker_class = 'uvicorn.workers.UvicornWorker'
-timeout = 60
+timeout = 3000
 
 
 class SnapshotFilteredLogger(Logger):

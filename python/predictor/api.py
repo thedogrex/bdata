@@ -9,6 +9,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from predictor.rsib import get_default_rsib_config
 
 from predictor.backtester import (
     run_backtest,
@@ -26,7 +27,13 @@ from predictor.db_history import (
     get_bruteforce_sessions, get_bruteforce_session_by_id, get_best_runs,
     get_runs_by_ids, delete_bruteforce_group, get_bf_runs_paginated,
 )
-from predictor.bruteforce import run_bruteforce, resume_bruteforce, get_default_grid, build_combos
+from predictor.bruteforce import (
+    run_bruteforce,
+    resume_bruteforce,
+    get_default_grid,
+    build_combos,
+    count_combos,
+)
 from predictor.task_manager import task_mgr
 from predictor import poly_service
 from predictor import live_trading
@@ -34,6 +41,22 @@ from predictor import telegram_bot
 from predictor import predict_4s
 from predictor.binance_snapshot import start_snapshot_collector, stop_snapshot_collector
 import app.config as config
+
+
+def _resolve_log_level(level_name: str | None) -> int:
+    if not level_name:
+        return logging.INFO
+    level = getattr(logging, level_name.upper(), None)
+    return level if isinstance(level, int) else logging.INFO
+
+
+ROOT_LOG_LEVEL = _resolve_log_level(getattr(config, "LOG_LEVEL", "INFO"))
+root_logger = logging.getLogger()
+root_logger.setLevel(ROOT_LOG_LEVEL)
+if not root_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter(config.LOG_FORMAT, datefmt=config.LOG_DATEFMT))
+    root_logger.addHandler(_handler)
 
 BRUTEFORCE_ONLY_MODE = bool(getattr(config, "ONLY_BRUTEFORCE", False))
 logger = logging.getLogger("predictor.api")
@@ -112,6 +135,22 @@ class BruteforceRequest(BaseModel):
     retrain_every: int = 500
     max_combos: int = 100
     processes: int = 1  # See predictor.bruteforce.DEFAULT_BRUTEFORCE_PROCESSES
+
+
+class RsibRunRequest(BaseModel):
+    strategy: str = "rsi_mean_reversion"
+    train_start: str = "2022-01-01"
+    train_end: str = "2025-06-30"
+    test_start: str = "2025-07-01"
+    test_end: str = "2026-01-31"
+    horizon: int = 1
+    table: str = "c_5m"
+    window_size: int = 5000
+    retrain_every: int = 500
+    max_combos: int = 50
+    param_grid: dict | None = None
+    profit: dict | None = None
+    hmm: dict | None = None
 
 
 class SettingsRequest(BaseModel):
@@ -218,7 +257,8 @@ async def api_list_strategies():
 
 @app.on_event("startup")
 async def startup_event():
-    global poly_stop_event
+    global poly_stop_event, _admin_html_cache
+    _admin_html_cache = None  # rebuild templates on restart (e.g. new tabs)
     if BRUTEFORCE_ONLY_MODE:
         logger.info("ONLY_BRUTEFORCE mode enabled: skipping Polymarket polling/telegram/snapshots startup")
         return
@@ -552,8 +592,8 @@ async def api_run_backtest(req: BacktestRequest):
                 table=req.table,
                 window_size=req.window_size,
                 retrain_every=req.retrain_every,
-                progress=progress,
             )
+
         if "error" not in result:
             run_id = await save_backtest_run(result)
             result["id"] = run_id
@@ -704,7 +744,7 @@ async def api_best_compare(req: BestCompareRequest):
 @app.get("/api/bruteforce/grid/{strategy}")
 async def api_default_grid(strategy: str):
     grid = get_default_grid(strategy)
-    combos = build_combos(grid) if grid else []
+    combo_count = count_combos(grid)
 
     # New UI format: return a full config object that can be pasted/edited as JSON.
     cfg = {
@@ -720,7 +760,7 @@ async def api_default_grid(strategy: str):
         "max_combos": BruteforceRequest.model_fields["max_combos"].default,
         "param_grid": grid,
     }
-    return {"strategy": strategy, "config": cfg, "total_combos": len(combos)}
+    return {"strategy": strategy, "config": cfg, "total_combos": combo_count}
 
 
 @app.post("/api/bruteforce")
@@ -745,7 +785,7 @@ async def api_run_bruteforce(req: BruteforceRequest):
     if not grid:
         return JSONResponse(status_code=400, content={"error": f"No param grid for {req.strategy}"})
 
-    combos_count = len(build_combos(grid))
+    combos_count = count_combos(grid)
     actual_count = min(combos_count, req.max_combos)
 
     selected_horizon = req.horizon
@@ -820,6 +860,64 @@ async def api_stop_bruteforce(bf_id: int):
     await update_bruteforce_session(bf_id, {"status": "stopped"})
     
     return {"ok": success, "bf_id": bf_id, "status": "stopped"}
+
+
+# ==================== RSIB ====================
+
+@app.get("/api/rsib/default_config")
+async def api_rsib_default_config():
+    return {"config": get_default_rsib_config()}
+
+
+@app.post("/api/rsib/run")
+async def api_run_rsib(req: RsibRunRequest):
+    from predictor.rsib import create_rsib_session
+
+    payload = req.model_dump()
+
+    async def _run(progress):
+        return await create_rsib_session(payload, progress=progress)
+
+    grid = payload.get("param_grid") or {}
+    combo_count = count_combos(grid) if isinstance(grid, dict) else 0
+    combo_count = min(combo_count, int(payload.get("max_combos") or 50))
+    label = f"RSIB H{payload.get('horizon', 1)} ({combo_count} combos)"
+    task_id = task_mgr.enqueue("rsib", label, _run, total=max(1, combo_count))
+    return {"task_id": task_id, "status": "queued", "label": label, "combos": combo_count}
+
+
+@app.get("/api/rsib/sessions")
+async def api_list_rsib_sessions(limit: int = Query(50, ge=1, le=200)):
+    from predictor.rsib import list_rsib_sessions
+    return await list_rsib_sessions(limit=limit)
+
+
+@app.get("/api/rsib/sessions/{session_id}")
+async def api_get_rsib_session(session_id: int):
+    from predictor.rsib import get_rsib_session
+    result = await get_rsib_session(session_id)
+    if not result:
+        return JSONResponse(status_code=404, content={"error": "RSIB session not found"})
+    return result
+
+
+@app.get("/api/rsib/sessions/{session_id}/results")
+async def api_list_rsib_results(
+    session_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+):
+    from predictor.rsib import list_rsib_results
+    return await list_rsib_results(session_id=session_id, page=page, page_size=page_size)
+
+
+@app.get("/api/rsib/results/{result_id}")
+async def api_get_rsib_result(result_id: int):
+    from predictor.rsib import get_rsib_result
+    result = await get_rsib_result(result_id)
+    if not result:
+        return JSONResponse(status_code=404, content={"error": "RSIB result not found"})
+    return result
 
 
 # ==================== TASK QUEUE ====================
@@ -1047,6 +1145,49 @@ class RescoreVolatilityRequest(BaseModel):
     vol_ratio_max_values: list = [1.2, 1.5, 2.0]
 
 
+class HmmAnalysisRequest(BaseModel):
+    name: Optional[str] = None
+    n_states: int = 2
+    features: list[str] = ["rsi_14", "bb_pos", "volatility_5", "atr_14"]
+    fit_mode: str = "all_candles"  # all_candles | signals_only | walk_forward
+    walk_train_len: Optional[int] = None
+    walk_step: Optional[int] = None
+    good_threshold: float = 55.0
+    bad_threshold: float = 45.0
+    filter_threshold: float = 0.6
+    min_regime_len: int = 1
+
+
+class HmmSweepRequest(BaseModel):
+    name: Optional[str] = None
+    n_states: int = 3
+    features: list[str] = ["rsi_14", "bb_pos", "volatility_5", "atr_14", "ema_diff_20"]
+    fit_mode: str = "all_candles"
+    walk_train_len: Optional[int] = None
+    walk_step: Optional[int] = None
+    min_regime_len: int = 1
+    good_thresholds: list[float] = [53.0, 55.0, 57.0]
+    bad_thresholds: list[float] = [45.0, 47.0]
+    filter_thresholds: list[float] = [0.45, 0.55, 0.65]
+
+
+class VolatilityBruteforceRequest(BaseModel):
+    strategy: str = "rsi_mean_reversion"
+    params: dict | None = None
+    train_start: str | None = None
+    train_end: str | None = None
+    test_start: str
+    test_end: str
+    symbol: str = "BTCUSDT"
+    timeframe: str = "5m"
+    horizon: int = 1
+    table: str = "c_5m"
+    window_size: int = 5000
+    vol_min_values: list = [0.0, 0.001, 0.002]
+    vol_max_values: list = [0.01, 0.015, 0.02]
+    vol_ratio_max_values: list = [1.2, 1.5, 2.0]
+
+
 class SuperBacktestRequest(BaseModel):
     strategy: str
     params: dict | None = None
@@ -1206,6 +1347,193 @@ async def api_rescore_volatility(
     }
 
 
+@app.post("/api/super_backtest/volatility_bruteforce")
+async def api_volatility_bruteforce(req: VolatilityBruteforceRequest):
+    """
+    Run backtest across volatility parameter combinations.
+    Preloads data once, then tests each vol combo quickly.
+    """
+    import numpy as np
+
+    # Preload data once
+    preloaded = await preload_backtest_data(
+        train_start=req.train_start,
+        train_end=req.train_end,
+        test_start=req.test_start,
+        test_end=req.test_end,
+        horizons=[req.horizon],
+        table=req.table,
+        strategy_name=req.strategy,
+    )
+
+    base_params = req.params or {}
+    results = []
+    combo_num = 0
+
+    for min_vol in req.vol_min_values:
+        for max_vol in req.vol_max_values:
+            if max_vol <= min_vol:
+                continue
+            for vol_ratio_max in req.vol_ratio_max_values:
+                combo_num += 1
+                params = {
+                    **base_params,
+                    "min_vol": min_vol,
+                    "max_vol": max_vol,
+                    "vol_ratio_max": vol_ratio_max,
+                }
+
+                result = await run_backtest_vectorized(
+                    strategy_name=req.strategy,
+                    strategy_params=params,
+                    preloaded=preloaded,
+                    horizons=[req.horizon],
+                    window_size=req.window_size,
+                    retrain_every=500,
+                    train_start=req.train_start,
+                    train_end=req.train_end,
+                    test_start=req.test_start,
+                    test_end=req.test_end,
+                    table=req.table,
+                )
+
+                h_data = result.get("horizons", {}).get(str(req.horizon), {})
+                signals = h_data.get("signals", 0)
+                correct = h_data.get("correct", 0)
+                winrate = round(correct / signals * 100, 2) if signals > 0 else 0
+
+                results.append({
+                    "combo_num": combo_num,
+                    "min_vol": min_vol,
+                    "max_vol": max_vol,
+                    "vol_ratio_max": vol_ratio_max,
+                    "signals": signals,
+                    "correct": correct,
+                    "winrate": winrate,
+                })
+
+    # Sort by winrate descending
+    results.sort(key=lambda x: x["winrate"], reverse=True)
+
+    return {
+        "total_combinations": combo_num,
+        "results": results,
+        "best": results[0] if results else None,
+    }
+
+
+# ---------- HMM Analyses v2 ----------
+
+@app.get("/api/super_backtest/hmm/features")
+async def api_hmm_available_features():
+    """List feature names selectable for HMM analysis."""
+    from predictor.hmm_analysis import AVAILABLE_FEATURES
+    return {"features": AVAILABLE_FEATURES}
+
+
+@app.post("/api/super_backtest/{super_run_id}/hmm_analyses")
+async def api_create_hmm_analysis(super_run_id: int, req: HmmAnalysisRequest):
+    """Fit a new HMM analysis configuration on an existing super backtest run."""
+    from predictor.hmm_analysis import create_hmm_analysis
+    return await create_hmm_analysis(
+        super_run_id=super_run_id,
+        name=req.name,
+        n_states=req.n_states,
+        features=req.features,
+        fit_mode=req.fit_mode,
+        walk_train_len=req.walk_train_len,
+        walk_step=req.walk_step,
+        good_threshold=req.good_threshold,
+        bad_threshold=req.bad_threshold,
+        filter_threshold=req.filter_threshold,
+        min_regime_len=req.min_regime_len,
+    )
+
+
+@app.get("/api/super_backtest/{super_run_id}/hmm_analyses")
+async def api_list_hmm_analyses(super_run_id: int):
+    from predictor.hmm_analysis import list_hmm_analyses
+    return await list_hmm_analyses(super_run_id)
+
+
+@app.post("/api/super_backtest/{super_run_id}/hmm_sweeps")
+async def api_create_hmm_sweep(super_run_id: int, req: HmmSweepRequest):
+    from predictor.hmm_analysis import create_hmm_sweep
+    return await create_hmm_sweep(
+        super_run_id=super_run_id,
+        name=req.name,
+        n_states=req.n_states,
+        features=req.features,
+        fit_mode=req.fit_mode,
+        walk_train_len=req.walk_train_len,
+        walk_step=req.walk_step,
+        min_regime_len=req.min_regime_len,
+        good_thresholds=req.good_thresholds,
+        bad_thresholds=req.bad_thresholds,
+        filter_thresholds=req.filter_thresholds,
+    )
+
+
+@app.get("/api/super_backtest/{super_run_id}/hmm_sweeps")
+async def api_list_hmm_sweeps(super_run_id: int):
+    from predictor.hmm_analysis import list_hmm_sweeps
+    return await list_hmm_sweeps(super_run_id)
+
+
+@app.get("/api/super_backtest/hmm_sweeps/{sweep_id}")
+async def api_get_hmm_sweep(sweep_id: int):
+    from predictor.hmm_analysis import get_hmm_sweep
+    result = await get_hmm_sweep(sweep_id)
+    if not result:
+        return JSONResponse(status_code=404, content={"error": "Sweep not found"})
+    return result
+
+
+@app.delete("/api/super_backtest/hmm_sweeps/{sweep_id}")
+async def api_delete_hmm_sweep(sweep_id: int):
+    from predictor.hmm_analysis import delete_hmm_sweep
+    return await delete_hmm_sweep(sweep_id)
+
+
+@app.get("/api/super_backtest/hmm_sweep_results")
+async def api_list_hmm_sweep_results(
+    super_run_id: Optional[int] = Query(None),
+    min_total_signals: Optional[int] = Query(None, ge=0),
+    min_taken_signals: Optional[int] = Query(None, ge=0),
+    min_winrate: Optional[float] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+):
+    from predictor.hmm_analysis import list_hmm_sweep_results
+    return await list_hmm_sweep_results(
+        super_run_id=super_run_id,
+        min_total_signals=min_total_signals,
+        min_taken_signals=min_taken_signals,
+        min_winrate=min_winrate,
+        limit=limit,
+    )
+
+
+@app.get("/api/super_backtest/hmm/{analysis_id}")
+async def api_get_hmm_analysis(analysis_id: int):
+    from predictor.hmm_analysis import get_hmm_analysis
+    result = await get_hmm_analysis(analysis_id)
+    if not result:
+        return JSONResponse(status_code=404, content={"error": "Analysis not found"})
+    return result
+
+
+@app.delete("/api/super_backtest/hmm/{analysis_id}")
+async def api_delete_hmm_analysis(analysis_id: int):
+    from predictor.hmm_analysis import delete_hmm_analysis
+    return await delete_hmm_analysis(analysis_id)
+
+
+@app.get("/api/super_backtest/hmm/{analysis_id}/timeline")
+async def api_hmm_timeline(analysis_id: int, max_points: int = 3000):
+    from predictor.hmm_analysis import get_hmm_timeline
+    return await get_hmm_timeline(analysis_id, max_points=max_points)
+
+
 @app.get("/api/super_backtest/list")
 async def api_list_super_backtests(limit: int = 50):
     """List super backtest runs."""
@@ -1270,6 +1598,27 @@ async def api_delete_super_backtest(super_run_id: int):
     
     try:
         # Delete in reverse order to respect FK constraints
+        # 0. Delete sweep results and sweeps
+        await db.execute(
+            "DELETE FROM super_backtest_hmm_sweep_results WHERE super_run_id = %s",
+            (super_run_id,),
+        )
+        await db.execute(
+            "DELETE FROM super_backtest_hmm_sweeps WHERE super_run_id = %s",
+            (super_run_id,),
+        )
+        # 0b. Delete analysis states + analyses
+        await db.execute(
+            """DELETE FROM super_backtest_prediction_states
+                WHERE hmm_analysis_id IN (
+                    SELECT id FROM super_backtest_hmm_analyses WHERE super_run_id = %s
+                )""",
+            (super_run_id,),
+        )
+        await db.execute(
+            "DELETE FROM super_backtest_hmm_analyses WHERE super_run_id = %s",
+            (super_run_id,),
+        )
         # 1. Delete regimes
         await db.execute("DELETE FROM super_backtest_regimes WHERE super_run_id = %s", (super_run_id,))
         # 2. Delete predictions
@@ -1305,6 +1654,7 @@ def _build_admin_html() -> str:
         "{{TAB_BACKTEST}}": _load_template("tabs_backtest.html"),
         "{{TAB_COMPARE}}": "",   # included in tabs_backtest.html
         "{{TAB_BRUTEFORCE}}": "",  # included in tabs_backtest.html
+        "{{TAB_RSIB}}": _load_template("tab_rsib.html"),
         "{{TAB_HISTORY}}": "",   # included in tabs_backtest.html
         "{{TAB_BEST}}": "",      # included in tabs_backtest.html
         "{{TAB_POLY}}": _load_template("tab_poly.html"),
@@ -1313,6 +1663,7 @@ def _build_admin_html() -> str:
         "{{TAB_ORDERBOOKS}}": _load_template("tab_orderbooks.html"),
         "{{TAB_ANALYTICS}}": _load_template("tab_analytics.html"),
         "{{TAB_COMPARE_ASUME}}": _load_template("tab_compare_asume.html"),
+        "{{TAB_HMM_COMPARE}}": _load_template("tab_hmm_compare.html"),
         "{{TAB_ORDER_PRICING}}": _load_template("tab_order_pricing.html"),
         "{{TAB_LGBM}}": _load_template("tab_lgbm.html"),
         "{{TAB_SUPER_BACKTEST}}": _load_template("tab_super_backtest.html"),
@@ -1323,7 +1674,9 @@ def _build_admin_html() -> str:
         "{{JS_COMPARE_ASUME}}": _load_template("js_compare_asume.js"),
         "{{JS_BACKTEST}}": "",  # included in js_common.js
         "{{JS_LIGHTGBM}}": _load_template("js_lgbm.js"),
+        "{{JS_HMM_COMPARE}}": _load_template("js_hmm_compare.js"),
         "{{JS_SUPER_BACKTEST}}": _load_template("js_super_backtest.js"),
+        "{{JS_RSIB}}": _load_template("js_rsib.js"),
     }
     for key, val in replacements.items():
         base = base.replace(key, val)

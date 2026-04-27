@@ -1,0 +1,75 @@
+  <!-- ============ TAB: HMM COMPARE ============ -->
+  <div id="panel-hmm_compare" class="hidden">
+    <div class="card p-5 mb-4">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-4">
+        <div>
+          <h2 class="text-lg font-semibold">HMM Compare</h2>
+          <p class="text-xs text-slate-400">Browse the best threshold sweep combos across all super backtests. Filter by run, signal counts, and minimum filtered win rate.</p>
+        </div>
+        <div class="flex gap-2 text-[11px] text-slate-400">
+          <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-400"></span>Improvement ≥ 0</span>
+          <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-rose-400"></span>Improvement &lt; 0</span>
+        </div>
+      </div>
+
+      <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Super Backtest Run</label>
+          <select id="hc-run" class="w-full"></select>
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Min Baseline Signals</label>
+          <input type="number" id="hc-min-total" class="w-full" value="150" min="0">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Min Taken Signals</label>
+          <input type="number" id="hc-min-taken" class="w-full" value="50" min="0">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Min Filtered Winrate (%)</label>
+          <input type="number" step="0.1" id="hc-min-winrate" class="w-full" value="55">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Max Results</label>
+          <input type="number" id="hc-limit" class="w-full" value="150" min="1" max="500">
+        </div>
+        <div class="flex items-end gap-2">
+          <button id="hc-run-btn" class="btn btn-amber text-xs" onclick="hmmCompareRun()">Load Results</button>
+          <span id="hc-status" class="text-xs text-slate-400"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="hc-summary" class="grid gap-3 mb-4" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))"></div>
+
+    <div class="card p-0">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+        <div>
+          <h3 class="text-sm font-semibold">Top Sweep Combos</h3>
+          <p class="text-[11px] text-slate-500" id="hc-table-note"></p>
+        </div>
+        <div class="text-[11px] text-slate-500">
+          Sorted by improvement △, then filtered win rate
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="text-[11px] w-full" id="hc-table">
+          <thead class="bg-slate-900/80 text-slate-400">
+            <tr>
+              <th class="p-2">Sweep</th>
+              <th class="p-2">Run</th>
+              <th class="p-2">Thresholds</th>
+              <th class="p-2 text-center">Baseline</th>
+              <th class="p-2 text-center">Filtered</th>
+              <th class="p-2 text-center">Improvement</th>
+              <th class="p-2">Features</th>
+              <th class="p-2 text-center">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="hc-results-body">
+            <tr><td colspan="8" class="p-4 text-center text-slate-500">No results yet. Run a filter above.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>

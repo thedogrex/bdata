@@ -4,11 +4,14 @@ import math
 import numpy as np
 import pandas as pd
 from typing import Any, Optional, TYPE_CHECKING
+import logging
 
 from predictor.data_loader import load_candles, add_direction, add_future_directions, date_to_us
 from predictor.features import add_technical_features, set_feature_usage, FEATURE_USAGE
 from predictor.strategies import get_strategy, BaseStrategy
 from predictor.utils.async_utils import resolve_awaitable
+
+logger = logging.getLogger(__name__)
 
 # Minimal feature blocks needed per strategy for preloading.
 # Strategies not listed here get ALL features.
@@ -335,6 +338,28 @@ async def run_backtest(
             base_metrics["error"] = "All predictions were SKIP (confidence too low)"
 
         base_metrics["volatility_skips"] = total_vol_skips
+        skip_breakdown = getattr(strategy, "_last_skip_breakdown", None)
+        if skip_breakdown:
+            base_metrics["ema_skip_breakdown"] = {
+                "ema_distance": int(skip_breakdown.get("ema_distance", 0)),
+                "ema_trend_strength": int(skip_breakdown.get("ema_trend_strength", 0)),
+                "ema_direction": int(skip_breakdown.get("ema_direction", 0)),
+            }
+        logger.info(
+            "[backtest] %s H%d summary: signals=%s correct=%s wrong=%s skipped=%s vol_skips=%s ema_skips=%s",
+            strategy_name,
+            horizon,
+            base_metrics.get("signals"),
+            base_metrics.get("correct"),
+            base_metrics.get("wrong"),
+            base_metrics.get("skipped"),
+            total_vol_skips,
+            {
+                "ema_distance": int(skip_breakdown.get("ema_distance", 0)) if skip_breakdown else 0,
+                "ema_trend_strength": int(skip_breakdown.get("ema_trend_strength", 0)) if skip_breakdown else 0,
+                "ema_direction": int(skip_breakdown.get("ema_direction", 0)) if skip_breakdown else 0,
+            },
+        )
         results_by_horizon[str(horizon)] = base_metrics
 
         if sweep_thresholds:
@@ -356,6 +381,28 @@ async def run_backtest(
                     vol_skip_flags=vol_flags,
                 )
                 thr_metrics["volatility_skips"] = total_vol_skips
+                if skip_breakdown:
+                    thr_metrics["ema_skip_breakdown"] = {
+                        "ema_distance": int(skip_breakdown.get("ema_distance", 0)),
+                        "ema_trend_strength": int(skip_breakdown.get("ema_trend_strength", 0)),
+                        "ema_direction": int(skip_breakdown.get("ema_direction", 0)),
+                    }
+                logger.info(
+                    "[backtest] %s H%d threshold=%s summary: signals=%s correct=%s wrong=%s skipped=%s vol_skips=%s ema_skips=%s",
+                    strategy_name,
+                    horizon,
+                    thr,
+                    thr_metrics.get("signals"),
+                    thr_metrics.get("correct"),
+                    thr_metrics.get("wrong"),
+                    thr_metrics.get("skipped"),
+                    total_vol_skips,
+                    thr_metrics.get("ema_skip_breakdown") or {
+                        "ema_distance": 0,
+                        "ema_trend_strength": 0,
+                        "ema_direction": 0,
+                    },
+                )
                 thr_key = _format_threshold_key(thr)
                 threshold_variant_results.setdefault(thr_key, {})[str(horizon)] = thr_metrics
 

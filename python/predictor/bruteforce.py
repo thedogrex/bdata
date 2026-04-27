@@ -53,6 +53,15 @@ PARAM_GRIDS: dict[str, dict[str, list]] = {
         "bb_high": [0.75, 0.8, 0.85],
         "bb_period": [10, 14, 20, 30, 50],
         "bb_std": [1.0, 1.5, 2.0, 2.5, 3.0],
+        "use_ema_filter": [False, True],
+        "ema_period": [20, 50],
+        "ema_diff_threshold": [0.0, 0.0025, 0.005],
+        "use_ema_trend_strength_filter": [False, True],
+        "ema_fast_period": [20],
+        "ema_slow_period": [50],
+        "ema_trend_strength_threshold": [0.005, 0.0075],
+        "use_ema_direction_filter": [False, True],
+        "ema_direction_period": [50],
         "min_vol": [0.0005, 0.001, 0.002],
         "max_vol": [0.005, 0.01, 0.02],
         "vol_ratio_max": [1.2, 1.5, 2.0],
@@ -146,6 +155,25 @@ def build_combos(param_grid: dict[str, list]) -> list[dict]:
     for combo in itertools.product(*values):
         combos.append(dict(zip(keys, combo)))
     return combos
+
+
+def count_combos(param_grid: dict[str, list] | None) -> int:
+    """Return the total number of combinations without materializing them."""
+    if not param_grid:
+        return 0
+    total = 1
+    for key in param_grid:
+        raw_values = param_grid[key]
+        if isinstance(raw_values, (list, tuple, set, range)):
+            options = len(raw_values)
+        elif raw_values is None:
+            options = 1
+        else:
+            options = 1
+        if options == 0:
+            return 0
+        total *= options
+    return total
 
 
 def _extract_threshold_sweep(raw_values) -> list[float] | None:

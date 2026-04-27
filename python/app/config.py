@@ -52,6 +52,11 @@ TELEGRAM_PRINT_CHAT_ID: bool = _env_bool("TELEGRAM_PRINT_CHAT_ID", False)
 TELEGRAM_DAILY_REPORTS_ENABLED: bool = _env_bool("TELEGRAM_DAILY_REPORTS_ENABLED", False)
 
 DEBUG_BINANCE_PRICE: bool = _env_bool("DEBUG_BINANCE_PRICE", False)
+DEBUG_EMA_FEATURE: bool = _env_bool("DEBUG_EMA_FEATURE", True)
+
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FORMAT: str = os.getenv("LOG_FORMAT", "[%(asctime)s %(levelname)s %(name)s] %(message)s")
+LOG_DATEFMT: str = os.getenv("LOG_DATEFMT", "%Y-%m-%d %H:%M:%S")
 
 def _env_json_list(name: str) -> list[str]:
     raw = os.getenv(name, "[]")

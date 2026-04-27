@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from datetime import datetime
 from typing import Optional
 from db import DbProvider
 
@@ -7,8 +8,14 @@ db = DbProvider()
 
 
 def date_to_us(date_str: str, end_of_day: bool = False) -> int:
-    t = "23:59:59" if end_of_day else "00:00:00"
-    return int(pd.Timestamp(f"{date_str} {t}").timestamp() * 1_000_000)
+    time_part = "23:59:59" if end_of_day else "00:00:00"
+    try:
+        dt = datetime.strptime(f"{date_str} {time_part}", "%Y-%m-%d %H:%M:%S")
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid date '{date_str}'. Expected format YYYY-MM-DD and a real calendar date."
+        ) from exc
+    return int(pd.Timestamp(dt).timestamp() * 1_000_000)
 
 
 async def load_candles(

@@ -16,39 +16,6 @@
       <div class="flex gap-2 items-center flex-wrap">
         <button onclick="runSuperBacktest()" id="btn-sb-run" class="btn btn-green">Run Super Backtest</button>
         <button onclick="loadSuperBacktestList()" class="btn btn-primary">Refresh List</button>
-        <div class="flex items-center gap-2 ml-4">
-          <label class="text-xs text-slate-400">HMM States:</label>
-          <input type="number" id="sb-hmm-states" value="2" min="2" max="5" class="w-16 text-xs" />
-        </div>
-        <div class="flex items-center gap-2 ml-2">
-          <input type="checkbox" id="sb-use-prev" checked class="w-4 h-4" />
-          <label class="text-xs text-slate-400">Use prev_result</label>
-        </div>
-      </div>
-      
-      <!-- Threshold Controls for HMM Analysis -->
-      <div class="mt-4 p-3 bg-slate-800 rounded border border-slate-700">
-        <h4 class="text-xs font-semibold text-slate-300 mb-2">HMM Regime Thresholds (for Analysis)</h4>
-        <div class="flex gap-4 items-center flex-wrap">
-          <div class="flex items-center gap-2">
-            <label class="text-xs text-slate-400">Good ≥</label>
-            <input type="number" id="sb-good-threshold" value="55" min="50" max="80" step="1" class="w-16 text-xs" />
-            <span class="text-xs text-slate-500">%</span>
-          </div>
-          <div class="flex items-center gap-2">
-            <label class="text-xs text-slate-400">Bad ≤</label>
-            <input type="number" id="sb-bad-threshold" value="45" min="20" max="50" step="1" class="w-16 text-xs" />
-            <span class="text-xs text-slate-500">%</span>
-          </div>
-          <div class="flex items-center gap-2">
-            <label class="text-xs text-slate-400">Filter P(bad) ></label>
-            <input type="number" id="sb-filter-threshold" value="0.6" min="0.3" max="0.9" step="0.1" class="w-16 text-xs" />
-          </div>
-          <button onclick="analyzeHmmWithThresholds()" class="btn btn-purple text-xs py-1">Analyze with Thresholds</button>
-        </div>
-        <p class="text-xs text-slate-500 mt-2">
-          Good: accuracy ≥ threshold | Bad: accuracy ≤ threshold | Skip trade when P(bad_state) > filter threshold
-        </p>
       </div>
       
       <!-- Volatility Bruteforce -->
@@ -71,6 +38,7 @@
             <input type="text" id="sb-vol-ratio" value="1.2, 1.5, 2.0" class="w-28 text-xs" />
           </div>
           <button onclick="runVolatilityBruteforce()" id="btn-vol-brute" class="btn btn-orange text-xs py-1 mt-3">Run Bruteforce</button>
+          <div id="sb-vol-brute-status" class="text-[10px] text-slate-400 mt-3 self-center ml-2"></div>
         </div>
         <div id="vol-brute-results" class="hidden mt-2 p-2 bg-slate-900 rounded">
           <h5 class="text-xs font-semibold text-orange-300 mb-1">Bruteforce Results</h5>
@@ -107,13 +75,49 @@
         <div class="flex items-center justify-between mb-4">
           <h3 class="font-semibold" id="sb-detail-title">Run Details</h3>
           <div class="flex gap-2">
-            <button onclick="analyzeHmmForRun()" id="btn-sb-hmm" class="btn btn-purple">Analyze with HMM</button>
             <button onclick="closeSuperDetails()" class="btn btn-slate">Close</button>
           </div>
         </div>
         
         <div id="sb-detail-stats" class="mb-4"></div>
         
+        <!-- HMM Analysis Controls (V1) -->
+        <div class="mb-4 p-3 bg-slate-800 rounded border border-purple-900/50">
+          <div class="flex items-center justify-between mb-3">
+            <h4 class="text-xs font-semibold text-purple-300">HMM Analysis Settings (Legacy V1)</h4>
+            <div class="flex gap-2">
+              <button onclick="analyzeHmmForRun()" id="btn-sb-hmm" class="btn btn-purple text-xs py-1">1. Fit HMM</button>
+              <button onclick="analyzeHmmWithThresholds()" class="btn btn-purple text-xs py-1">2. Apply Thresholds</button>
+            </div>
+          </div>
+          
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
+            <div>
+              <label class="text-[10px] text-slate-400 block mb-1">States</label>
+              <input type="number" id="sb-hmm-states" value="2" min="2" max="5" class="w-full text-xs" />
+            </div>
+            <div class="flex items-center gap-2 pb-2">
+              <input type="checkbox" id="sb-use-prev" checked class="w-4 h-4" />
+              <label class="text-[10px] text-slate-400">Use prev_result</label>
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-400 block mb-1">Good ≥ %</label>
+              <input type="number" id="sb-good-threshold" value="55" min="50" max="80" class="w-full text-xs" />
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-400 block mb-1">Bad ≤ %</label>
+              <input type="number" id="sb-bad-threshold" value="45" min="20" max="50" class="w-full text-xs" />
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-400 block mb-1">Filter P(bad) ></label>
+              <input type="number" id="sb-filter-threshold" value="0.6" min="0.3" max="0.9" step="0.1" class="w-full text-xs" />
+            </div>
+          </div>
+          <p class="text-[10px] text-slate-500 mt-2">
+            <b>Step 1:</b> Fits the HMM model to find regimes. <b>Step 2:</b> Assigns "Good/Bad" labels based on accuracy and calculates filtered performance.
+          </p>
+        </div>
+
         <!-- Volatility Rescore -->
         <div id="sb-vol-rescore" class="mb-4">
           <h4 class="font-semibold text-sm mb-2 text-orange-300">Volatility Rescore (Fast)</h4>
@@ -158,6 +162,244 @@
           <div id="sb-hmm-transition" class="mb-3"></div>
           <div id="sb-hmm-chart" style="min-height:200px"></div>
         </div>
+
+        <!-- HMM Analyses v2 (multiple per run) -->
+        <div id="sb-hmm-v2" class="mb-4 p-3 bg-slate-800 rounded border border-purple-700">
+          <div class="flex items-center justify-between mb-2">
+            <h4 class="font-semibold text-sm text-purple-300">HMM Analyses (v2 — Multiple Configs)</h4>
+            <div class="flex gap-2">
+              <button onclick="openHmmSweepForm()" class="btn btn-amber text-xs py-1">+ Threshold Sweep</button>
+              <button onclick="openHmmAnalysisForm()" class="btn btn-purple text-xs py-1">+ New Analysis</button>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 mb-2">
+            Create multiple HMM configurations on the same run. Each saves separately so you can compare.
+            Recommended: try <b>fit_mode = all_candles</b> first to fit on full price action (not just signals).
+          </p>
+
+          <!-- New analysis form (hidden by default) -->
+          <div id="sb-hmm-form" class="hidden p-3 bg-slate-900 rounded mb-3 border border-slate-700">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2 text-xs">
+              <div>
+                <label class="text-slate-400 block mb-1">Name (optional)</label>
+                <input type="text" id="sb-hmm-name" class="w-full text-xs" placeholder="e.g. RSI+vol 3-state" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">N States</label>
+                <input type="number" id="sb-hmm-nstates" value="3" min="2" max="6" class="w-full text-xs" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Fit Mode</label>
+                <select id="sb-hmm-fitmode" class="w-full text-xs">
+                  <option value="all_candles">all_candles (fit on full data)</option>
+                  <option value="signals_only">signals_only (legacy)</option>
+                  <option value="walk_forward">walk_forward (honest OOS)</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Min Regime Length</label>
+                <input type="number" id="sb-hmm-minlen" value="3" min="1" max="50" class="w-full text-xs" />
+              </div>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-2 text-xs">
+              <div>
+                <label class="text-slate-400 block mb-1">Good ≥ %</label>
+                <input type="number" id="sb-hmm-good" value="55" min="50" max="80" class="w-full text-xs" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Bad ≤ %</label>
+                <input type="number" id="sb-hmm-bad" value="48" min="20" max="50" class="w-full text-xs" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Filter P(bad) ></label>
+                <input type="number" id="sb-hmm-filter" value="0.6" min="0.3" max="0.95" step="0.05" class="w-full text-xs" />
+              </div>
+            </div>
+            <div id="sb-hmm-walkparams" class="hidden grid grid-cols-2 gap-2 mb-2 text-xs">
+              <div>
+                <label class="text-slate-400 block mb-1">Walk Train Length (candles)</label>
+                <input type="number" id="sb-hmm-walktrain" value="2000" min="200" class="w-full text-xs" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Walk Step (candles)</label>
+                <input type="number" id="sb-hmm-walkstep" value="500" min="50" class="w-full text-xs" />
+              </div>
+            </div>
+            <div class="mb-2">
+              <label class="text-xs text-slate-400 block mb-1">Features (pick 2-8)</label>
+              <div id="sb-hmm-features" class="grid grid-cols-3 md:grid-cols-5 gap-1 text-[11px]"></div>
+            </div>
+            <div class="flex gap-2 mt-2">
+              <button onclick="submitHmmAnalysis()" id="btn-hmm-submit" class="btn btn-green text-xs py-1">Run Analysis</button>
+              <button onclick="closeHmmAnalysisForm()" class="btn btn-slate text-xs py-1">Cancel</button>
+              <span id="sb-hmm-status" class="text-xs text-slate-400 self-center"></span>
+            </div>
+          </div>
+
+          <!-- Sweep form -->
+          <div id="sb-hmm-sweep-form" class="hidden p-3 bg-slate-900 rounded mb-3 border border-amber-700">
+            <div class="flex items-center justify-between mb-2">
+              <h5 class="text-xs font-semibold text-amber-300">Threshold Sweep</h5>
+              <button onclick="closeHmmSweepForm()" class="text-slate-400 text-xs hover:text-white">✕</button>
+            </div>
+            <p class="text-[11px] text-slate-400 mb-2">Fit HMM once, then test multiple (good, bad, filter) combinations for filtered winrate and signal count. Up to 75 combos per sweep.</p>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2 text-xs">
+              <div>
+                <label class="text-slate-400 block mb-1">Sweep Name</label>
+                <input type="text" id="sb-hmm-sweep-name" class="w-full text-xs" placeholder="e.g. walkFwd grid" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">N States</label>
+                <input type="number" id="sb-hmm-sweep-nstates" value="3" min="2" max="6" class="w-full text-xs" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Fit Mode</label>
+                <select id="sb-hmm-sweep-fitmode" class="w-full text-xs">
+                  <option value="all_candles">all_candles</option>
+                  <option value="signals_only">signals_only</option>
+                  <option value="walk_forward">walk_forward</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Min Regime Length</label>
+                <input type="number" id="sb-hmm-sweep-minlen" value="3" min="1" max="50" class="w-full text-xs" />
+              </div>
+            </div>
+            <div id="sb-hmm-sweep-walk" class="hidden grid grid-cols-2 gap-2 mb-2 text-xs">
+              <div>
+                <label class="text-slate-400 block mb-1">Walk Train Len</label>
+                <input type="number" id="sb-hmm-sweep-walktrain" value="2000" min="200" class="w-full text-xs" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Walk Step</label>
+                <input type="number" id="sb-hmm-sweep-walkstep" value="500" min="50" class="w-full text-xs" />
+              </div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 text-xs">
+              <div>
+                <label class="text-slate-400 block mb-1">Good ≥ % (comma list)</label>
+                <input type="text" id="sb-hmm-sweep-good" value="53,55,57" class="w-full text-xs" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Bad ≤ % (comma list)</label>
+                <input type="text" id="sb-hmm-sweep-bad" value="45,47" class="w-full text-xs" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Filter P(bad) > (comma list)</label>
+                <input type="text" id="sb-hmm-sweep-filter" value="0.45,0.55,0.65" class="w-full text-xs" />
+              </div>
+            </div>
+            <div class="mb-2">
+              <label class="text-xs text-slate-400 block mb-1">Features (2-8)</label>
+              <div id="sb-hmm-sweep-features" class="grid grid-cols-3 md:grid-cols-5 gap-1 text-[11px]"></div>
+            </div>
+            <div class="flex gap-2 mt-2">
+              <button onclick="submitHmmSweep()" id="btn-hmm-sweep" class="btn btn-amber text-xs py-1">Run Sweep</button>
+              <span id="sb-hmm-sweep-status" class="text-xs text-slate-400 self-center"></span>
+            </div>
+          </div>
+
+          <!-- Sweeps list -->
+          <div id="sb-hmm-sweeps" class="mb-3">
+            <div class="flex items-center justify-between mb-1">
+              <h5 class="text-xs font-semibold text-amber-200">Saved Threshold Sweeps</h5>
+              <button onclick="loadHmmSweeps(sbCurrentRunId)" class="text-[10px] text-slate-400 hover:text-white">↺ Refresh</button>
+            </div>
+            <div id="sb-hmm-sweep-list" class="overflow-x-auto text-xs">
+              <p class="text-slate-500 text-xs">No sweeps yet. Click "+ Threshold Sweep" to start one.</p>
+            </div>
+          </div>
+
+          <!-- Sweep detail -->
+          <div id="sb-hmm-sweep-detail" class="hidden mt-3 p-3 bg-slate-900 rounded border border-amber-700">
+            <div class="flex items-center justify-between mb-2">
+              <h5 class="font-semibold text-sm text-amber-200" id="sb-hmm-sweep-title">Sweep</h5>
+              <button onclick="closeHmmSweepDetail()" class="btn btn-slate text-xs py-1">Close</button>
+            </div>
+            <div id="sb-hmm-sweep-summary" class="text-xs mb-3"></div>
+            <div class="grid grid-cols-2 md:grid-cols-6 gap-2 mb-3 text-xs">
+              <div>
+                <label class="text-slate-400 block mb-1">Starting Bank ($)</label>
+                <input type="number" id="sb-hmm-sweep-bank" value="1000" min="1" class="w-full text-xs" onchange="recalcHmmSweepProfit()" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Buy Price (¢)</label>
+                <input type="number" id="sb-hmm-sweep-buyprice" value="52" min="1" max="99" step="0.5" class="w-full text-xs" onchange="recalcHmmSweepProfit()" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Max Bet ($)</label>
+                <input type="number" id="sb-hmm-sweep-maxbet" value="500" min="1" class="w-full text-xs" onchange="recalcHmmSweepProfit()" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Full Kelly %</label>
+                <input type="number" id="sb-hmm-sweep-kelly" value="3.34" min="0" step="0.01" class="w-full text-xs" onchange="recalcHmmSweepProfit()" />
+              </div>
+              <div>
+                <label class="text-slate-400 block mb-1">Fee (%)</label>
+                <input type="number" id="sb-hmm-sweep-fee" value="1.56" min="0" step="0.01" class="w-full text-xs" onchange="recalcHmmSweepProfit()" />
+              </div>
+              <div class="flex items-end">
+                <button onclick="recalcHmmSweepProfit()" class="btn btn-amber text-xs py-1 w-full">Recalculate</button>
+              </div>
+            </div>
+            <div id="sb-hmm-sweep-profit-summary" class="grid gap-2 mb-3" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))"></div>
+            <div class="overflow-x-auto">
+              <table class="text-[11px] w-full text-left">
+                <thead class="bg-slate-800 text-slate-400">
+                  <tr>
+                    <th class="p-2">#</th>
+                    <th class="p-2">Good ≥%</th>
+                    <th class="p-2">Bad ≤%</th>
+                    <th class="p-2">P(bad)&gt;</th>
+                    <th class="p-2 text-center">Baseline WR</th>
+                    <th class="p-2 text-center">Filtered WR</th>
+                    <th class="p-2 text-center">Taken</th>
+                    <th class="p-2 text-center">Skipped</th>
+                    <th class="p-2 text-center">Δ</th>
+                    <th class="p-2 text-center">Final Bank</th>
+                    <th class="p-2 text-center">ROI</th>
+                    <th class="p-2 text-center">Profit</th>
+                  </tr>
+                </thead>
+                <tbody id="sb-hmm-sweep-combos"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Analyses list -->
+          <div id="sb-hmm-list" class="overflow-x-auto">
+            <p class="text-slate-500 text-xs">No analyses yet. Click "+ New Analysis" to create one.</p>
+          </div>
+
+          <!-- Selected analysis detail -->
+          <div id="sb-hmm-detail" class="hidden mt-3 p-3 bg-slate-900 rounded border border-slate-700">
+            <div class="flex items-center justify-between mb-2">
+              <h5 class="font-semibold text-sm text-purple-300" id="sb-hmm-detail-title">Analysis</h5>
+              <button onclick="closeHmmDetail()" class="btn btn-slate text-xs py-1">Close</button>
+            </div>
+            <div id="sb-hmm-detail-summary" class="text-xs mb-3"></div>
+            <div id="sb-hmm-detail-states" class="mb-3"></div>
+            <div id="sb-hmm-detail-transition" class="mb-3"></div>
+            
+            <h5 class="text-xs font-semibold text-slate-300 mb-1">Monthly Performance (Filtered)</h5>
+            <div id="sb-hmm-monthly-wrap" class="overflow-x-auto bg-slate-900 rounded border border-slate-800">
+              <table class="text-[11px] w-full text-left">
+                <thead class="bg-slate-800 text-slate-400">
+                  <tr>
+                    <th class="p-2">Month</th>
+                    <th class="p-2 text-center">Total Signals</th>
+                    <th class="p-2 text-center">Filtered Signals</th>
+                    <th class="p-2 text-center">Skipped</th>
+                    <th class="p-2 text-center">Baseline WR</th>
+                    <th class="p-2 text-center">Filtered WR</th>
+                    <th class="p-2 text-center">Improvement</th>
+                  </tr>
+                </thead>
+                <tbody id="sb-hmm-monthly-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
         
         <!-- Monthly Analysis Table -->
         <div id="sb-monthly-analysis" class="hidden mb-4">
@@ -178,12 +420,6 @@
               </tbody>
             </table>
           </div>
-        </div>
-        
-        <!-- Predictions Table -->
-        <div>
-          <h4 class="font-semibold text-sm mb-2">Predictions (first 100)</h4>
-          <div id="sb-predictions" style="max-height:400px;overflow:auto"></div>
         </div>
       </div>
     </div>

@@ -1,0 +1,119 @@
+  <div id="panel-rsib" class="hidden">
+    <div class="card p-6 mb-4">
+      <h2 class="text-lg font-semibold mb-2">RSIB — RSI Super Brute Force</h2>
+      <p class="text-xs text-slate-400 mb-1">
+        Run RSI brute-force combos, save each combo as a super backtest, apply HMM threshold sweeps, and rank all variants by final profit.
+      </p>
+      <p id="rsib-period" class="text-[11px] text-slate-500 mb-4 font-mono"></p>
+      <div class="mb-4">
+        <label class="block text-xs text-slate-400 mb-1">RSIB Config (JSON)</label>
+        <textarea id="rsib-config" rows="18" class="w-full text-xs font-mono" placeholder="Paste RSIB config here..."></textarea>
+      </div>
+      <div class="flex gap-2 items-center flex-wrap">
+        <button onclick="rsibLoadDefaultConfig()" class="btn btn-slate">Load Default</button>
+        <button onclick="runRsib()" id="btn-rsib-run" class="btn btn-purple">Run RSIB</button>
+        <button onclick="loadRsibSessions()" class="btn btn-primary">Refresh Sessions</button>
+        <div id="rsib-status" class="text-xs text-slate-400"></div>
+      </div>
+    </div>
+
+    <div class="card p-6 mb-4">
+      <div class="flex items-end gap-3 flex-wrap">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Session</label>
+          <select id="rsib-session" class="w-56 text-xs" onchange="rsibChangeSession()">
+            <option value="">Select session</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Page Size</label>
+          <input type="number" id="rsib-page-size" value="25" min="5" max="100" class="w-24" onchange="rsibReloadResults(1)" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Starting Bank ($)</label>
+          <input type="number" id="rsib-bank" value="1000" min="1" class="w-28" onchange="rsibRecalcCurrentSession()" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Buy Price (¢)</label>
+          <input type="number" id="rsib-buy-price" value="52" min="1" max="99" step="0.5" class="w-28" onchange="rsibRecalcCurrentSession()" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Max Bet ($)</label>
+          <input type="number" id="rsib-max-bet" value="500" min="1" class="w-28" onchange="rsibRecalcCurrentSession()" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Full Kelly %</label>
+          <input type="number" id="rsib-full-kelly" value="3.34" min="0" step="0.01" class="w-28" onchange="rsibRecalcCurrentSession()" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Fee (%)</label>
+          <input type="number" id="rsib-fee" value="1.56" min="0" step="0.01" class="w-28" onchange="rsibRecalcCurrentSession()" />
+        </div>
+      </div>
+      <div id="rsib-summary" class="grid gap-2 mt-4" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))"></div>
+    </div>
+
+    <div class="card p-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold">RSIB Results</h3>
+        <div id="rsib-page-note" class="text-xs text-slate-400"></div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="text-xs w-full">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Combo</th>
+              <th>Variant</th>
+              <th>Thr</th>
+              <th>Accuracy</th>
+              <th>Signals</th>
+              <th>Taken</th>
+              <th>Skipped</th>
+              <th>Final Bank</th>
+              <th>ROI</th>
+              <th>Profit</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="rsib-results-body">
+            <tr><td colspan="12" class="p-4 text-slate-500 text-center">No RSIB results yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="flex items-center justify-between mt-4 text-xs">
+        <button onclick="rsibPrevPage()" class="btn btn-slate py-1">Prev</button>
+        <div id="rsib-pagination" class="text-slate-400">Page 1 / 1</div>
+        <button onclick="rsibNextPage()" class="btn btn-slate py-1">Next</button>
+      </div>
+    </div>
+
+    <div id="rsib-detail-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60" onclick="if(event.target===this)closeRsibDetail()">
+      <div class="bg-slate-900 border border-slate-700 rounded-lg p-6 w-[min(1100px,92vw)] max-h-[85vh] overflow-auto">
+        <div class="flex items-center justify-between mb-4">
+          <h3 id="rsib-detail-title" class="text-lg font-semibold">RSIB Result</h3>
+          <button onclick="closeRsibDetail()" class="btn btn-slate py-1">Close</button>
+        </div>
+        <div id="rsib-detail-summary" class="grid gap-2 mb-4" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))"></div>
+        <div class="overflow-x-auto">
+          <table class="text-xs w-full">
+            <thead>
+              <tr>
+                <th>Month</th>
+                <th>Signals</th>
+                <th>Wins</th>
+                <th>Accuracy</th>
+                <th>Skipped</th>
+                <th>Bank</th>
+              </tr>
+            </thead>
+            <tbody id="rsib-detail-monthly"></tbody>
+          </table>
+        </div>
+        <div class="mt-4">
+          <h4 class="font-semibold mb-2 text-sm">Config</h4>
+          <pre id="rsib-detail-config" class="text-xs bg-slate-950 border border-slate-800 rounded p-3 overflow-auto"></pre>
+        </div>
+      </div>
+    </div>
+  </div>

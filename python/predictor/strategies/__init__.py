@@ -56,11 +56,11 @@ RECOMMENDED_PARAMS: dict[str, dict] = {
         "brute_force_include": ["n_estimators", "max_depth", "learning_rate", "threshold"],
     },
     "rsi_mean_reversion": {
-        "notes": "Rule-based, no training needed. Very fast execution. Best for mean-reversion markets. Works well with BB confirmation enabled.",
-        "fast_preset": {"rsi_period": 14, "rsi_oversold": 30, "rsi_overbought": 70, "use_bb_confirm": True, "bb_low": 0.2, "bb_high": 0.8},
-        "aggressive_preset": {"rsi_period": 6, "rsi_oversold": 25, "rsi_overbought": 75, "use_bb_confirm": True, "bb_low": 0.15, "bb_high": 0.85},
-        "conservative_preset": {"rsi_period": 14, "rsi_oversold": 20, "rsi_overbought": 80, "use_bb_confirm": True, "bb_low": 0.15, "bb_high": 0.85},
-        "brute_force_include": ["rsi_period", "rsi_oversold", "rsi_overbought", "bb_low", "bb_high"],
+        "notes": "Rule-based, no training needed. Very fast execution. Best for mean-reversion markets. BB confirmation is usually helpful; EMA filters can improve selectivity by keeping only stretched trades and rejecting signals during strong or one-sided trends.",
+        "fast_preset": {"rsi_period": 14, "rsi_oversold": 30, "rsi_overbought": 70, "use_bb_confirm": True, "bb_low": 0.2, "bb_high": 0.8, "use_ema_filter": False, "ema_period": 20, "ema_diff_threshold": 0.0, "use_ema_trend_strength_filter": False, "ema_fast_period": 20, "ema_slow_period": 50, "ema_trend_strength_threshold": 0.005, "use_ema_direction_filter": False, "ema_direction_period": 50},
+        "aggressive_preset": {"rsi_period": 6, "rsi_oversold": 25, "rsi_overbought": 75, "use_bb_confirm": True, "bb_low": 0.15, "bb_high": 0.85, "use_ema_filter": True, "ema_period": 20, "ema_diff_threshold": 0.0025, "use_ema_trend_strength_filter": False, "ema_fast_period": 20, "ema_slow_period": 50, "ema_trend_strength_threshold": 0.005, "use_ema_direction_filter": True, "ema_direction_period": 50},
+        "conservative_preset": {"rsi_period": 14, "rsi_oversold": 20, "rsi_overbought": 80, "use_bb_confirm": True, "bb_low": 0.15, "bb_high": 0.85, "use_ema_filter": True, "ema_period": 50, "ema_diff_threshold": 0.005, "use_ema_trend_strength_filter": True, "ema_fast_period": 20, "ema_slow_period": 50, "ema_trend_strength_threshold": 0.005, "use_ema_direction_filter": True, "ema_direction_period": 50},
+        "brute_force_include": ["rsi_period", "rsi_oversold", "rsi_overbought", "bb_low", "bb_high", "use_ema_filter", "ema_period", "ema_diff_threshold", "use_ema_trend_strength_filter", "ema_fast_period", "ema_slow_period", "ema_trend_strength_threshold", "use_ema_direction_filter", "ema_direction_period"],
     },
     "momentum": {
         "notes": "Rule-based, no training needed. Very fast execution. Trend-following approach. Weight params must be tuned together (should roughly sum to 1).",

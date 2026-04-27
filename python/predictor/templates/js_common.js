@@ -3,6 +3,7 @@ function accClass(a){return a>=54?'accuracy-good':a>=51?'accuracy-ok':'accuracy-
 function statusBadge(s){const m={running:'badge-run',paused:'badge-pause',done:'badge-done',error:'badge-err',cancelled:'badge-cancel',queued:'badge-queue'};return `<span class="badge ${m[s]||'badge-queue'}">${s}</span>`}
 
 const DEFAULT_BRUTEFORCE_PROCESSES = 6;
+let bfGridLoadSeq = 0;
 
 function taskExtraLine(t){
   const e=(t&&t.extra)||{};
@@ -154,6 +155,10 @@ async function onTaskDone(taskId, status){
     if(p.task_type==='backtest'){renderResult(data,'bt-results');switchTab('history');loadHistory();}
     else if(p.task_type==='compare'){renderCompare(data)}
     else if(p.task_type==='bruteforce'){renderBfResult(data)}
+    else if(p.task_type==='rsib'){
+      if(typeof loadRsibSessions==='function') loadRsibSessions();
+      if(typeof switchTab==='function') switchTab('rsib');
+    }
   }catch(e){console.error(e)}
 }
 
@@ -167,13 +172,13 @@ async function init(){
   });
   const hsel=document.getElementById('hist-strategy');
   strategiesData.forEach(s=>{const o=document.createElement('option');o.value=s.name;o.textContent=s.name;hsel.appendChild(o)});
-  document.getElementById('bt-strategy').addEventListener('change',updateDesc);
-  document.getElementById('bf-strategy').addEventListener('change',()=>{loadDefaultGrid();updateDesc()});
+  document.getElementById('bt-strategy').addEventListener('change',()=>{syncBacktestConfigToStrategy();updateDesc()});
+  document.getElementById('bf-strategy').addEventListener('change',e=>{const name=e.target?.value;loadDefaultGrid(false,name);updateDesc()});
   updateDesc();
   ensureBacktestConfig();
   ensureCompareConfig();
   histUpdateHorizonButtons();
-  loadDefaultGrid();
+  loadDefaultGrid(false);
   startPolling();
   loadAutopredictState();
   const initialTab = getInitialTab();
@@ -184,41 +189,48 @@ async function init(){
   }
 }
 
-function updateDesc(){
-  const n=document.getElementById('bt-strategy').value;
-  const s=strategiesData.find(x=>x.name===n);
-  document.getElementById('strategy-desc').textContent=s?s.description:'';
-  ['bt-strategy-info','bf-strategy-info'].forEach(id=>{
-    const el=document.getElementById(id);if(!el)return;
-    const tt=el.querySelector('.tt');if(!tt)return;
-    if(s){
-      const params=s.param_docs||{};
-      const lines=Object.entries(params).map(([k,v])=>`<b>${k}:</b> ${v}`).join('<br>');
-      const training=s.needs_training?'<br><b>Training:</b> Yes (retrains every N candles)':'<br><b>Training:</b> No (rule-based, instant)';
-      const notes=s.recommended?.notes?`<br><b>Notes:</b> ${s.recommended.notes}`:'';
-      tt.innerHTML=`${s.description}${training}${notes}<br><br><b>Params:</b><br>${lines}`;
-    }else{tt.innerHTML=''}
-  });
-  ['bt-params-info','bf-grid-info'].forEach(id=>{
-    const el=document.getElementById(id);if(!el)return;
-    const tt=el.querySelector('.tt');if(!tt)return;
-    if(s){
-      const params=s.param_docs||{};
-      tt.innerHTML=Object.entries(params).map(([k,v])=>`<b>${k}:</b> ${v}`).join('<br>');
-    }else{tt.innerHTML=''}
-  });
+function fillTooltip(id, html){
+  const el=document.getElementById(id);
+  if(!el) return;
+  const tt=el.querySelector('.tt');
+  if(!tt) return;
+  tt.innerHTML=html||'';
+}
+
+function buildStrategyTooltip(strategy){
+  if(!strategy) return '';
+  const params=strategy.param_docs||{};
+  const lines=Object.entries(params).map(([k,v])=>`<b>${k}:</b> ${v}`).join('<br>');
+  const training=strategy.needs_training?'<br><b>Training:</b> Yes (retrains every N candles)':'<br><b>Training:</b> No (rule-based, instant)';
+  const notes=strategy.recommended?.notes?`<br><b>Notes:</b> ${strategy.recommended.notes}`:'';
+  return `${strategy.description||''}${training}${notes}<br><br><b>Params:</b><br>${lines}`;
+}
+
+function buildParamDocsTooltip(strategy){
+  if(!strategy) return '';
+  const params=strategy.param_docs||{};
+  return Object.entries(params).map(([k,v])=>`<b>${k}:</b> ${v}`).join('<br>');
+}
+
+function updateBacktestDesc(){
+  const name=document.getElementById('bt-strategy')?.value;
+  const strategy=strategiesData.find(x=>x.name===name);
+  document.getElementById('strategy-desc').textContent=strategy?strategy.description:'';
+  fillTooltip('bt-strategy-info', buildStrategyTooltip(strategy));
+  fillTooltip('bt-params-info', buildParamDocsTooltip(strategy));
+
   const ref=document.getElementById('strategy-ref');
-  if(s){
+  if(strategy){
     ref.classList.remove('hidden');
-    const rec=s.recommended||{};
-    const training=s.needs_training?'<span class="text-amber-400">Yes</span> (retrains every N candles — XGBoost training time scales with n_estimators)':'<span class="text-green-400">No</span> (rule-based, instant prediction)';
-    let html=`<div class="flex items-center gap-2 mb-2"><b class="text-slate-200">Strategy Reference: ${s.name}</b>${s.needs_training?'<span class="badge badge-amber" style="background:#78350f;color:#fcd34d">Requires Training</span>':'<span class="badge badge-done">No Training</span>'}</div>`;
+    const rec=strategy.recommended||{};
+    const training=strategy.needs_training?'<span class="text-amber-400">Yes</span> (retrains every N candles — XGBoost training time scales with n_estimators)':'<span class="text-green-400">No</span> (rule-based, instant prediction)';
+    let html=`<div class="flex items-center gap-2 mb-2"><b class="text-slate-200">Strategy Reference: ${strategy.name}</b>${strategy.needs_training?'<span class="badge badge-amber" style="background:#78350f;color:#fcd34d">Requires Training</span>':'<span class="badge badge-done">No Training</span>'}</div>`;
     html+=`<div class="mb-2"><b>Training:</b> ${training}</div>`;
     if(rec.notes) html+=`<div class="mb-2 text-slate-300"><b>Notes:</b> ${rec.notes}</div>`;
     html+=`<div class="mb-2"><b>All Parameters:</b></div>`;
     html+=`<table class="mb-3"><thead><tr><th>Param</th><th>Default</th><th>Description</th></tr></thead><tbody>`;
-    const dp=s.default_params||{};
-    const pd=s.param_docs||{};
+    const dp=strategy.default_params||{};
+    const pd=strategy.param_docs||{};
     for(const[k,v] of Object.entries(dp)){
       const val=typeof v==='object'?JSON.stringify(v):String(v);
       html+=`<tr><td class="font-mono text-blue-300">${k}</td><td class="font-mono">${val}</td><td class="text-slate-400">${pd[k]||''}</td></tr>`;
@@ -239,10 +251,13 @@ function updateDesc(){
       html+=`<div class="text-slate-400"><b>Recommended brute-force params:</b> ${rec.brute_force_include.join(', ')}</div>`;
     }
     ref.innerHTML=html;
-  }else{ref.classList.add('hidden')}
+  }else{
+    ref.classList.add('hidden');
+  }
+
   const presets=document.getElementById('bt-presets');
-  if(s && s.recommended){
-    const rec=s.recommended;
+  if(strategy && strategy.recommended){
+    const rec=strategy.recommended;
     const presetKeys=Object.keys(rec).filter(k=>k.endsWith('_preset'));
     if(presetKeys.length){
       let html='<span class="text-xs text-slate-400">Presets:</span> ';
@@ -251,9 +266,24 @@ function updateDesc(){
         html+=`<button onclick='applyPreset(${JSON.stringify(JSON.stringify(rec[pk]))})' class="btn btn-slate text-xs">${label}</button> `;
       });
       presets.innerHTML=html;
-    }else{presets.innerHTML=''}
-  }else{presets.innerHTML=''}
+    }else{presets.innerHTML='';}
+  }else{
+    presets.innerHTML='';
+  }
+
   ensureBacktestConfig();
+}
+
+function updateBruteforceDesc(){
+  const name=document.getElementById('bf-strategy')?.value;
+  const strategy=strategiesData.find(x=>x.name===name);
+  fillTooltip('bf-strategy-info', buildStrategyTooltip(strategy));
+  fillTooltip('bf-grid-info', buildParamDocsTooltip(strategy));
+}
+
+function updateDesc(){
+  updateBacktestDesc();
+  updateBruteforceDesc();
 }
 
 function applyPreset(jsonStr){
@@ -274,6 +304,33 @@ function applyPreset(jsonStr){
   cfgEl.value=JSON.stringify(cfg,null,2);
 }
 
+function syncBacktestConfigToStrategy(){
+  const el=document.getElementById('bt-config');
+  const strategy=document.getElementById('bt-strategy')?.value||'xgboost';
+  const s=strategiesData.find(x=>x.name===strategy);
+  const defaultParams=s&&s.default_params?JSON.parse(JSON.stringify(s.default_params)):{};
+  let cfg={};
+  const existing=(el?.value||'').trim();
+  if(existing){
+    try{
+      cfg=JSON.parse(existing)||{};
+    }catch(e){
+      cfg={};
+    }
+  }
+  cfg.strategy=strategy;
+  cfg.train_start=cfg.train_start||'2022-01-01';
+  cfg.train_end=cfg.train_end||'2025-06-30';
+  cfg.test_start=cfg.test_start||'2025-07-01';
+  cfg.test_end=cfg.test_end||'2025-12-31';
+  cfg.horizons=Array.isArray(cfg.horizons)&&cfg.horizons.length?cfg.horizons:[1];
+  cfg.table=cfg.table||'c_5m';
+  cfg.window_size=cfg.window_size||5000;
+  cfg.retrain_every=cfg.retrain_every||500;
+  cfg.params=defaultParams;
+  if(el) el.value=JSON.stringify(cfg,null,2);
+}
+
 function ensureBacktestConfig(){
   const el=document.getElementById('bt-config');
   if(!el) return;
@@ -284,24 +341,11 @@ function ensureBacktestConfig(){
       if(cfg && typeof cfg==='object') return;
     }catch(e){}
   }
-  const strategy=document.getElementById('bt-strategy')?.value||'xgboost';
-  const cfg={
-    strategy,
-    train_start:'2022-01-01',
-    train_end:'2025-06-30',
-    test_start:'2025-07-01',
-    test_end:'2025-12-31',
-    horizons:[1],
-    table:'c_5m',
-    window_size:5000,
-    retrain_every:500,
-    params:{},
-  };
-  el.value=JSON.stringify(cfg,null,2);
+  syncBacktestConfigToStrategy();
 }
 
 // ===== TABS =====
-const TABS=['backtest','bruteforce','history','best','best_compare','poly','poly_batch','wallet','lgbm','analytics','compare_asume','order_pricing','super_backtest'];
+const TABS=['backtest','bruteforce','rsib','history','best','best_compare','poly','poly_batch','wallet','lgbm','analytics','compare_asume','hmm_compare','order_pricing','super_backtest'];
 
 function getInitialTab(){
   let tabParam = null;
@@ -367,6 +411,8 @@ function switchTab(tab){
   }
   if(tab==='wallet') loadWallet();
   if(tab==='lgbm' && typeof lgbmFiInit==='function') lgbmFiInit();
+  if(tab==='hmm_compare' && typeof initHmmCompare==='function') initHmmCompare();
+  if(tab==='rsib' && typeof initRsib==='function') initRsib();
 }
 
 window.switchTab = switchTab;
@@ -874,6 +920,20 @@ function renderResult(data,targetId){
   }
   for(const[horizon,r]of Object.entries(data.horizons||{})){
     if(r.error){html+=`<div class="text-red-400 mb-4">H${horizon}: ${r.error}</div>`;continue}
+    const emaSkips=r.ema_skip_breakdown||null;
+    let emaSkipHtml='';
+    if(emaSkips){
+      const dist=Number(emaSkips.ema_distance||0);
+      const trend=Number(emaSkips.ema_trend_strength||0);
+      const dir=Number(emaSkips.ema_direction||0);
+      if(dist>0||trend>0||dir>0){
+        emaSkipHtml=`<div class="text-xs text-amber-300 mt-2" title="Counts of candles skipped by EMA filters">
+          EMA skips — Distance <span class="font-semibold">${dist.toLocaleString()}</span>
+          | Trend <span class="font-semibold">${trend.toLocaleString()}</span>
+          | Direction <span class="font-semibold">${dir.toLocaleString()}</span>
+        </div>`;
+      }
+    }
     html+=`<div class="mb-6 p-4 rounded-lg" style="background:#0f172a">
       <h3 class="font-semibold mb-3">Horizon ${horizon}</h3>
       <div class="grid grid-cols-2 md:grid-cols-6 gap-4 mb-4">
@@ -889,15 +949,19 @@ function renderResult(data,targetId){
         <div class="p-2 rounded text-sm" style="background:#1e293b"><span class="badge badge-down">DOWN</span> ${r.down_predictions} preds, ${r.down_correct} correct (${r.down_accuracy}%)</div>
       </div>
       <div class="p-2 rounded text-xs mb-3" style="background:#1e293b">Win streak: <b class="text-green-400">${r.streaks?.max_win_streak||0}</b> | Lose streak: <b class="text-red-400">${r.streaks?.max_lose_streak||0}</b>${r.train_count?` | Trains: <b>${r.train_count}</b> (${r.total_train_time_sec}s) | Predict: ${r.predict_time_sec}s`:''}</div>`;
+    if(emaSkipHtml){html+=emaSkipHtml}
     if(r.monthly?.length){
       html+=`<details class="mb-2"><summary class="text-xs text-slate-400 cursor-pointer">Monthly (${r.monthly.length})</summary><table class="mt-1"><thead><tr><th>Month</th><th>Total</th><th>Correct</th><th>Acc</th><th>Vol Skips</th></tr></thead><tbody>`;
       r.monthly.forEach(m=>{const vs=Number(m.volatility_skips||0);html+=`<tr><td>${m.month}</td><td>${m.total}</td><td>${m.correct}</td><td class="${accClass(m.accuracy)}">${m.accuracy}%</td><td class="text-amber-400">${vs}</td></tr>`});
-      html+=`</tbody></table></details>`}
+      html+=`</tbody></table></details>`;
+    }
     if(r.confidence_distribution){
       html+=`<details><summary class="text-xs text-slate-400 cursor-pointer">Confidence</summary><div class="grid grid-cols-7 gap-1 mt-1">`;
       Object.entries(r.confidence_distribution).forEach(([k,v])=>{html+=`<div class="text-center p-1 rounded text-xs" style="background:#1e293b"><div class="text-slate-400">${k}</div><div class="font-bold">${v}</div></div>`});
-      html+=`</div></details>`}
-    html+=`</div>`}
+      html+=`</div></details>`;
+    }
+    html+=`</div>`;
+  }
   html+=`</div>`;el.innerHTML=html;
 }
 
@@ -972,11 +1036,41 @@ function renderCompare(results){
 }
 
 // ===== BRUTE FORCE =====
-async function loadDefaultGrid(){
-  const s=document.getElementById('bf-strategy').value;if(!s)return;
-  try{const res=await fetch(API+'/api/bruteforce/grid/'+s);const data=await res.json();
-    const cfg=data.config||data.grid;
-    document.getElementById('bf-grid').value=JSON.stringify(cfg,null,2);
+async function loadDefaultGrid(preserveMeta, strategyOverride){
+  const keepMeta = preserveMeta === true;
+  const strategySel=document.getElementById('bf-strategy');
+  const strategy=strategyOverride || strategySel?.value;
+  if(!strategy) return;
+  if(strategySel && strategyOverride && strategySel.value!==strategyOverride){
+    strategySel.value=strategyOverride;
+  }
+  const requestSeq=++bfGridLoadSeq;
+  let existingCfg={};
+  if(keepMeta){
+    const el=document.getElementById('bf-grid');
+    const txt=(el?.value||'').trim();
+    if(txt){
+      try{existingCfg=JSON.parse(txt)||{}}catch(e){existingCfg={}};
+    }
+  }
+  try{
+    const res=await fetch(API+'/api/bruteforce/grid/'+strategy);
+    const data=await res.json();
+    if(requestSeq!==bfGridLoadSeq) return;
+    if(strategySel && strategySel.value!==strategy) return;
+    let cfg=data.config||data.grid||{};
+    cfg=JSON.parse(JSON.stringify(cfg));
+    if(keepMeta && existingCfg && typeof existingCfg==='object'){
+      const metaKeys=['train_start','train_end','test_start','test_end','table','window_size','retrain_every','max_combos','horizon','processes','horizons'];
+      metaKeys.forEach(key=>{
+        if(existingCfg[key]!=null){
+          cfg[key]=existingCfg[key];
+        }
+      });
+    }
+    cfg.strategy=strategy;
+    const gridEl=document.getElementById('bf-grid');
+    if(gridEl) gridEl.value=JSON.stringify(cfg,null,2);
     if(cfg&&typeof cfg==='object'&&cfg.horizon!=null){
       const hInput=document.getElementById('bf-horizon');
       if(hInput) hInput.value=cfg.horizon;
@@ -985,7 +1079,9 @@ async function loadDefaultGrid(){
       const pInput=document.getElementById('bf-processes');
       if(pInput) pInput.value=cfg.processes;
     }
-    document.getElementById('bf-combos').textContent=`Total combos: ${data.total_combos}`}catch(e){}
+    const combosEl=document.getElementById('bf-combos');
+    if(combosEl) combosEl.textContent=`Total combos: ${data.total_combos}`;
+  }catch(e){}
 }
 async function runBruteforce(){
   let cfg;

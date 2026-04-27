@@ -401,16 +401,16 @@ class RSIMeanReversionStrategy(BaseStrategy):
             trend_strength = np.abs(ema_fast - ema_slow) / np.where(np.abs(price) > 1e-12, price, np.nan)
         stats_df["ema_trend_strength"] = trend_strength
 
-        weekly = stats_df.resample("W-MON").mean().dropna(how="all")
-        if weekly.empty:
-            LOGGER.info("[DEBUG_EMA_FEATURE] EMA stats dataframe empty after resample")
+        monthly = stats_df.resample("M").mean().dropna(how="all")
+        if monthly.empty:
+            LOGGER.info("[DEBUG_EMA_FEATURE] EMA stats dataframe empty after monthly resample")
             return
 
         LOGGER.info(
-            "[DEBUG_EMA_FEATURE] Weekly EMA stats (%d rows -> %d weeks):\n%s",
+            "[DEBUG_EMA_FEATURE] Monthly EMA stats (%d rows -> %d months):\n%s",
             len(stats_df),
-            len(weekly),
-            weekly.round(6).to_string(),
+            len(monthly),
+            monthly.round(6).to_string(),
         )
 
     async def predict(self, df: pd.DataFrame, horizon: int = 1) -> np.ndarray:

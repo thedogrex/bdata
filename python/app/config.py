@@ -53,6 +53,7 @@ TELEGRAM_DAILY_REPORTS_ENABLED: bool = _env_bool("TELEGRAM_DAILY_REPORTS_ENABLED
 
 DEBUG_BINANCE_PRICE: bool = _env_bool("DEBUG_BINANCE_PRICE", False)
 DEBUG_EMA_FEATURE: bool = _env_bool("DEBUG_EMA_FEATURE", True)
+LOG_TIME_RSI: bool = _env_bool("LOG_TIME_RSI", False)
 
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FORMAT: str = os.getenv("LOG_FORMAT", "[%(asctime)s %(levelname)s %(name)s] %(message)s")

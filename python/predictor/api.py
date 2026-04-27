@@ -99,8 +99,8 @@ poly_stop_event: asyncio.Event | None = None
 class BacktestRequest(BaseModel):
     strategy: str = "xgboost"
     params: dict | None = None
-    train_start: str = "2022-01-01"
-    train_end: str = "2025-06-30"
+    train_start: str | None = None
+    train_end: str | None = None
     test_start: str = "2025-07-01"
     test_end: str = "2026-01-31"
     horizons: list[int] = [1]
@@ -111,8 +111,8 @@ class BacktestRequest(BaseModel):
 
 class CompareRequest(BaseModel):
     strategies: list[str] = ["xgboost", "rsi_mean_reversion", "momentum", "pattern_sequence", "ensemble"]
-    train_start: str = "2022-01-01"
-    train_end: str = "2025-06-30"
+    train_start: str | None = None
+    train_end: str | None = None
     test_start: str = "2025-07-01"
     test_end: str = "2026-01-31"
     horizons: list[int] = [1]
@@ -124,8 +124,8 @@ class CompareRequest(BaseModel):
 class BruteforceRequest(BaseModel):
     strategy: str = "xgboost"
     param_grid: dict | None = None
-    train_start: str = "2022-01-01"
-    train_end: str = "2025-06-30"
+    train_start: str | None = None
+    train_end: str | None = None
     test_start: str = "2025-07-01"
     test_end: str = "2026-01-31"
     horizon: int = 1
@@ -139,8 +139,8 @@ class BruteforceRequest(BaseModel):
 
 class RsibRunRequest(BaseModel):
     strategy: str = "rsi_mean_reversion"
-    train_start: str = "2022-01-01"
-    train_end: str = "2025-06-30"
+    train_start: str | None = None
+    train_end: str | None = None
     test_start: str = "2025-07-01"
     test_end: str = "2026-01-31"
     horizon: int = 1
@@ -566,6 +566,7 @@ async def api_run_backtest(req: BacktestRequest):
                 table=req.table,
                 progress=progress,
                 strategy_name=req.strategy,
+                min_train_candles=req.window_size,
             )
             result = await run_backtest_vectorized(
                 strategy_name=req.strategy,
@@ -621,7 +622,8 @@ async def api_compare_strategies(req: CompareRequest):
                 test_end=req.test_end,
                 horizons=req.horizons,
                 table=req.table,
-                progress=progress,
+                strategy_name=strats[0] if len(strats) == 1 else None,
+                min_train_candles=req.window_size,
             )
 
         for idx, strategy_name in enumerate(strats):
@@ -1364,6 +1366,7 @@ async def api_volatility_bruteforce(req: VolatilityBruteforceRequest):
         horizons=[req.horizon],
         table=req.table,
         strategy_name=req.strategy,
+        min_train_candles=req.window_size,
     )
 
     base_params = req.params or {}

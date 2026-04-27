@@ -1,6 +1,8 @@
 import time
 import asyncio
 import math
+import json
+import re
 import numpy as np
 import pandas as pd
 from typing import Any, Optional, TYPE_CHECKING
@@ -16,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Minimal feature blocks needed per strategy for preloading.
 # Strategies not listed here get ALL features.
 _STRATEGY_MINIMAL_FEATURES: dict[str, set[str]] = {
-    "rsi_mean_reversion": {"rsi", "bollinger"},
+    "rsi_mean_reversion": {"rsi", "bollinger", "moving_averages", "volatility"},
     "momentum": {"macd", "momentum", "volume", "moving_averages"},
     "stochastic_adx": {"stochastic", "adx_dmi"},
     "candlestick_pattern": {"candlestick_patterns", "volume", "moving_averages"},
@@ -27,17 +29,70 @@ if TYPE_CHECKING:
 
 
 RULE_BASED_STRATEGIES = {"rsi_mean_reversion", "momentum", "stochastic_adx", "candlestick_pattern"}
+_RSI_VARIANT_CACHE_MAX = 128
+_RSI_VARIANT_CACHE: dict[tuple[str, str], list[tuple[str, tuple[tuple[str, Any], ...]]]] = {}
+_RSI_FIT_STATE_ATTRS = ("_rsi_median", "_rsi_p10", "_rsi_p90", "_bb_median")
 
 
 def _is_cpu_heavy_strategy(strategy_name: str) -> bool:
     return strategy_name in {"xgboost", "lightgbm", "lstm"}
 
 
+def _snapshot_rsi_fit_state(strategy: BaseStrategy | None) -> dict[str, Any] | None:
+    if strategy is None:
+        return None
+    snapshot: dict[str, Any] = {}
+    for attr in _RSI_FIT_STATE_ATTRS:
+        if hasattr(strategy, attr):
+            snapshot[attr] = getattr(strategy, attr)
+    return snapshot or None
+
+
+def _apply_rsi_fit_state(strategy: BaseStrategy | None, snapshot: dict[str, Any] | None) -> None:
+    if not strategy or not snapshot:
+        return
+    for attr, value in snapshot.items():
+        setattr(strategy, attr, value)
+
+
+def _table_interval_minutes(table: str | None) -> int:
+    default_minutes = 5
+    if not table:
+        return default_minutes
+    suffix = table.split("_", 1)[1] if "_" in table else table
+    match = re.fullmatch(r"(\d+)([mhd])", suffix)
+    if not match:
+        return default_minutes
+    value = int(match.group(1))
+    unit = match.group(2)
+    multiplier = {"m": 1, "h": 60, "d": 1440}.get(unit, 1)
+    return max(1, value * multiplier)
+
+
+def _resolve_train_window_start(
+    train_start: str | None,
+    test_start: str,
+    min_candles: int | None,
+    table: str,
+) -> str:
+    if train_start:
+        return train_start
+    if not test_start:
+        raise ValueError("test_start is required when train_start is omitted")
+    if not min_candles or min_candles <= 0:
+        return test_start
+    candle_minutes = _table_interval_minutes(table)
+    lookback_minutes = max(1, min_candles) * candle_minutes
+    test_dt = pd.to_datetime(test_start)
+    derived_dt = test_dt - pd.to_timedelta(lookback_minutes, unit="m")
+    return derived_dt.strftime("%Y-%m-%d")
+
+
 async def run_backtest(
     strategy_name: str,
     strategy_params: dict | None,
-    train_start: str,
-    train_end: str,
+    train_start: str | None,
+    train_end: str | None,
     test_start: str,
     test_end: str,
     horizons: list[int] | None = None,
@@ -69,6 +124,9 @@ async def run_backtest(
     sweep_thresholds = _normalize_threshold_sweep(threshold_sweep, base_threshold) if threshold_sweep else []
     threshold_variant_results: dict[str, dict[str, dict]] = {}
 
+    effective_train_start = train_start
+    effective_train_end = train_end
+
     if preloaded:
         # Reuse preloaded data (skip expensive data loading + feature computation)
         df_raw = preloaded["df_raw"]
@@ -76,13 +134,18 @@ async def run_backtest(
         test_indices = preloaded["test_indices"]
         load_time = preloaded["load_time"]
         feat_time = preloaded["feat_time"]
+        effective_train_start = preloaded.get("train_start", train_start)
+        effective_train_end = preloaded.get("train_end", train_end)
     else:
         # ── Phase 1: Load candle data ──
         if progress:
             progress.phase = "Phase 1/3: Loading candle data from DB..."
             await asyncio.sleep(0)
 
-        df_raw = await load_candles(table, train_start, test_end)
+        effective_train_start = _resolve_train_window_start(train_start, test_start, window_size, table)
+        effective_train_end = train_end or test_start
+
+        df_raw = await load_candles(table, effective_train_start, test_end)
         df_raw = add_direction(df_raw)
         max_horizon = max(horizons)
         df_raw = add_future_directions(df_raw, horizons)
@@ -422,11 +485,11 @@ async def run_backtest(
     result = {
         "strategy": strategy_name,
         "params": resolved_params,
-        "train_start": train_start,
-        "train_end": train_end,
+        "train_start": effective_train_start,
+        "train_end": effective_train_end,
         "test_start": test_start,
         "test_end": test_end,
-        "train_period": f"{train_start} -> {train_end}",
+        "train_period": f"{effective_train_start} -> {effective_train_end}",
         "test_period": f"{test_start} -> {test_end}",
         "train_candles": actual_window,
         "test_candles": len(test_indices),
@@ -445,15 +508,75 @@ async def run_backtest(
     return result
 
 
+def _build_rsi_filter_variants(base_params: dict, sweep_params: dict[str, list]) -> dict[str, dict]:
+    if not sweep_params:
+        return {}
+    cache_key = _make_rsi_variant_cache_key(base_params, sweep_params)
+    cached = _RSI_VARIANT_CACHE.get(cache_key)
+    if cached:
+        return {
+            key: {k: v for k, v in items}
+            for key, items in cached
+        }
+    keys = list(sweep_params.keys())
+    values = []
+    for key in keys:
+        raw = sweep_params.get(key) or []
+        values.append(list(raw) if isinstance(raw, (list, tuple, set, range)) else [raw])
+    variants: dict[str, dict] = {}
+    if not keys:
+        return variants
+    for combo in np.array(np.meshgrid(*values, indexing="ij"), dtype=object).T.reshape(-1, len(keys)):
+        variant_params = dict(base_params)
+        labels: list[str] = []
+        for idx, key in enumerate(keys):
+            value = combo[idx].item() if hasattr(combo[idx], "item") else combo[idx]
+            variant_params[key] = value
+            labels.append(f"{key}={value}")
+        variants["|".join(labels)] = variant_params
+    if variants:
+        _store_rsi_variant_cache(cache_key, variants)
+    return variants
+
+
+def _store_rsi_variant_cache(cache_key: tuple[str, str], variants: dict[str, dict]) -> None:
+    _RSI_VARIANT_CACHE[cache_key] = [
+        (variant_key, tuple(sorted(params.items())))
+        for variant_key, params in variants.items()
+    ]
+    if len(_RSI_VARIANT_CACHE) > _RSI_VARIANT_CACHE_MAX:
+        oldest_key = next(iter(_RSI_VARIANT_CACHE))
+        _RSI_VARIANT_CACHE.pop(oldest_key, None)
+
+
+def _make_rsi_variant_cache_key(base_params: dict, sweep_params: dict[str, list]) -> tuple[str, str]:
+    base_serialized = json.dumps(base_params, sort_keys=True, default=_json_default)
+    sweep_serialized = json.dumps(
+        {k: list(v) if isinstance(v, (list, tuple, set, range)) else [v] for k, v in sweep_params.items()},
+        sort_keys=True,
+        default=_json_default,
+    )
+    return base_serialized, sweep_serialized
+
+
+def _json_default(obj: Any):  # pragma: no cover - helper for serialization
+    if isinstance(obj, (np.generic,)):
+        return obj.item()
+    if isinstance(obj, set):
+        return sorted(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 async def preload_backtest_data(
-    train_start: str,
-    train_end: str,
+    train_start: str | None,
+    train_end: str | None,
     test_start: str,
     test_end: str,
     horizons: list[int],
     table: str = "c_5m",
     progress: "TaskProgress | None" = None,
     strategy_name: str | None = None,
+    min_train_candles: int | None = None,
 ) -> dict:
     """Load candle data and compute features once, for reuse across brute-force combos."""
     t0 = time.time()
@@ -462,7 +585,10 @@ async def preload_backtest_data(
         progress.phase = "Preloading candle data from DB..."
         await asyncio.sleep(0)
 
-    df_raw = await load_candles(table, train_start, test_end)
+    effective_train_start = _resolve_train_window_start(train_start, test_start, min_train_candles, table)
+    effective_train_end = train_end or test_start
+
+    df_raw = await load_candles(table, effective_train_start, test_end)
     df_raw = add_direction(df_raw)
     df_raw = add_future_directions(df_raw, horizons)
     df_raw = df_raw.reset_index(drop=True)
@@ -500,6 +626,8 @@ async def preload_backtest_data(
         "test_indices": test_indices,
         "load_time": round(load_time, 2),
         "feat_time": round(feat_time, 2),
+        "train_start": effective_train_start,
+        "train_end": effective_train_end,
     }
 
 
@@ -516,12 +644,11 @@ async def run_backtest_vectorized(
     test_end: str,
     table: str,
     threshold_sweep: list[float] | None = None,
+    rsi_filter_sweep: dict[str, list] | None = None,
+    log_timings: bool = False,
 ) -> dict:
-    """
-    Ultra-fast backtest for rule-based strategies (RSI, Momentum).
-    Calls predict/predict_proba ONCE on the full test set — no moving window.
-    ~100-1000x faster per combo than run_backtest.
-    """
+    """Ultra-fast backtest for rule-based strategies (RSI, Momentum)."""
+
     df_feat = preloaded["df_feat"]
     df_raw = preloaded["df_raw"]
     test_indices = preloaded["test_indices"]
@@ -533,14 +660,17 @@ async def run_backtest_vectorized(
     test_start_idx = test_indices[0]
     actual_window = min(window_size, test_start_idx)
 
-    results_by_horizon = {}
+    results_by_horizon: dict[str, dict] = {}
     threshold_variant_results: dict[str, dict[str, dict]] = {}
+    rsi_filter_variant_results: dict[str, dict] = {}
+    timing_enabled = bool(log_timings and strategy_name == "rsi_mean_reversion")
+    timing_rows: list[dict[str, Any]] = []
 
     for horizon in horizons:
         t1 = time.time()
+        horizon_start = t1
         target_col = f"future_dir_{horizon}"
 
-        # Filter valid test indices (must have future direction available)
         valid_test = np.array([
             i for i in test_indices
             if i + horizon < len(df_feat) and not pd.isna(df_feat.at[i, target_col])
@@ -554,17 +684,19 @@ async def run_backtest_vectorized(
             }
             continue
 
-        # Get test data as contiguous DataFrame
         df_test = df_feat.iloc[valid_test].reset_index(drop=True)
-
-        # Training window: last `window_size` candles before test start
         train_lo = max(0, test_start_idx - actual_window)
         df_train = df_feat.iloc[train_lo:test_start_idx].reset_index(drop=True)
 
-        # Create strategy, fit on training window, predict on full test set
         strategy = get_strategy(strategy_name, strategy_params)
-        strategy.fit(df_train, horizon)  # learns adaptive stats from training window
+        fit_timer = time.time()
+        strategy.fit(df_train, horizon)
+        fit_sec = time.time() - fit_timer
+        base_fit_state = _snapshot_rsi_fit_state(strategy) if strategy_name == "rsi_mean_reversion" else None
+
+        predict_timer = time.time()
         prob_arr = await resolve_awaitable(strategy.predict_proba(df_test, horizon))
+        predict_sec = time.time() - predict_timer
         vol_skip_flags = _extract_vol_skip_flags(getattr(strategy, "_last_vol_skip_flags", None), len(df_test))
         volatility_skips = int(vol_skip_flags.sum())
 
@@ -580,8 +712,8 @@ async def run_backtest_vectorized(
         actuals = df_feat[target_col].iloc[valid_test].values.astype(int)
         probas = prob_arr.astype(float)
         total_candles_tested = len(probas)
-
-        fit_time = time.time() - t1
+        core_elapsed = time.time() - horizon_start
+        fit_time = core_elapsed
 
         base_metrics = _evaluate_predictions_metrics(
             y_pred=pred_arr,
@@ -597,11 +729,13 @@ async def run_backtest_vectorized(
             threshold_value=base_threshold,
             vol_skip_flags=vol_skip_flags,
         )
-
         base_metrics["volatility_skips"] = volatility_skips
         results_by_horizon[str(horizon)] = base_metrics
 
+        threshold_sec = 0.0
+        threshold_variants_count = len(sweep_thresholds) if sweep_thresholds else 0
         if sweep_thresholds:
+            threshold_start = time.time()
             base_key = _format_threshold_key(base_threshold)
             for thr in sweep_thresholds:
                 thr_preds = _apply_threshold_to_probs(probas, thr)
@@ -625,18 +759,76 @@ async def run_backtest_vectorized(
 
             if base_key in threshold_variant_results:
                 results_by_horizon[str(horizon)] = threshold_variant_results[base_key][str(horizon)]
+            threshold_sec = time.time() - threshold_start
+
+        rsi_variant_sec = 0.0
+        rsi_variant_count = 0
+        if strategy_name == "rsi_mean_reversion" and rsi_filter_sweep:
+            rsi_variant_start = time.time()
+            variant_payloads = _build_rsi_filter_variants(dict(strategy.params), rsi_filter_sweep)
+            rsi_variant_count = len(variant_payloads)
+            for variant_key, variant_params in variant_payloads.items():
+                variant_strategy = get_strategy(strategy_name, variant_params)
+                if base_fit_state:
+                    _apply_rsi_fit_state(variant_strategy, base_fit_state)
+                else:
+                    variant_strategy.fit(df_train, horizon)
+                variant_prob_arr = await resolve_awaitable(variant_strategy.predict_proba(df_test, horizon))
+                variant_vol_flags = _extract_vol_skip_flags(
+                    getattr(variant_strategy, "_last_vol_skip_flags", None),
+                    len(df_test),
+                )
+                variant_vol_skips = int(variant_vol_flags.sum())
+                variant_threshold = float(variant_strategy.params.get("threshold", base_threshold))
+                variant_preds = _apply_threshold_to_probs(variant_prob_arr.astype(float), variant_threshold)
+                variant_metrics = _evaluate_predictions_metrics(
+                    y_pred=variant_preds,
+                    probas=variant_prob_arr.astype(float),
+                    actuals=actuals,
+                    idxs=valid_test,
+                    df_raw=df_raw,
+                    horizon=horizon,
+                    total_candles=total_candles_tested,
+                    fit_time=fit_time,
+                    train_count=0,
+                    total_train_time=0.0,
+                    threshold_value=variant_threshold,
+                    vol_skip_flags=variant_vol_flags,
+                )
+                variant_metrics["volatility_skips"] = variant_vol_skips
+                rsi_filter_variant_results.setdefault(
+                    variant_key,
+                    {"params": variant_params, "horizons": {}},
+                )["horizons"][str(horizon)] = variant_metrics
+            rsi_variant_sec = time.time() - rsi_variant_start
+
+        total_elapsed = time.time() - horizon_start
+        if timing_enabled:
+            timing_rows.append({
+                "horizon": horizon,
+                "fit_sec": fit_sec,
+                "predict_sec": predict_sec,
+                "threshold_sec": threshold_sec,
+                "threshold_variants": threshold_variants_count,
+                "rsi_sec": rsi_variant_sec,
+                "rsi_variants": rsi_variant_count,
+                "total_sec": total_elapsed,
+                "candles": total_candles_tested,
+            })
 
     total_time = time.time() - t0
     resolved_params = strategy_params if strategy_params else get_strategy(strategy_name).params
+    resolved_train_start = preloaded.get("train_start", train_start)
+    resolved_train_end = preloaded.get("train_end", train_end)
 
     result = {
         "strategy": strategy_name,
         "params": resolved_params,
-        "train_start": train_start,
-        "train_end": train_end,
+        "train_start": resolved_train_start,
+        "train_end": resolved_train_end,
         "test_start": test_start,
         "test_end": test_end,
-        "train_period": f"{train_start} -> {train_end}",
+        "train_period": f"{resolved_train_start} -> {resolved_train_end}",
         "test_period": f"{test_start} -> {test_end}",
         "train_candles": actual_window,
         "test_candles": len(test_indices),
@@ -651,6 +843,33 @@ async def run_backtest_vectorized(
 
     if threshold_variant_results:
         result["threshold_variants"] = threshold_variant_results
+
+    if rsi_filter_variant_results:
+        result["rsi_filter_variants"] = rsi_filter_variant_results
+
+    if timing_enabled and timing_rows:
+        for row in timing_rows:
+            horizon_label = row["horizon"]
+            logger.info("[RSI_TIMING] H%s FIT %.4fs", horizon_label, row["fit_sec"])
+            logger.info("[RSI_TIMING] H%s PREDICT %.4fs", horizon_label, row["predict_sec"])
+            logger.info(
+                "[RSI_TIMING] H%s THRESHOLDS %.4fs variants=%d",
+                horizon_label,
+                row["threshold_sec"],
+                row["threshold_variants"],
+            )
+            logger.info(
+                "[RSI_TIMING] H%s RSI_VARIANTS %.4fs variants=%d",
+                horizon_label,
+                row["rsi_sec"],
+                row["rsi_variants"],
+            )
+            logger.info(
+                "[RSI_TIMING] H%s TOTAL %.4fs candles=%d",
+                horizon_label,
+                row["total_sec"],
+                row["candles"],
+            )
 
     return result
 

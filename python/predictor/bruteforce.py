@@ -3,6 +3,7 @@ import asyncio
 import itertools
 import json
 import math
+import logging
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, TYPE_CHECKING
 
@@ -17,15 +18,30 @@ from predictor.db_history import (
     get_bruteforce_session_by_id,
     get_completed_combo_indices,
 )
+import app.config as config
 
 BF_COMBO_DELAY_SEC = 0.2
 THRESHOLD_SWEEP_STRATEGIES = {"lightgbm", "xgboost", "rsi_mean_reversion"}
+RSI_SINGLE_RUN_SWEEP_PARAMS = {
+    "ema_trend_strength_threshold",
+    "use_ema_direction_filter",
+    "min_vol",
+    "max_vol",
+    "vol_ratio_max",
+    "use_ema_trend_strength_filter",
+    "ema_diff_threshold",
+    "use_ema_filter",
+    "threshold",
+}
 DEFAULT_BRUTEFORCE_PROCESSES = 1
 PARALLEL_MIN_CHUNKS_PER_WORKER = 4
 PARALLEL_MAX_COMBOS_PER_CHUNK = 1
 
 if TYPE_CHECKING:
     from predictor.task_manager import TaskProgress
+
+
+logger = logging.getLogger(__name__)
 
 
 # Default grids per strategy
@@ -211,6 +227,52 @@ def _normalize_threshold_list(thresholds: list[float] | None) -> list[float] | N
     return normalized or None
 
 
+def _extract_rsi_single_run_sweeps(param_grid: dict[str, list] | None) -> tuple[dict[str, list], dict[str, list]]:
+    base_grid = dict(param_grid or {})
+    sweep_grid: dict[str, list] = {}
+    for key in list(base_grid.keys()):
+        if key not in RSI_SINGLE_RUN_SWEEP_PARAMS:
+            continue
+        raw_values = base_grid.get(key)
+        if not isinstance(raw_values, (list, tuple, set, range)):
+            continue
+        values = list(raw_values)
+        if len(values) <= 1:
+            continue
+        sweep_grid[key] = values
+        base_grid[key] = [values[0]]
+    return base_grid, sweep_grid
+
+
+def _normalize_rsi_single_run_sweeps(raw_sweeps: dict[str, list] | None) -> dict[str, list] | None:
+    if not raw_sweeps:
+        return None
+    normalized: dict[str, list] = {}
+    for key, values in raw_sweeps.items():
+        if not isinstance(values, (list, tuple, set, range)):
+            values = [values]
+        seen: set[str] = set()
+        items: list = []
+        for raw in values:
+            if isinstance(raw, bool):
+                val = bool(raw)
+                dedupe_key = f"bool:{int(val)}"
+            else:
+                try:
+                    val = float(raw)
+                    dedupe_key = f"float:{val:.6f}"
+                except (TypeError, ValueError):
+                    val = raw
+                    dedupe_key = f"raw:{repr(raw)}"
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            items.append(val)
+        if items:
+            normalized[key] = items
+    return normalized or None
+
+
 def _prepare_combo_payload(
     params: dict,
     default_window_size: int,
@@ -239,24 +301,37 @@ async def _persist_combo_result(
     best_result: dict | None,
 ) -> tuple[float, dict, dict | None, float, float | None]:
     threshold_variants = result.pop("threshold_variants", None)
+    rsi_filter_variants = result.pop("rsi_filter_variants", None)
     result["is_bruteforce"] = True
     result["bruteforce_id"] = bf_id
 
     combo_best_acc = -1.0
     combo_best_thr = None
 
-    if threshold_variants:
+    if threshold_variants or rsi_filter_variants:
         base_common = {
             k: v for k, v in result.items()
-            if k not in {"threshold_variants", "horizons", "params"}
+            if k not in {"threshold_variants", "rsi_filter_variants", "horizons", "params"}
         }
-        for thr_key, horizon_map in threshold_variants.items():
-            try:
-                thr_val = float(thr_key)
-            except (TypeError, ValueError):
-                continue
-            variant_params = dict(params)
-            variant_params["threshold"] = thr_val
+        combined_variants: list[tuple[dict, dict[str, dict], float | None]] = []
+        if threshold_variants:
+            for thr_key, horizon_map in threshold_variants.items():
+                try:
+                    thr_val = float(thr_key)
+                except (TypeError, ValueError):
+                    continue
+                variant_params = dict(params)
+                variant_params["threshold"] = thr_val
+                combined_variants.append((variant_params, horizon_map, thr_val))
+        if rsi_filter_variants:
+            for _, variant_payload in rsi_filter_variants.items():
+                if not isinstance(variant_payload, dict):
+                    continue
+                variant_params = variant_payload.get("params") or params
+                horizon_map = variant_payload.get("horizons") or {}
+                combined_variants.append((dict(variant_params), horizon_map, variant_params.get("threshold")))
+
+        for variant_params, horizon_map, thr_val in combined_variants:
             variant_result = dict(base_common)
             variant_result["params"] = variant_params
             variant_result["horizons"] = horizon_map
@@ -268,7 +343,7 @@ async def _persist_combo_result(
             acc_candidate = h_data.get("accuracy_pct", 0)
             if acc_candidate > combo_best_acc:
                 combo_best_acc = acc_candidate
-                combo_best_thr = thr_val
+                combo_best_thr = float(thr_val) if thr_val is not None else None
             if acc_candidate > best_accuracy:
                 best_accuracy = acc_candidate
                 best_params = variant_params
@@ -307,6 +382,7 @@ async def _run_bf_loop(
     elapsed_before: float,
     progress: "TaskProgress | None",
     threshold_sweep: list[float] | None,
+    rsi_filter_sweep: dict[str, list] | None,
     processes: int = DEFAULT_BRUTEFORCE_PROCESSES,
 ) -> dict:
     """
@@ -334,6 +410,7 @@ async def _run_bf_loop(
             elapsed_before=elapsed_before,
             progress=progress,
             threshold_sweep=threshold_sweep,
+            rsi_filter_sweep=rsi_filter_sweep,
             processes=processes,
         )
 
@@ -344,6 +421,12 @@ async def _run_bf_loop(
     completed = initial_completed
 
     normalized_thresholds = _normalize_threshold_list(threshold_sweep)
+    normalized_rsi_sweeps = _normalize_rsi_single_run_sweeps(rsi_filter_sweep)
+    log_timings_enabled = bool(
+        getattr(config, "LOG_TIME_RSI", False)
+        and strategy == "rsi_mean_reversion"
+        and processes == 1
+    )
 
     if progress:
         progress.total = total
@@ -356,6 +439,7 @@ async def _run_bf_loop(
     preloaded = await preload_backtest_data(
         train_start, train_end, test_start, test_end, [horizon], table, progress,
         strategy_name=strategy,
+        min_train_candles=default_window_size,
     )
     if not preloaded["test_indices"]:
         raise RuntimeError("No test data found in the given range")
@@ -428,6 +512,8 @@ async def _run_bf_loop(
                     test_end=test_end,
                     table=table,
                     threshold_sweep=normalized_thresholds,
+                    rsi_filter_sweep=normalized_rsi_sweeps,
+                    log_timings=log_timings_enabled,
                 )
             else:
                 # Moving-window with preloaded data (skip data reload)
@@ -449,6 +535,7 @@ async def _run_bf_loop(
             if isinstance(result, dict) and result.get("error"):
                 raise RuntimeError(str(result.get("error")))
 
+            persist_start = time.time()
             best_accuracy, best_params, best_result, acc, combo_best_thr = await _persist_combo_result(
                 result,
                 combo_params,
@@ -458,6 +545,7 @@ async def _run_bf_loop(
                 best_params,
                 best_result,
             )
+            persist_sec = time.time() - persist_start
 
             if combo_best_thr is not None and progress:
                 progress.extra["last_threshold"] = combo_best_thr
@@ -485,6 +573,16 @@ async def _run_bf_loop(
                 progress.extra["last_accuracy"] = acc
                 progress.extra["last_combo_time_sec"] = round(combo_elapsed, 2)
                 progress.phase = progress_last_phase
+
+            if log_timings_enabled:
+                logger.info(
+                    "[RSI_TIMING] Combo %d/%d | persistence=%.4fs total=%.4fs | params=%s",
+                    completed,
+                    total,
+                    persist_sec,
+                    combo_elapsed,
+                    json.dumps(combo_params, ensure_ascii=False)[:200],
+                )
 
             print(f"[BF {bf_id}] {completed}/{total} | ws={ws} | acc={acc}% | best={best_accuracy}% | {round(combo_elapsed,1)}s", flush=True)
 
@@ -572,6 +670,7 @@ async def _run_bf_loop_parallel(
     elapsed_before: float,
     progress: "TaskProgress | None",
     threshold_sweep: list[float] | None,
+    rsi_filter_sweep: dict[str, list] | None,
     processes: int,
 ) -> dict:
     total = len(combos)
@@ -580,6 +679,7 @@ async def _run_bf_loop_parallel(
     best_result = None
     completed = initial_completed
     normalized_thresholds = _normalize_threshold_list(threshold_sweep)
+    normalized_rsi_sweeps = _normalize_rsi_single_run_sweeps(rsi_filter_sweep)
 
     pending_combos: list[dict] = []
     skip_keys = skip_params_set or set()
@@ -658,6 +758,7 @@ async def _run_bf_loop_parallel(
                 "default_window_size": default_window_size,
                 "retrain_every": retrain_every,
                 "threshold_sweep": normalized_thresholds,
+                "rsi_filter_sweep": normalized_rsi_sweeps,
             }
             futures.append(loop.run_in_executor(executor, _bf_worker_entry, payload))
 
@@ -776,6 +877,7 @@ async def _bf_worker_async(payload: dict) -> dict:
         errors: list[str] = []
 
         normalized_thresholds = _normalize_threshold_list(payload.get("threshold_sweep"))
+        normalized_rsi_sweeps = _normalize_rsi_single_run_sweeps(payload.get("rsi_filter_sweep"))
         is_fast = payload["strategy"] in RULE_BASED_STRATEGIES
 
         preloaded = await preload_backtest_data(
@@ -786,6 +888,7 @@ async def _bf_worker_async(payload: dict) -> dict:
             [payload["horizon"]],
             payload["table"],
             strategy_name=payload["strategy"],
+            min_train_candles=payload["default_window_size"],
         )
         if not preloaded["test_indices"]:
             raise RuntimeError("No test data found in the given range")
@@ -813,6 +916,7 @@ async def _bf_worker_async(payload: dict) -> dict:
                         test_end=payload["test_end"],
                         table=payload["table"],
                         threshold_sweep=normalized_thresholds,
+                        rsi_filter_sweep=normalized_rsi_sweeps,
                     )
                 else:
                     result = await run_backtest(
@@ -890,6 +994,9 @@ async def run_bruteforce(
     """
     grid_for_combos = dict(param_grid)
     threshold_sweep = None
+    rsi_filter_sweep = None
+    if strategy == "rsi_mean_reversion":
+        grid_for_combos, rsi_filter_sweep = _extract_rsi_single_run_sweeps(grid_for_combos)
     if strategy in THRESHOLD_SWEEP_STRATEGIES and "threshold" in grid_for_combos:
         threshold_sweep = _extract_threshold_sweep(grid_for_combos.pop("threshold"))
 
@@ -940,6 +1047,7 @@ async def run_bruteforce(
         elapsed_before=0.0,
         progress=progress,
         threshold_sweep=threshold_sweep,
+        rsi_filter_sweep=rsi_filter_sweep,
         processes=processes,
     )
 
@@ -966,8 +1074,11 @@ async def resume_bruteforce(
 
     # Find which combos are already done
     threshold_sweep = None
+    rsi_filter_sweep = None
     if session["strategy"] in THRESHOLD_SWEEP_STRATEGIES and "threshold" in (session.get("param_grid") or {}):
         threshold_sweep = _extract_threshold_sweep(session["param_grid"].get("threshold"))
+    if session["strategy"] == "rsi_mean_reversion":
+        _, rsi_filter_sweep = _extract_rsi_single_run_sweeps(session.get("param_grid") or {})
 
     ignore_keys = {"threshold"} if threshold_sweep else None
     completed_params_set = await get_completed_combo_indices(

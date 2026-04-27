@@ -1,9 +1,13 @@
 import json
 import datetime
+import time
+import logging
 from typing import Optional
 from db import DbProvider
+import app.config as config
 
 db = DbProvider()
+logger = logging.getLogger(__name__)
 
 
 def _safe_json_loads(val, default):
@@ -18,6 +22,8 @@ def _safe_json_loads(val, default):
 async def save_backtest_run(result: dict) -> int:
     """Save a backtest run + horizon results to MySQL. Returns run_id."""
     params_json = json.dumps(result.get("params", {}), ensure_ascii=False)
+    log_timings = bool(getattr(config, "LOG_TIME_RSI", False) and result.get("strategy") == "rsi_mean_reversion")
+    run_insert_start = time.time() if log_timings else None
 
     query = """
         INSERT INTO backtest_runs
@@ -42,7 +48,15 @@ async def save_backtest_run(result: dict) -> int:
         result.get("bruteforce_id"),
     ))
 
+    if log_timings and run_insert_start is not None:
+        logger.info(
+            "[RSI_TIMING] DB_RUN_INSERT run_id=%s %.4fs",
+            run_id,
+            time.time() - run_insert_start,
+        )
+
     horizons = result.get("horizons", {})
+    horizon_rows: list[tuple] = []
     for horizon_str, h in horizons.items():
         err_msg = h.get("error") if isinstance(h, dict) else None
         conf_json = h.get("confidence_distribution", {}) if isinstance(h, dict) else {}
@@ -50,15 +64,7 @@ async def save_backtest_run(result: dict) -> int:
             # Persist the horizon anyway (otherwise history shows "no results")
             # Store the reason inside confidence_json for visibility.
             conf_json = {"error": str(err_msg)}
-        await db.execute("""
-            INSERT INTO backtest_horizons
-                (run_id, horizon, accuracy, accuracy_pct, total_candles, signals,
-                 skipped, volatility_skips, correct, wrong, up_predictions, up_correct, up_accuracy,
-                 down_predictions, down_correct, down_accuracy,
-                 max_win_streak, max_lose_streak, fit_time_sec, predict_time_sec,
-                 monthly_json, daily_json, confidence_json)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (
+        horizon_rows.append((
             run_id,
             int(horizon_str),
             h.get("accuracy", 0),
@@ -83,6 +89,26 @@ async def save_backtest_run(result: dict) -> int:
             json.dumps(h.get("daily", []), ensure_ascii=False),
             json.dumps(conf_json, ensure_ascii=False),
         ))
+
+    if horizon_rows:
+        horizon_insert_start = time.time() if log_timings else None
+        horizon_insert = """
+            INSERT INTO backtest_horizons
+                (run_id, horizon, accuracy, accuracy_pct, total_candles, signals,
+                 skipped, volatility_skips, correct, wrong, up_predictions, up_correct, up_accuracy,
+                 down_predictions, down_correct, down_accuracy,
+                 max_win_streak, max_lose_streak, fit_time_sec, predict_time_sec,
+                 monthly_json, daily_json, confidence_json)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """
+        await db.executemany(horizon_insert, horizon_rows)
+        if log_timings and horizon_insert_start is not None:
+            logger.info(
+                "[RSI_TIMING] DB_HORIZON_INSERT run_id=%s rows=%d %.4fs",
+                run_id,
+                len(horizon_rows),
+                time.time() - horizon_insert_start,
+            )
 
     return run_id
 

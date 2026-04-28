@@ -1025,7 +1025,7 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     from predictor import live_trading  # local import to avoid circular dep
 
                     snapshot = await live_trading.update_bank_snapshot()
-                    await _maybe_notify_low_cash(snapshot)
+                    #await _maybe_notify_low_cash(snapshot)
                 except Exception as exc:
                     logger.warning("[poll_loop] failed to refresh bank snapshot: %s", exc)
                 finally:

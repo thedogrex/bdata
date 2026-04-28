@@ -1116,5 +1116,6 @@ async def resume_bruteforce(
         elapsed_before=session.get("elapsed_before_pause", 0.0),
         progress=progress,
         threshold_sweep=threshold_sweep,
+        rsi_filter_sweep=rsi_filter_sweep,
         processes=processes,
     )

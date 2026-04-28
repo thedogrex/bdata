@@ -1,6 +1,6 @@
 import logging
 import app.config as config
-from py_clob_client.client import ClobClient
+from py_clob_client_v2.client import ClobClient
 
 class Core:
     def __init__(self):

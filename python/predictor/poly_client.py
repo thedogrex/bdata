@@ -1,7 +1,7 @@
 """
 Polymarket Trading Client for predictor module.
 
-Wraps py_clob_client SDK to:
+Wraps py_clob_client_v2 SDK to:
  - Fetch market data from Gamma API
  - Create & sign orders via CLOB API (limit / market / FOK)
  - Track positions in DB
@@ -10,18 +10,34 @@ Wraps py_clob_client SDK to:
 Env vars required in .env:
   POLY_PRIVATE_KEY     - Wallet private key for signing
   POLY_FUNDER          - Address that holds funds (proxy wallet address)
-  POLY_SIGNATURE_TYPE  - 0=EOA, 1=email/Magic, 2=browser proxy (default 0)
+  POLY_SIGNATURE_TYPE  - 0=EOA, 1=Magic/email, 2=browser proxy (default 0)
+
+Optional builder attribution (CLOB V2):
+  POLY_BUILDER_ADDRESS - Builder wallet address (if enrolled in builder program)
+  POLY_BUILDER_CODE    - Builder code (bytes32 hex, e.g. 0xABC...)
 """
 
 import json
 import logging
 import os
+import string
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
+
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import (
+    BalanceAllowanceParams,
+    BuilderConfig,
+    MarketOrderArgsV2,
+    OpenOrderParams,
+    OrderArgsV2,
+    OrderType,
+)
+from py_clob_client_v2.order_builder.constants import BUY, SELL
 
 load_dotenv()
 
@@ -31,6 +47,46 @@ if not logger.handlers:
     _h = logging.StreamHandler()
     _h.setFormatter(logging.Formatter("[%(name)s %(levelname)s %(asctime)s] %(message)s", datefmt="%H:%M:%S"))
     logger.addHandler(_h)
+
+
+def _normalize_bytes32(value: str, env_name: str) -> Optional[str]:
+    """Validate and normalize a bytes32 hex string."""
+    if not value:
+        return None
+
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return None
+
+    if not cleaned.startswith("0x"):
+        cleaned = "0x" + cleaned
+
+    hex_part = cleaned[2:]
+    if len(hex_part) != 64:
+        logger.error("%s must be 32 bytes (64 hex chars). Got len=%s", env_name, len(hex_part))
+        return None
+
+    if any(c not in string.hexdigits for c in hex_part):
+        logger.error("%s must be valid hex characters", env_name)
+        return None
+
+    return "0x" + hex_part
+
+
+def _load_builder_config() -> Optional[BuilderConfig]:
+    """Load optional builder attribution config for CLOB V2."""
+    builder_code_raw = os.getenv("POLY_BUILDER_CODE", "")
+    builder_code = _normalize_bytes32(builder_code_raw, "POLY_BUILDER_CODE")
+    if not builder_code:
+        return None
+
+    builder_address = os.getenv("POLY_BUILDER_ADDRESS", "").strip()
+    logger.info(
+        "Builder attribution enabled (address=%s)",
+        builder_address if builder_address else "(none)",
+    )
+    return BuilderConfig(builder_address=builder_address or "", builder_code=builder_code)
+
 
 # ---------------------------------------------------------------------------
 # Data classes (kept from app/poly_client.py)
@@ -69,32 +125,38 @@ def _get_clob_client():
     if _clob_client is not None:
         return _clob_client
 
-    from py_clob_client.client import ClobClient
-
     host = os.getenv("POLY_CLOB_HOST", "https://clob.polymarket.com")
     chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
     private_key = os.getenv("POLY_PRIVATE_KEY", "")
     funder = os.getenv("POLY_FUNDER", "")
     sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "0"))
+    builder_config = _load_builder_config()
 
     if not private_key:
         logger.error("POLY_PRIVATE_KEY is not set in .env — trading disabled")
         return None
 
-    logger.info("Initialising ClobClient  host=%s  chain=%d  sig_type=%d  funder=%s",
-                host, chain_id, sig_type, funder[:10] + "..." if funder else "(none)")
+    logger.info(
+        "Initialising ClobClient  host=%s  chain=%d  sig_type=%d  funder=%s  builder=%s",
+        host,
+        chain_id,
+        sig_type,
+        funder[:10] + "..." if funder else "(none)",
+        "on" if builder_config else "off",
+    )
 
     client = ClobClient(
-        host,
-        key=private_key,
+        host=host,
         chain_id=chain_id,
+        key=private_key,
         signature_type=sig_type,
         funder=funder or None,
+        builder_config=builder_config,
     )
 
     # Derive / load API credentials (HMAC key+secret+passphrase)
     try:
-        creds = client.create_or_derive_api_creds()
+        creds = client.create_or_derive_api_key()
         client.set_api_creds(creds)
         logger.info("API creds derived OK  api_key=%s...", creds.api_key[:12] if creds.api_key else "?")
     except Exception as e:
@@ -240,28 +302,42 @@ class PolymarketClient:
         Returns:
             CLOB API response dict  {success, orderID, status, errorMsg, ...}
         """
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
-        from py_clob_client.order_builder.constants import BUY
 
         tick_size = self.get_tick_size(token_id)
         neg_risk = self.get_neg_risk(token_id)
 
-        logger.info(">>> BUY MARKET  token=%s  amount=$%.2f  worst_price=%.4f  tick=%s  neg_risk=%s",
-                     token_id[:16], amount, worst_price, tick_size, neg_risk)
+        logger.info(
+            ">>> BUY MARKET  token=%s  amount=$%.2f  worst_price=%.4f  tick=%s  neg_risk=%s",
+            token_id[:16],
+            amount,
+            worst_price,
+            tick_size,
+            neg_risk,
+        )
 
         try:
-            signed = self._clob().create_market_order(
-                MarketOrderArgs(
-                    token_id=token_id,
-                    amount=amount,
-                    price=worst_price,
-                    side=BUY,
-                    fee_rate_bps=0,
-                    nonce=0,
-                )
+            order_args = MarketOrderArgsV2(
+                token_id=token_id,
+                amount=float(amount),
+                price=float(worst_price),
+                side=BUY,
+                order_type=OrderType.FOK,
             )
-            logger.debug("Signed order created, posting to CLOB...")
+            logger.info("[BUY MARKET] OrderArgs: token_id=%s, amount=%.4f, price=%.4f, side=%s, order_type=%s",
+                        order_args.token_id[:16], order_args.amount, order_args.price, order_args.side, order_args.order_type)
+
+            signed = self._clob().create_market_order(order_args)
+            # Show both raw base units and human-readable amounts
+            maker_raw = getattr(signed, 'makerAmount', None) if hasattr(signed, 'makerAmount') else None
+            taker_raw = getattr(signed, 'takerAmount', None) if hasattr(signed, 'takerAmount') else None
+            if maker_raw:
+                maker_usd = float(maker_raw) / 1e6
+                logger.info("[BUY MARKET] Signed order: makerAmount=%s (%.2f USDC), takerAmount=%s (%.4f shares approx)",
+                            maker_raw, maker_usd, taker_raw, float(taker_raw) / 1e6 if taker_raw else 0)
+
+            logger.info("[BUY MARKET] Sending post_order request to CLOB...")
             resp = self._clob().post_order(signed, OrderType.FOK)
+            logger.info("[BUY MARKET] RAW response from post_order: %s", json.dumps(resp, default=str))
             logger.info("<<< BUY MARKET response: %s", json.dumps(resp, default=str))
             return resp
         except Exception as e:
@@ -281,9 +357,6 @@ class PolymarketClient:
         Returns:
             CLOB API response dict
         """
-        from py_clob_client.clob_types import OrderArgs, OrderType
-        from py_clob_client.order_builder.constants import BUY
-
         tick_size = self.get_tick_size(token_id)
         neg_risk = self.get_neg_risk(token_id)
 
@@ -291,13 +364,16 @@ class PolymarketClient:
                      token_id[:16], price, size, tick_size, neg_risk)
 
         try:
-            signed = self._clob().create_order(
-                OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
-            )
-            logger.debug("Signed order created: %s", signed)
-            logger.debug("Posting signed order to CLOB (GTC)...")
+            order_args = OrderArgsV2(token_id=token_id, price=float(price), size=float(size), side=BUY)
+            logger.info("[BUY LIMIT] OrderArgs: token_id=%s, price=%.4f, size=%.4f, side=%s",
+                        order_args.token_id[:16], order_args.price, order_args.size, order_args.side)
+
+            signed = self._clob().create_order(order_args)
+            logger.info("[BUY LIMIT] Signed order created: %s", json.dumps(signed, default=str))
+
+            logger.info("[BUY LIMIT] Sending post_order request to CLOB...")
             resp = self._clob().post_order(signed, OrderType.GTC)
-            logger.debug("Raw CLOB post_order response: %s", resp)
+            logger.info("[BUY LIMIT] RAW response from post_order: %s", json.dumps(resp, default=str))
             logger.info("<<< BUY LIMIT response: %s", json.dumps(resp, default=str))
             return resp
         except Exception as e:
@@ -314,9 +390,6 @@ class PolymarketClient:
             shares:      Number of shares to sell
             worst_price: Min price per share (slippage protection)
         """
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
-        from py_clob_client.order_builder.constants import SELL
-
         tick_size = self.get_tick_size(token_id)
         neg_risk = self.get_neg_risk(token_id)
 
@@ -324,17 +397,22 @@ class PolymarketClient:
                      token_id[:16], shares, worst_price, tick_size)
 
         try:
-            signed = self._clob().create_market_order(
-                MarketOrderArgs(
-                    token_id=token_id,
-                    amount=shares,
-                    price=worst_price,
-                    side=SELL,
-                    fee_rate_bps=0,
-                    nonce=0,
-                )
+            order_args = MarketOrderArgsV2(
+                token_id=token_id,
+                amount=float(shares),
+                price=float(worst_price),
+                side=SELL,
+                order_type=OrderType.FOK,
             )
+            logger.info("[SELL MARKET] OrderArgs: token_id=%s, amount=%.4f, price=%.4f, side=%s, order_type=%s",
+                        order_args.token_id[:16], order_args.amount, order_args.price, order_args.side, order_args.order_type)
+
+            signed = self._clob().create_market_order(order_args)
+            logger.info("[SELL MARKET] Signed order created: %s", json.dumps(signed, default=str))
+
+            logger.info("[SELL MARKET] Sending post_order request to CLOB...")
             resp = self._clob().post_order(signed, OrderType.FOK)
+            logger.info("[SELL MARKET] RAW response from post_order: %s", json.dumps(resp, default=str))
             logger.info("<<< SELL MARKET response: %s", json.dumps(resp, default=str))
             return resp
         except Exception as e:
@@ -345,7 +423,6 @@ class PolymarketClient:
     def get_open_orders(self) -> List[Dict[str, Any]]:
         """Get all open orders for the authenticated user."""
         try:
-            from py_clob_client.clob_types import OpenOrderParams
             orders = self._clob().get_orders(OpenOrderParams())
             logger.info("Open orders: %d", len(orders) if orders else 0)
             return orders or []
@@ -462,10 +539,6 @@ class PolymarketClient:
                         "note": "Conditional token balance/allowance requires a specific tokenId (asset_id). Skipped in generic wallet summary."
                     }
                     continue
-
-                # Prefer typed params object. Passing a dict can break on some SDK versions
-                # with errors like: "'dict' object has no attribute 'signature_type'".
-                from py_clob_client.clob_types import BalanceAllowanceParams
 
                 if hasattr(client, "get_balance_allowance"):
                     resp = client.get_balance_allowance(BalanceAllowanceParams(asset_type=asset_type))

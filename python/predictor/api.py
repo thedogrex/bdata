@@ -39,6 +39,7 @@ from predictor import poly_service
 from predictor import live_trading
 from predictor import telegram_bot
 from predictor import predict_4s
+from predictor import polymarket_redeemer
 from predictor.binance_snapshot import start_snapshot_collector, stop_snapshot_collector
 import app.config as config
 
@@ -266,6 +267,9 @@ async def startup_event():
     asyncio.create_task(poly_service.poll_loop(poly_stop_event, orderbook_interval_sec=3))
     telegram_bot.start_polling()
     start_snapshot_collector()
+    # Start auto-redeem if enabled
+    if getattr(config, "POLY_AUTO_REDEEM_ENABLED", False):
+        polymarket_redeemer.start_auto_redeem()
 
 
 @app.on_event("shutdown")
@@ -277,6 +281,7 @@ async def shutdown_event():
         poly_stop_event.set()
     await telegram_bot.stop_polling()
     await stop_snapshot_collector()
+    polymarket_redeemer.stop_auto_redeem()
 
 
 @app.get("/api/poly/markets")
@@ -1101,6 +1106,14 @@ async def api_live_order_flow(
     fee_pct: float | None = Query(3.6, description="Fee percentage applied to winning payouts"),
 ):
     return await live_trading.order_flow_analytics(date_from=date_from, date_to=date_to, fee_pct=fee_pct)
+
+
+@app.post("/api/poly/live/redeem_all")
+async def api_live_redeem_all(force: bool = Query(False, description="Bypass redeem cooldown")):
+    """Redeem all resolved Polymarket positions via builder relayer."""
+    result = await polymarket_redeemer.redeem_all_positions(force=force)
+    status_code = 200 if result.get("success") else (429 if result.get("cooldown") else 400)
+    return JSONResponse(status_code=status_code, content=result)
 
 
 # ==================== 4S-EARLY PREDICTIONS ====================

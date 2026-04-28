@@ -2207,43 +2207,47 @@ async def predict_for_market(
 
 
 async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
+    logger.info("[auto_trade] START slug=%s prediction=%s", slug, prediction)
     try:
         pred = str(prediction or "").upper()
         emulate_down = bool(getattr(config, "EMULATE_DOWN", False))
+        logger.info("[auto_trade] emulate_down=%s pred_before=%s", emulate_down, pred)
         if pred == "UNDEFINED" and emulate_down:
-            logger.info("[auto_trade] emulate DOWN for undefined prediction", {"slug": slug})
+            logger.info("[auto_trade] EMULATE DOWN for undefined slug=%s", slug)
             pred = "DOWN"
         if pred not in ("UP", "DOWN"):
-            logger.info("[auto_trade] skip: invalid prediction", {"slug": slug, "prediction": pred})
+            logger.info("[auto_trade] SKIP: invalid prediction slug=%s pred=%s", slug, pred)
             return
 
         live_settings = await get_live_trade_settings()
-        if not live_settings.get("auto_place"):
-            logger.info("[auto_trade] skip: auto_place disabled", {"slug": slug})
+        auto_place = live_settings.get("auto_place")
+        logger.info("[auto_trade] settings: auto_place=%s live_settings=%s", auto_place, live_settings)
+        if not auto_place:
+            logger.info("[auto_trade] SKIP: auto_place disabled slug=%s", slug)
             return
 
         # Trade only future markets
         m_row = await db.fetchone("SELECT ts, closed FROM poly_markets WHERE slug=%s", (slug,))
         if not m_row:
-            logger.info("[auto_trade] skip: market metadata missing", {"slug": slug})
+            logger.info("[auto_trade] SKIP: market metadata missing slug=%s", slug)
             return
         market_ts = int(m_row[0]) if m_row[0] is not None else 0
         closed = int(m_row[1]) if len(m_row) > 1 and m_row[1] is not None else 0
         if closed:
-            logger.info("[auto_trade] skip: market already closed", {"slug": slug})
+            logger.info("[auto_trade] SKIP: market already closed slug=%s", slug)
             return
         now_utc = int(time.time())
         if not (market_ts and now_utc < market_ts):
             logger.info(
-                "[auto_trade] skip: market not in future",
-                {"slug": slug, "market_ts": market_ts, "now": now_utc},
+                "[auto_trade] SKIP: market not in future slug=%s market_ts=%s now=%s",
+                slug, market_ts, now_utc
             )
             return
 
         # Resolve outcome asset_id for side
         o_rows = await db.fetchall("SELECT asset_id, name FROM poly_outcomes WHERE slug=%s", (slug,))
         if not o_rows:
-            logger.info("[auto_trade] skip: no outcomes found", {"slug": slug})
+            logger.info("[auto_trade] SKIP: no outcomes found slug=%s", slug)
             return
         up_id = None
         down_id = None
@@ -2260,14 +2264,14 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
 
         asset_id = down_id if pred == "DOWN" else up_id
         if not asset_id:
-            logger.info("[auto_trade] skip: missing asset_id for outcome", {"slug": slug, "prediction": pred})
+            logger.info("[auto_trade] SKIP: missing asset_id slug=%s pred=%s", slug, pred)
             return
 
         # Import here to avoid circular imports
         from predictor import live_trading
 
         if pred not in ("UP", "DOWN"):
-            logger.info("[auto_trade] skip: non-tradable prediction", {"slug": slug, "prediction": pred})
+            logger.info("[auto_trade] SKIP: non-tradable prediction slug=%s pred=%s", slug, pred)
             return
 
         bet_size_usd = float(live_settings.get("bet_size_usd", DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"]) or DEFAULT_LIVE_TRADE_SETTINGS["bet_size_usd"])
@@ -2277,14 +2281,8 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
         price_threshold = price_cap_cents / 100.0
 
         logger.info(
-            "[auto_trade] placing order",
-            {
-                "slug": slug,
-                "prediction": pred,
-                "bet_size_usd": bet_size_usd,
-                "price_cap_cents": price_cap_cents,
-                "asset_id": asset_id,
-            },
+            "[auto_trade] PLACING ORDER slug=%s pred=%s bet=$%.2f price_cap=%d asset=%s...",
+            slug, pred, bet_size_usd, price_cap_cents, asset_id[:16]
         )
 
         result = await live_trading.buy_after_prediction(
@@ -2298,9 +2296,9 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
             template_id=None,
             enable_price_wait=True,
         )
-        logger.info("[auto_trade] order result", {"slug": slug, "result": result})
+        logger.info("[auto_trade] ORDER RESULT slug=%s result=%s", slug, result)
     except Exception as e:
-        logger.exception("[auto_trade] exception", exc_info=e)
+        logger.exception("[auto_trade] EXCEPTION slug=%s: %s", slug, e)
         return
 
 

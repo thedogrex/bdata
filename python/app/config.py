@@ -36,6 +36,8 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return False
     return bool(default)
 
+POLY_AUTO_REDEEM_ENABLED: bool = _env_bool("POLY_AUTO_REDEEM_ENABLED", False)
+
 
 EMULATE_DOWN: bool = _env_bool("EMULATE_DOWN", False)
 

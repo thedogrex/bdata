@@ -913,6 +913,7 @@ async def buy_after_prediction(
 
             response: Optional[Dict[str, Any]] = None
             try:
+                print(f'try to submit order')
                 response = await _submit_market_order(
                     slug=slug,
                     asset_id=asset_id,

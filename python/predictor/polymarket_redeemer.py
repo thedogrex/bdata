@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import math
 import os
@@ -114,8 +115,30 @@ def _normalize_condition_id(cid: str) -> str:
     return cid.lower()
 
 
-def _fetch_redeemable_positions(funder: str) -> List[Dict[str, Any]]:
-    params = {"user": funder, "redeemable": "true", "sizeThreshold": 1}
+def _parse_date(date_val) -> datetime:
+    """Parse various date formats from API."""
+    if not date_val:
+        return datetime.min
+    if isinstance(date_val, (int, float)):
+        return datetime.fromtimestamp(date_val)
+    if isinstance(date_val, str):
+        # Try ISO format first
+        try:
+            return datetime.fromisoformat(date_val.replace('Z', '+00:00').replace('+00:00', ''))
+        except ValueError:
+            pass
+        # Try timestamp string
+        try:
+            return datetime.fromtimestamp(float(date_val))
+        except (ValueError, TypeError):
+            pass
+    return datetime.min
+
+
+def _fetch_redeemable_positions(funder: str, max_positions: int = 30) -> List[Dict[str, Any]]:
+    print(f'[redeem] fetching redeemable positions for {funder} ------------------------------------')
+    print(f'[redeem] Will sort by date and return last {max_positions} positions')
+    params = {"user": funder, "redeemable": "true", "sizeThreshold": 0,  'limit': 30, 'sortBy': 'TITLE', 'sortDirection' :'DESC'}
     for attempt in range(2):
         resp = requests.get(DATA_API_URL, params=params, timeout=15)
         if resp.status_code in (429, 1015):
@@ -128,8 +151,40 @@ def _fetch_redeemable_positions(funder: str) -> List[Dict[str, Any]]:
         if not isinstance(data, list):
             logger.warning("Unexpected positions payload: %s", data)
             return []
-        filtered = [p for p in data if float(p.get("size", 0) or 0) > 0]
-        return filtered
+
+        print(f'[redeem] -----------------------------------------------------------')
+        
+        # Filter positions with size > 0 AND currentValue > 0 (has actual value to redeem)
+        filtered = [
+            p for p in data 
+            if float(p.get("size", 0) or 0) > 0 
+            and float(p.get("currentValue", 0) or 0) > 0
+        ]
+        print(f'[redeem] After filtering size>0 AND currentValue>0: {len(filtered)}/{len(data)} positions remain')
+
+        # Sort by date (newest first) - try multiple date fields
+        def get_date_key(p):
+            for field in ['endDate', 'end_date', 'expiration', 'expirationDate', 'timestamp', 'updatedAt', 'createdAt']:
+                if field in p and p[field]:
+                    return _parse_date(p[field])
+            return datetime.min
+        
+        sorted_positions = sorted(filtered, key=get_date_key, reverse=True)
+        print(f'[redeem] Sorted by date (newest first)')
+        
+        # Limit to last N positions
+        limited = sorted_positions[:max_positions]
+        print(f'[redeem] Taking last {max_positions} positions: {len(limited)} positions selected')
+        
+        for p in limited:
+            cid = p.get("conditionId") or p.get("condition_id", "N/A")
+            title = p.get("title") or p.get("question", "Unknown")
+            size = p.get("size", 0)
+            current_value = p.get("currentValue", 0)
+            end_date = p.get("endDate") or p.get("end_date", "N/A")
+            print(f'  - {title[:35]:<35} | endDate={str(end_date)[:10]:<10} | size={size:>8} | currentValue={current_value}')
+        print(f'[redeem] -----------------------------------------------------------')
+        return limited
     raise RuntimeError("Data API rate limit exceeded while fetching positions")
 
 
@@ -162,27 +217,121 @@ def _neg_risk_amounts(pos: Dict[str, Any]) -> List[int]:
     return amounts
 
 
-def _execute_with_retry(client: RelayClient, txn: SafeTransaction, label: str) -> None:
+def _execute_with_retry(client: RelayClient, txn: SafeTransaction, label: str) -> Dict[str, Any]:
+    """Execute transaction and return detailed response info."""
     for attempt in range(2):
         try:
+            print(f'[redeem] Calling relayer execute for: {label}')
             resp = client.execute([txn], label)
+            print(f'[redeem] Waiting for transaction confirmation...')
             resp.wait()
-            return
+            
+            # Extract response details
+            result = {
+                "status": "success",
+                "label": label,
+            }
+            
+            # Print ALL available attributes and their values for debugging
+            print(f'[redeem] ===== Response Object Details =====')
+            attrs = [attr for attr in dir(resp) if not attr.startswith('_') and not callable(getattr(resp, attr))]
+            for attr in attrs:
+                try:
+                    val = getattr(resp, attr)
+                    if attr in ('transaction_hash', 'tx_hash', 'hash', 'transaction_id', 'status', 'block_number', 'receipt'):
+                        print(f'[redeem] {attr}: {val}')
+                except Exception as e:
+                    print(f'[redeem] {attr}: <error accessing: {e}>')
+            print(f'[redeem] ====================================')
+            
+            # Try to get transaction hash
+            tx_hash = None
+            if hasattr(resp, 'transaction_hash') and resp.transaction_hash:
+                tx_hash = resp.transaction_hash
+            elif hasattr(resp, 'hash') and resp.hash:
+                tx_hash = resp.hash
+            elif hasattr(resp, 'tx_hash') and resp.tx_hash:
+                tx_hash = resp.tx_hash
+            
+            if tx_hash:
+                result["transaction_hash"] = tx_hash
+                print(f'[redeem] ✅ Transaction confirmed! Hash: {tx_hash}')
+            else:
+                print(f'[redeem] ✅ Transaction confirmed (no hash found)')
+            
+            # Try to get transaction_id
+            if hasattr(resp, 'transaction_id') and resp.transaction_id:
+                result["transaction_id"] = resp.transaction_id
+                print(f'[redeem] Transaction ID: {resp.transaction_id}')
+            
+            # Try to get status
+            if hasattr(resp, 'status'):
+                result["tx_status"] = resp.status
+                print(f'[redeem] Status: {resp.status}')
+            
+            # Try to get receipt/block info directly from attributes
+            if hasattr(resp, 'receipt') and resp.receipt:
+                receipt = resp.receipt
+                result["receipt"] = receipt
+                print(f'[redeem] Receipt (from attr): {json.dumps(receipt, indent=2, default=str)[:800]}')
+            
+            if hasattr(resp, 'block_number') and resp.block_number:
+                result["block_number"] = resp.block_number
+                print(f'[redeem] Block number (from attr): {resp.block_number}')
+            
+            # Try to call get_transaction() if available (for fill details)
+            if hasattr(resp, 'get_transaction') and callable(resp.get_transaction):
+                print(f'[redeem] Calling get_transaction() for fill details...')
+                try:
+                    tx_details = resp.get_transaction()
+                    print(f'[redeem] Transaction details: {json.dumps(tx_details, indent=2, default=str)[:1000]}')
+                    result["transaction_details"] = tx_details
+                    
+                    # Try to extract fill/gas info from tx details
+                    if isinstance(tx_details, dict):
+                        if 'gasUsed' in tx_details:
+                            print(f'[redeem] Gas used: {tx_details["gasUsed"]}')
+                        if 'effectiveGasPrice' in tx_details:
+                            print(f'[redeem] Gas price: {tx_details["effectiveGasPrice"]}')
+                        if 'logs' in tx_details:
+                            print(f'[redeem] Number of event logs: {len(tx_details["logs"])}')
+                except Exception as get_tx_err:
+                    print(f'[redeem] get_transaction() failed: {get_tx_err}')
+            
+            print(f'[redeem] ===== End Response Details =====')
+            
+            return result
+            
         except Exception as exc:  # noqa: BLE001
             status = getattr(exc, "status_code", None)
+            error_msg = str(exc)
+            print(f'[redeem] ❌ Transaction failed (attempt {attempt+1}): {error_msg}')
+            
             if status in (429, 1015) and attempt == 0:
                 logger.warning("Relayer rate limited (status=%s). Waiting %ss before retrying...", status, RELAYER_RETRY_WAIT_SEC)
                 time.sleep(RELAYER_RETRY_WAIT_SEC)
                 continue
+            
+            # Print exception details
+            print(f'[redeem] Exception type: {type(exc).__name__}')
+            if hasattr(exc, 'response'):
+                try:
+                    print(f'[redeem] Error response: {exc.response.text if hasattr(exc.response, "text") else exc.response}')
+                except Exception:
+                    pass
             raise
+    raise RuntimeError("Relayer rate limit exceeded")
 
 
 def _redeem_positions_sync() -> Dict[str, Any]:
     settings = _load_settings()
     client = _build_client(settings)
+    
+    # Configurable max positions to redeem per run (sorted by date, newest first)
+    max_positions = int(os.getenv("POLY_REDEEM_MAX_POSITIONS", "30"))
 
     start_ts = time.time()
-    positions = _fetch_redeemable_positions(settings.funder_address)
+    positions = _fetch_redeemable_positions(settings.funder_address, max_positions=max_positions)
     details: List[Dict[str, Any]] = []
 
     if not positions:
@@ -223,18 +372,22 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                     data="0x" + (NEG_RISK_REDEEM_SELECTOR + args).hex(),
                     value="0",
                 )
+                print(f'NEGRISK=TRUE creating safe transaction REDEEM CTF: {txn}')
             elif neg_risk is False:
                 args = eth_encode(
                     ["address", "bytes32", "bytes32", "uint256[]"],
                     [USDC_ADDRESS, b"\x00" * 32, condition_bytes, [1, 2]],
                 )
+
                 txn = SafeTransaction(
                     to=CTF_ADDRESS,
                     operation=OperationType.Call,
                     data="0x" + (REDEEM_SELECTOR + args).hex(),
                     value="0",
                 )
+                print(f'NEGRISK=FALSE creating safe transaction REDEEM CTF: {txn}')
             else:
+                print(f'NEGRISK=UNKNPOWN creating safe transaction REDEEM')
                 details.append({
                     "status": "skipped",
                     "reason": "unknown_market_type",
@@ -245,15 +398,17 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                 continue
 
             label = f"redeem {cid[:12]}"
-            _execute_with_retry(client, txn, label)
+            tx_result = _execute_with_retry(client, txn, label)
             redeemed += 1
             details.append({
                 "status": "redeemed",
                 "condition_id": cid,
                 "market": market,
                 "negativeRisk": neg_risk,
+                "transaction_hash": tx_result.get("transaction_hash") if tx_result else None,
+                "block_number": tx_result.get("block_number") if tx_result else None,
             })
-            logger.info("Redeemed %s", market)
+            logger.info("Redeemed %s (tx_hash=%s)", market, tx_result.get("transaction_hash") if tx_result else "unknown")
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to redeem %s: %s", market, exc)
             details.append({

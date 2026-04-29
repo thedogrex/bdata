@@ -821,7 +821,7 @@ function walletOnBetPctInput(){
   const input = document.getElementById('wallet-bet-pct-input');
   const preview = document.getElementById('wallet-bet-pct-preview');
   if(!input || !preview) return;
-  const pct = Math.max(0.001, Math.min(20, Number(input.value)||0));
+  const pct = Math.max(0.001, Number(input.value)||0);
   if(Number.isFinite(Number(walletBankSnapshot?.bank_usd))){
     const bet = Number(walletBankSnapshot.bank_usd) * (pct/100);
     preview.textContent = `$${bet.toFixed(2)}`;
@@ -834,7 +834,7 @@ async function walletConfirmBetPct(){
   const input = document.getElementById('wallet-bet-pct-input');
   const statusEl = document.getElementById('wallet-bet-pct-status');
   if(!input) return;
-  const pct = Math.max(0.001, Math.min(20, Number(input.value)||0));
+  const pct = Math.max(0.001, Number(input.value)||0);
   walletBetPct = pct;
   if(statusEl){
     statusEl.textContent = 'Saving…';

@@ -56,7 +56,7 @@ _low_cash_alert_sent = False
 LOW_CASH_THRESHOLD_MULTIPLIER = 4.0
 
 BET_SIZE_PCT_MIN = 0.001
-BET_SIZE_PCT_MAX = 0.2
+BET_SIZE_PCT_MAX = 1
 DEFAULT_LIVE_TRADE_SETTINGS = {
     "auto_place": False,
     "bet_size_usd": 5.0,
@@ -2213,9 +2213,10 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
         pred = str(prediction or "").upper()
         emulate = getattr(config, "EMULATE", "NONE")
         logger.info("[auto_trade] emulate=%s pred_before=%s", emulate, pred)
-        if pred == "UNDEFINED" and emulate in ("UP", "DOWN"):
-            logger.info("[auto_trade] EMULATE %s for undefined slug=%s", emulate, slug)
+
+        if emulate in ("UP", "DOWN"):
             pred = emulate
+
         if pred not in ("UP", "DOWN"):
             logger.info("[auto_trade] SKIP: invalid prediction slug=%s pred=%s", slug, pred)
             return

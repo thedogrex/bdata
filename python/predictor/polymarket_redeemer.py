@@ -18,6 +18,7 @@ from py_builder_signing_sdk.config import BuilderApiKeyCreds, BuilderConfig as B
 
 USDC_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"  # pUSD
 USDC_E_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e (bridged)
+ONRAMP_ADDRESS = "0x93070a847efEf7F70739046A929D47a521F5B8ee"  # Collateral Onramp for wrapping
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 
@@ -32,6 +33,7 @@ REDEEM_SELECTOR = keccak(text="redeemPositions(address,bytes32,bytes32,uint256[]
 NEG_RISK_REDEEM_SELECTOR = keccak(text="redeemPositions(bytes32,uint256[])")[:4]
 PAYOUT_NUMERATOR_SELECTOR = keccak(text="payoutNumerators(bytes32,uint256)")[:4]
 PAYOUT_DENOMINATOR_SELECTOR = keccak(text="payoutDenominator(bytes32)")[:4]
+WRAP_SELECTOR = keccak(text="wrap(address,address,uint256)")[:4]
 ERC1155_BALANCE_SELECTOR = bytes.fromhex("00fdd58e")
 ERC20_BALANCE_SELECTOR = keccak(text="balanceOf(address)")[:4]
 
@@ -554,6 +556,62 @@ def _check_collateral_balances(wallet: str) -> dict:
     }
 
 
+def _wrap_usdc_e_to_pusd(client: RelayClient, amount: int, wallet: str, settings: RedeemerSettings) -> dict:
+    """Wrap USDC.e to pUSD using the ONRAMP contract via relayer."""
+    print(f"[wrap] Wrapping {amount / 1e6:.6f} USDC.e → pUSD to {wallet[:12]}...")
+    
+    # Step 1: Approve ONRAMP to spend USDC.e
+    approve_selector = keccak(text="approve(address,uint256)")[:4]
+    approve_args = eth_encode(["address", "uint256"], [ONRAMP_ADDRESS, amount])
+    approve_data = "0x" + (approve_selector + approve_args).hex()
+    
+    approve_txn = SafeTransaction(
+        to=USDC_E_ADDRESS,
+        operation=OperationType.Call,
+        data=approve_data,
+        value="0",
+    )
+    
+    try:
+        print("[wrap] Approving ONRAMP to spend USDC.e...")
+        approve_result = _execute_with_retry(client, approve_txn, "approve_onramp")
+        if not approve_result.get("transaction_hash"):
+            return {"ok": False, "error": "Approve failed"}
+        print(f"[wrap] ✅ Approved")
+    except Exception as e:
+        return {"ok": False, "error": f"Approve error: {e}"}
+    
+    time.sleep(2)
+    
+    # Step 2: Wrap USDC.e → pUSD
+    wrap_args = eth_encode(["address", "address", "uint256"], [USDC_E_ADDRESS, wallet, amount])
+    wrap_data = "0x" + (WRAP_SELECTOR + wrap_args).hex()
+    
+    wrap_txn = SafeTransaction(
+        to=ONRAMP_ADDRESS,
+        operation=OperationType.Call,
+        data=wrap_data,
+        value="0",
+    )
+    
+    try:
+        print("[wrap] Executing wrap transaction...")
+        wrap_result = _execute_with_retry(client, wrap_txn, "wrap_usdc_e")
+        
+        # Check for failure in response
+        resp_str = str(wrap_result).lower()
+        if "failed" in resp_str or "revert" in resp_str:
+            return {"ok": False, "error": "Transaction reverted on-chain"}
+        
+        if wrap_result.get("transaction_hash"):
+            print(f"[wrap] ✅ Wrapped successfully: {wrap_result['transaction_hash']}")
+            return {"ok": True, "hash": wrap_result["transaction_hash"]}
+        else:
+            return {"ok": False, "error": "No transaction hash returned"}
+    except Exception as e:
+        return {"ok": False, "error": f"Wrap error: {e}"}
+
+
 def _redeem_positions_sync() -> Dict[str, Any]:
     settings = _load_settings()
     client = _build_client(settings)
@@ -698,7 +756,7 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                 
                 args = eth_encode(
                     ["address", "bytes32", "bytes32", "uint256[]"],
-                    [USDC_ADDRESS, parent_collection, condition_bytes, index_sets],
+                    [USDC_E_ADDRESS, parent_collection, condition_bytes, index_sets],
                 )
                 
                 full_data = "0x" + (REDEEM_SELECTOR + args).hex()
@@ -772,7 +830,7 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                         print(f'[redeem] USDC.e received: {usdc_e_change} (was {usdc_e_before}, now {usdc_e_after})')
                 else:
                     print(f'[redeem] ❌ Token balance unchanged - redemption failed. Check payout vector vs indexSets.')
-                    print(f'[redeem]    Tried indexSets={index_sets} with pUSD, but position still has {balance_after} tokens')
+                    print(f'[redeem]    Tried indexSets={index_sets} with USDC.e, but position still has {balance_after} tokens')
                     print(f'[redeem]    Collateral unchanged: pUSD={pusd_before}->{pusd_after}, USDC.e={usdc_e_before}->{usdc_e_after}')
                     
                     # Retry with alternative indexSets if available
@@ -780,10 +838,10 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                         alt_tried = True
                         print(f'[redeem] 🔄 RETRYING with alternative indexSets={alt_index_sets} (was {index_sets})')
                         
-                        # Build alternative redeem transaction with pUSD
+                        # Build alternative redeem transaction with USDC.e
                         alt_args = eth_encode(
                             ["address", "bytes32", "bytes32", "uint256[]"],
-                            [USDC_ADDRESS, parent_collection, condition_bytes, alt_index_sets],
+                            [USDC_E_ADDRESS, parent_collection, condition_bytes, alt_index_sets],
                         )
                         alt_txn = SafeTransaction(
                             to=CTF_ADDRESS,
@@ -807,37 +865,6 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                         else:
                             print(f'[redeem] ❌ Alternative indexSets also failed. Position still has {balance_after_alt} tokens')
                     
-                    # If still not redeemed, try with USDC.e as collateral
-                    if balance_after >= balance_before and not usdc_e_tried:
-                        usdc_e_tried = True
-                        print(f'[redeem] 🔄 RETRYING with USDC.e collateral (was pUSD)')
-                        
-                        # Build redeem transaction with USDC.e
-                        usdce_args = eth_encode(
-                            ["address", "bytes32", "bytes32", "uint256[]"],
-                            [USDC_E_ADDRESS, parent_collection, condition_bytes, index_sets],
-                        )
-                        usdce_txn = SafeTransaction(
-                            to=CTF_ADDRESS,
-                            operation=OperationType.Call,
-                            data="0x" + (REDEEM_SELECTOR + usdce_args).hex(),
-                            value="0",
-                        )
-                        
-                        usdce_label = f"redeem_usdce {cid[:12]}"
-                        usdce_result = _execute_with_retry(client, usdce_txn, usdce_label)
-                        
-                        # Check balance after USDC.e retry
-                        balance_after_usdce = _check_position_token_balance(asset_id, proxy_wallet)
-                        collateral_usdce = _check_collateral_balances(proxy_wallet)
-                        print(f'[redeem] Position token balance AFTER USDC.e retry: {balance_after_usdce}')
-                        
-                        if balance_after_usdce < balance_after:
-                            print(f'[redeem] ✅ USDC.e redemption worked! Tokens burned: {balance_after - balance_after_usdce}')
-                            tx_result = usdce_result
-                            balance_after = balance_after_usdce
-                        else:
-                            print(f'[redeem] ❌ USDC.e redemption also failed. Position still has {balance_after_usdce} tokens')
             
             redeemed += 1
             details.append({
@@ -858,14 +885,60 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                 "error": str(exc),
             })
 
+    # Wrap USDC.e to pUSD after redemption completes
+    wrap_result = None
+    try:
+        print(f"[redeem] ===== WRAPPING USDC.e → pUSD =====")
+        
+        # Get target wallet (proxy if using sig_type=1, else funder)
+        target_wallet = settings.funder_address
+        if settings.signature_type == 1:
+            for attr in ["address", "proxy_address", "wallet_address"]:
+                if hasattr(client, attr):
+                    val = getattr(client, attr)
+                    if val:
+                        target_wallet = val
+                        break
+        
+        print(f"[redeem] Target wallet for wrap: {target_wallet[:12]}...")
+        
+        # Check USDC.e balance
+        usdc_e_balance = _check_usdc_e_balance(target_wallet)
+        print(f"[redeem] USDC.e balance before wrap: {usdc_e_balance / 1e6:.6f}")
+        
+        if usdc_e_balance > 10000:  # Only wrap if > 0.01 USDC.e
+            amount_to_wrap = usdc_e_balance - 10000  # Keep 0.01 buffer
+            wrap_result = _wrap_usdc_e_to_pusd(client, amount_to_wrap, target_wallet, settings)
+            
+            if wrap_result.get("ok"):
+                # Check final pUSD balance
+                final_pusd = _check_pusd_balance(target_wallet)
+                final_usdc_e = _check_usdc_e_balance(target_wallet)
+                print(f"[redeem] pUSD after wrap: {final_pusd / 1e6:.6f}")
+                print(f"[redeem] USDC.e after wrap: {final_usdc_e / 1e6:.6f}")
+            else:
+                print(f"[redeem] ⚠️ Wrap failed: {wrap_result.get('error')}")
+        else:
+            print(f"[redeem] No USDC.e to wrap (balance: {usdc_e_balance / 1e6:.6f})")
+        
+        print(f"[redeem] ===== WRAP COMPLETE =====")
+    except Exception as e:
+        print(f"[redeem] ⚠️ Wrap error: {e}")
+        wrap_result = {"ok": False, "error": str(e)}
+
     duration = time.time() - start_ts
-    return {
+    result = {
         "success": True,
         "positions_found": len(positions),
         "redeemed": redeemed,
         "details": details,
         "duration_sec": round(duration, 3),
     }
+    
+    if wrap_result:
+        result["wrap"] = wrap_result
+    
+    return result
 
 
 def _cooldown_remaining(now: float) -> float:

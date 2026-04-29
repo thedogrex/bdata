@@ -16,7 +16,8 @@ from py_builder_relayer_client.client import RelayClient
 from py_builder_relayer_client.models import OperationType, RelayerTxType, SafeTransaction
 from py_builder_signing_sdk.config import BuilderApiKeyCreds, BuilderConfig as BuilderSigningConfig
 
-USDC_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+USDC_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"  # pUSD
+USDC_E_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e (bridged)
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 
@@ -523,6 +524,36 @@ def _check_pusd_balance(wallet: str) -> int:
         return -1
 
 
+def _check_usdc_e_balance(wallet: str) -> int:
+    try:
+        selector = ERC20_BALANCE_SELECTOR.hex()
+        addr = wallet[2:].lower().zfill(64)
+        data = "0x" + selector + addr
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "eth_call",
+            "params": [{"to": USDC_E_ADDRESS, "data": data}, "latest"],
+        }
+        resp = _call_polygon_rpc(payload)
+        if not resp or "result" not in resp:
+            return -1
+        balance = int(resp["result"], 16)
+        print(f"[redeem] USDC.e balance check for {wallet[:12]}...: {balance}")
+        return balance
+    except Exception as exc:
+        print(f"[redeem] Failed to read USDC.e balance: {exc}")
+        return -1
+
+
+def _check_collateral_balances(wallet: str) -> dict:
+    """Check both pUSD and USDC.e balances."""
+    return {
+        "pUSD": _check_pusd_balance(wallet),
+        "USDC.e": _check_usdc_e_balance(wallet),
+    }
+
+
 def _redeem_positions_sync() -> Dict[str, Any]:
     settings = _load_settings()
     client = _build_client(settings)
@@ -655,7 +686,7 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                 print(f'[redeem] Proxy wallet holding tokens: {proxy_wallet}')
                 print(f'[redeem] Condition ID: {cid}')
                 print(f'[redeem] CTF Contract: {CTF_ADDRESS}')
-                print(f'[redeem] pUSD/USDC Address: {USDC_ADDRESS}')
+                print(f'[redeem] Collateral tokens: pUSD={USDC_ADDRESS}, USDC.e={USDC_E_ADDRESS}')
                 
                 # Build redeem transaction - no approval needed, we own the position tokens
                 parent_collection = b"\x00" * 32  # Root collection (empty)
@@ -707,8 +738,10 @@ def _redeem_positions_sync() -> Dict[str, Any]:
             # Check position token balance before redemption
             asset_id = pos.get("asset", "")
             proxy_wallet = pos.get("proxyWallet", settings.funder_address)
-            # Pre-redemption checks
-            pusd_before = _check_pusd_balance(proxy_wallet)
+            # Pre-redemption checks - check both pUSD and USDC.e
+            collateral_balances_before = _check_collateral_balances(proxy_wallet)
+            pusd_before = collateral_balances_before["pUSD"]
+            usdc_e_before = collateral_balances_before["USDC.e"]
             if asset_id and asset_id != "N/A":
                 print(f'[redeem] ===== CHECKING TOKEN LOCATIONS =====')
                 balances = _check_token_balance_in_locations(asset_id, proxy_wallet, settings.funder_address)
@@ -720,24 +753,34 @@ def _redeem_positions_sync() -> Dict[str, Any]:
             
             # Check position token balance after redemption
             alt_tried = False
+            usdc_e_tried = False
             if asset_id and asset_id != "N/A":
                 balance_after = _check_position_token_balance(asset_id, proxy_wallet)
                 print(f'[redeem] Position token balance AFTER: {balance_after}')
-                pusd_after = _check_pusd_balance(proxy_wallet)
+                collateral_balances_after = _check_collateral_balances(proxy_wallet)
+                pusd_after = collateral_balances_after["pUSD"]
+                usdc_e_after = collateral_balances_after["USDC.e"]
+                
                 if balance_after < balance_before:
                     print(f'[redeem] ✅ Position tokens burned! Amount: {balance_before - balance_after}')
-                    print(f'[redeem] pUSD change: {pusd_after - pusd_before} (was {pusd_before}, now {pusd_after})')
+                    # Determine which collateral was received
+                    pusd_change = pusd_after - pusd_before
+                    usdc_e_change = usdc_e_after - usdc_e_before
+                    if pusd_change > 0:
+                        print(f'[redeem] pUSD received: {pusd_change} (was {pusd_before}, now {pusd_after})')
+                    if usdc_e_change > 0:
+                        print(f'[redeem] USDC.e received: {usdc_e_change} (was {usdc_e_before}, now {usdc_e_after})')
                 else:
                     print(f'[redeem] ❌ Token balance unchanged - redemption failed. Check payout vector vs indexSets.')
-                    print(f'[redeem]    Tried indexSets={index_sets}, but position still has {balance_after} tokens')
-                    print(f'[redeem]    pUSD unchanged: {pusd_before} -> {pusd_after}')
+                    print(f'[redeem]    Tried indexSets={index_sets} with pUSD, but position still has {balance_after} tokens')
+                    print(f'[redeem]    Collateral unchanged: pUSD={pusd_before}->{pusd_after}, USDC.e={usdc_e_before}->{usdc_e_after}')
                     
                     # Retry with alternative indexSets if available
                     if alt_index_sets and not alt_tried:
                         alt_tried = True
                         print(f'[redeem] 🔄 RETRYING with alternative indexSets={alt_index_sets} (was {index_sets})')
                         
-                        # Build alternative redeem transaction
+                        # Build alternative redeem transaction with pUSD
                         alt_args = eth_encode(
                             ["address", "bytes32", "bytes32", "uint256[]"],
                             [USDC_ADDRESS, parent_collection, condition_bytes, alt_index_sets],
@@ -754,17 +797,47 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                         
                         # Check balance after retry
                         balance_after_alt = _check_position_token_balance(asset_id, proxy_wallet)
-                        pusd_after_alt = _check_pusd_balance(proxy_wallet)
+                        collateral_alt = _check_collateral_balances(proxy_wallet)
                         print(f'[redeem] Position token balance AFTER retry: {balance_after_alt}')
                         
                         if balance_after_alt < balance_after:
                             print(f'[redeem] ✅ Alternative indexSets worked! Tokens burned: {balance_after - balance_after_alt}')
-                            print(f'[redeem] pUSD change: {pusd_after_alt - pusd_after} (was {pusd_after}, now {pusd_after_alt})')
                             tx_result = alt_result
                             balance_after = balance_after_alt
-                            pusd_after = pusd_after_alt
                         else:
                             print(f'[redeem] ❌ Alternative indexSets also failed. Position still has {balance_after_alt} tokens')
+                    
+                    # If still not redeemed, try with USDC.e as collateral
+                    if balance_after >= balance_before and not usdc_e_tried:
+                        usdc_e_tried = True
+                        print(f'[redeem] 🔄 RETRYING with USDC.e collateral (was pUSD)')
+                        
+                        # Build redeem transaction with USDC.e
+                        usdce_args = eth_encode(
+                            ["address", "bytes32", "bytes32", "uint256[]"],
+                            [USDC_E_ADDRESS, parent_collection, condition_bytes, index_sets],
+                        )
+                        usdce_txn = SafeTransaction(
+                            to=CTF_ADDRESS,
+                            operation=OperationType.Call,
+                            data="0x" + (REDEEM_SELECTOR + usdce_args).hex(),
+                            value="0",
+                        )
+                        
+                        usdce_label = f"redeem_usdce {cid[:12]}"
+                        usdce_result = _execute_with_retry(client, usdce_txn, usdce_label)
+                        
+                        # Check balance after USDC.e retry
+                        balance_after_usdce = _check_position_token_balance(asset_id, proxy_wallet)
+                        collateral_usdce = _check_collateral_balances(proxy_wallet)
+                        print(f'[redeem] Position token balance AFTER USDC.e retry: {balance_after_usdce}')
+                        
+                        if balance_after_usdce < balance_after:
+                            print(f'[redeem] ✅ USDC.e redemption worked! Tokens burned: {balance_after - balance_after_usdce}')
+                            tx_result = usdce_result
+                            balance_after = balance_after_usdce
+                        else:
+                            print(f'[redeem] ❌ USDC.e redemption also failed. Position still has {balance_after_usdce} tokens')
             
             redeemed += 1
             details.append({

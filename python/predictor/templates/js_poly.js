@@ -100,7 +100,7 @@ const POLY_PRED_UPDATES_CURSOR_KEY = 'poly_pred_updates_cursor_v1';
 let polyPredUpdatesPollTimer = null;
 let polyPredUpdatesInFlight = false;
 
-let polyEmulateDown = false;
+let polyEmulate = 'NONE';  // 'UP', 'DOWN', or 'NONE' (default)
 
 let polyBetSizeRequestPollTimer = null;
 let polyBetSizePendingState = null;
@@ -155,7 +155,7 @@ async function polyPollPredUpdates(){
     for(const u of updates){
       const slug = u?.slug;
       const rawPred = String(u?.prediction_outcome || '').toUpperCase();
-      const pred = (rawPred === 'UNDEFINED' && polyEmulateDown) ? 'DOWN' : rawPred;
+      const pred = (rawPred === 'UNDEFINED' && (polyEmulate === 'UP' || polyEmulate === 'DOWN')) ? polyEmulate : rawPred;
       const pts = u?.prediction_ts ? Number(u.prediction_ts) : null;
       const ts = u?.ts ? Number(u.ts) : null;
       if(!slug || !(pred === 'UP' || pred === 'DOWN')) continue;
@@ -166,7 +166,7 @@ async function polyPollPredUpdates(){
       if(polyLastConfirmPromptKey === promptKey) continue;
       polyLastConfirmPromptKey = promptKey;
 
-      console.log('[pred_updates] new prediction', u, {rawPred, pred, emulate_down: polyEmulateDown});
+      console.log('[pred_updates] new prediction', u, {rawPred, pred, emulate: polyEmulate});
       try{ if(!polySelectedMarketSlug || polySelectedMarketSlug !== slug){ await selectPolyMarket(slug); } }catch(e){}
       await polyPlaceLiveOrderAfterPrediction(slug, pred, null);
       break;
@@ -1356,7 +1356,7 @@ async function loadPolyMarkets(){
       const st=await fetch(API+'/api/poly/status');
       const s=await st.json();
       polyActiveTs = s.active_ts||null;
-      polyEmulateDown = !!s.emulate_down;
+      polyEmulate = (s.emulate || 'NONE').toUpperCase();
       polyNeedConfirmation = (s.need_confirmation === undefined || s.need_confirmation === null) ? true : !!s.need_confirmation;
       if(polyLastActiveTs !== null && polyActiveTs !== null && polyActiveTs !== polyLastActiveTs){
         // Autopredict disabled on timers.

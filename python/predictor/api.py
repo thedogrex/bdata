@@ -293,7 +293,7 @@ async def api_poly_markets(limit: int = Query(50), offset: int = Query(0)):
 async def api_poly_status():
     return {
         "active_ts": poly_service.current_active_ts(),
-        "emulate_down": bool(getattr(config, "EMULATE_DOWN", False)),
+        "emulate": getattr(config, "EMULATE", "NONE"),
         "need_confirmation": bool(getattr(config, "NEED_CONFIRMATION", True)),
     }
 

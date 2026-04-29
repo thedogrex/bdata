@@ -38,8 +38,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 POLY_AUTO_REDEEM_ENABLED: bool = _env_bool("POLY_AUTO_REDEEM_ENABLED", False)
 
+# Wallet and trading credentials
+POLY_PRIVATE_KEY: str = os.getenv("POLY_PRIVATE_KEY", "")
+POLY_FUNDER: str = os.getenv("POLY_FUNDER", "")
+POLY_BUILDER_API_KEY: str = os.getenv("POLY_BUILDER_API_KEY", "")
+POLY_BUILDER_API_SECRET: str = os.getenv("POLY_BUILDER_API_SECRET", "")
+POLY_BUILDER_API_PASSPHRASE: str = os.getenv("POLY_BUILDER_API_PASSPHRASE", "")
 
-EMULATE_DOWN: bool = _env_bool("EMULATE_DOWN", False)
+EMULATE: str = os.getenv("EMULATE", "NONE").upper()  # 'UP', 'DOWN', or 'NONE' (default)
 
 NEED_CONFIRMATION: bool = _env_bool("NEED_CONFIRMATION", True)
 

@@ -344,9 +344,9 @@ async def _place_order_4s(slug: str, prediction: str) -> None:
     """Place a live order into poly_live_orders with is_4s_early=1."""
     try:
         pred = str(prediction or "").upper()
-        emulate_down = bool(getattr(config, "EMULATE_DOWN", False))
-        if pred == "UNDEFINED" and emulate_down:
-            pred = "DOWN"
+        emulate = getattr(config, "EMULATE", "NONE")
+        if pred == "UNDEFINED" and emulate in ("UP", "DOWN"):
+            pred = emulate
         if pred not in ("UP", "DOWN"):
             return
 

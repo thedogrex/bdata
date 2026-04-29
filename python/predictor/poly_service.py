@@ -1449,8 +1449,9 @@ async def list_prediction_updates(since_ts: int = 0, limit: int = 20) -> Dict[st
     since_ts = int(since_ts or 0)
     limit = max(1, min(100, int(limit or 20)))
 
-    emulate_down = bool(getattr(config, "EMULATE_DOWN", False))
-    outcomes_sql = "('UP','DOWN','UNDEFINED')" if emulate_down else "('UP','DOWN')"
+    emulate = getattr(config, "EMULATE", "NONE")
+    include_undefined = emulate in ("UP", "DOWN")
+    outcomes_sql = "('UP','DOWN','UNDEFINED')" if include_undefined else "('UP','DOWN')"
 
     rows = await db.fetchall(
         """
@@ -1486,7 +1487,7 @@ async def list_prediction_updates(since_ts: int = 0, limit: int = 20) -> Dict[st
         "since": since_ts,
         "cursor": max_ts,
         "updates": updates,
-        "emulate_down": emulate_down,
+        "emulate": emulate,
     }
 
 
@@ -2210,11 +2211,11 @@ async def _auto_trade_after_prediction(slug: str, prediction: str) -> None:
     logger.info("[auto_trade] START slug=%s prediction=%s", slug, prediction)
     try:
         pred = str(prediction or "").upper()
-        emulate_down = bool(getattr(config, "EMULATE_DOWN", False))
-        logger.info("[auto_trade] emulate_down=%s pred_before=%s", emulate_down, pred)
-        if pred == "UNDEFINED" and emulate_down:
-            logger.info("[auto_trade] EMULATE DOWN for undefined slug=%s", slug)
-            pred = "DOWN"
+        emulate = getattr(config, "EMULATE", "NONE")
+        logger.info("[auto_trade] emulate=%s pred_before=%s", emulate, pred)
+        if pred == "UNDEFINED" and emulate in ("UP", "DOWN"):
+            logger.info("[auto_trade] EMULATE %s for undefined slug=%s", emulate, slug)
+            pred = emulate
         if pred not in ("UP", "DOWN"):
             logger.info("[auto_trade] SKIP: invalid prediction slug=%s pred=%s", slug, pred)
             return

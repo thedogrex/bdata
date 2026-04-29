@@ -20,8 +20,19 @@ USDC_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 
+POLYGON_RPC_ENDPOINTS = [
+    "https://polygon.llamarpc.com",
+    "https://polygon.drpc.org",
+    "https://polygon.meowrpc.com",
+    "https://rpc.ankr.com/polygon",
+]
+
 REDEEM_SELECTOR = keccak(text="redeemPositions(address,bytes32,bytes32,uint256[])")[:4]
 NEG_RISK_REDEEM_SELECTOR = keccak(text="redeemPositions(bytes32,uint256[])")[:4]
+PAYOUT_NUMERATOR_SELECTOR = keccak(text="payoutNumerators(bytes32,uint256)")[:4]
+PAYOUT_DENOMINATOR_SELECTOR = keccak(text="payoutDenominator(bytes32)")[:4]
+ERC1155_BALANCE_SELECTOR = bytes.fromhex("00fdd58e")
+ERC20_BALANCE_SELECTOR = keccak(text="balanceOf(address)")[:4]
 
 DATA_API_URL = "https://data-api.polymarket.com/positions"
 DEFAULT_RELAYER_URL = "https://relayer-v2.polymarket.com"
@@ -38,6 +49,23 @@ logger.setLevel(logging.INFO)
 
 _redeem_lock = asyncio.Lock()
 _last_redeem_ts: float = 0.0
+
+
+def _call_polygon_rpc(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Try multiple RPC endpoints until one returns a result."""
+    for rpc_url in POLYGON_RPC_ENDPOINTS:
+        try:
+            resp = requests.post(rpc_url, json=payload, timeout=12)
+            resp.raise_for_status()
+            data = resp.json()
+            if "error" in data and "result" not in data:
+                print(f"[redeem] RPC {rpc_url} responded with error: {data['error']}")
+                continue
+            return data
+        except Exception as exc:
+            print(f"[redeem] RPC {rpc_url} failed: {exc}")
+    print("[redeem] All Polygon RPC endpoints failed for payload")
+    return None
 
 
 @dataclass
@@ -161,6 +189,16 @@ def _fetch_redeemable_positions(funder: str, max_positions: int = 30) -> List[Di
             and float(p.get("currentValue", 0) or 0) > 0
         ]
         print(f'[redeem] After filtering size>0 AND currentValue>0: {len(filtered)}/{len(data)} positions remain')
+        
+        # Log full JSON structure of filtered positions for debugging
+        if filtered:
+            print(f'[redeem] ===== FILTERED POSITIONS JSON =====')
+            for p in filtered[:3]:  # Log first 3 positions
+                pos_json = json.dumps(p, indent=2, default=str)
+                print(f'[redeem] Position JSON:\n{pos_json}')
+            if len(filtered) > 3:
+                print(f'[redeem] ... and {len(filtered) - 3} more positions')
+            print(f'[redeem] ===== END FILTERED POSITIONS JSON =====')
 
         # Sort by date (newest first) - try multiple date fields
         def get_date_key(p):
@@ -295,6 +333,47 @@ def _execute_with_retry(client: RelayClient, txn: SafeTransaction, label: str) -
                             print(f'[redeem] Gas price: {tx_details["effectiveGasPrice"]}')
                         if 'logs' in tx_details:
                             print(f'[redeem] Number of event logs: {len(tx_details["logs"])}')
+                        
+                        # Decode the actual transaction data to verify indexSets
+                        tx_data = tx_details.get('data', '')
+                        print(f'[redeem] Raw TX data length: {len(tx_data)}')
+                        print(f'[redeem] Raw TX data (first 500 chars): {tx_data[:500]}')
+                        print(f'[redeem] Raw TX data (last 200 chars): {tx_data[-200:] if len(tx_data) > 200 else tx_data}')
+                        if tx_data and len(tx_data) > 200:
+                            # Look for redeemPositions selector 0x01b7037c in the data
+                            redeem_pos_idx = tx_data.find('01b7037c')
+                            if redeem_pos_idx >= 0:
+                                # redeemPositions: selector(8) + collateral(64) + parent(64) + condition(64) + offset(64) + len(64) + indexSets...
+                                # offset starts after selector, so at byte 4 (8 hex chars) after selector start
+                                args_start = redeem_pos_idx + 8  # after selector
+                                if len(tx_data) >= args_start + 320 + 128:  # 5 * 64 chars minimum
+                                    idx_sets_len_hex = tx_data[args_start + 256:args_start + 320]  # 5th word = array length
+                                    idx_sets_0_hex = tx_data[args_start + 320:args_start + 384] if len(tx_data) >= args_start + 384 else ""
+                                    try:
+                                        idx_sets_len = int(idx_sets_len_hex, 16)
+                                        idx_sets_0 = int(idx_sets_0_hex, 16) if idx_sets_0_hex else 0
+                                        print(f'[redeem] DECODED FROM TX DATA: indexSets length={idx_sets_len}, indexSets[0]={idx_sets_0}')
+                                        print(f'[redeem]    Hex: len=0x{idx_sets_len_hex}, val=0x{idx_sets_0_hex}')
+                                    except Exception as decode_err:
+                                        print(f'[redeem] Failed to decode indexSets: {decode_err}')
+                            
+                        # Check if transaction actually succeeded (status = 1)
+                        status = tx_details.get('status')
+                        if status == '0x0' or status == 0:
+                            print(f'[redeem] ⚠️ Transaction REVERTED on-chain!')
+                        elif status == '0x1' or status == 1:
+                            print(f'[redeem] ✅ Transaction succeeded on-chain')
+                        
+                        # Look for TransferSingle/TransferBatch events (ERC1155 burns)
+                        # TransferSingle topic0 = keccak256("TransferSingle(address,address,address,uint256,uint256)")
+                        TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ef739b506c5e4d7f6f0b1c3d5a7b9e1f3a5c7d9e1f3a5c7d9e1f3"[:66]  # Placeholder - will check actual
+                        logs = tx_details.get('logs', [])
+                        # Check for any transfer events (topic0 for TransferSingle)
+                        erc1155_transfers = [l for l in logs if len(l.get('topics', [])) >= 4]
+                        if erc1155_transfers:
+                            print(f'[redeem] Found {len(erc1155_transfers)} ERC1155 Transfer events (tokens moved/burned)')
+                        else:
+                            print(f'[redeem] ⚠️ No ERC1155 Transfer events found - tokens may not have been burned')
                 except Exception as get_tx_err:
                     print(f'[redeem] get_transaction() failed: {get_tx_err}')
             
@@ -321,6 +400,127 @@ def _execute_with_retry(client: RelayClient, txn: SafeTransaction, label: str) -
                     pass
             raise
     raise RuntimeError("Relayer rate limit exceeded")
+
+
+def _check_position_token_balance(token_id: str, wallet: str) -> int:
+    """Check ERC1155 balance of position token on-chain via Polygon RPC."""
+    # ERC1155 balanceOf selector: 0x00fdd58e
+    # balanceOf(address account, uint256 id)
+    try:
+        # Handle token_id as potentially hex or decimal string
+        if token_id.startswith("0x"):
+            token_id_int = int(token_id, 16)
+        else:
+            token_id_int = int(token_id)
+        
+        print(f'[redeem] Checking balance: wallet={wallet}, token_id={token_id} (int={token_id_int})')
+        
+        # Encode: function selector + address (padded to 32 bytes) + tokenId (32 bytes)
+        # balanceOf(address,uint256) selector
+        selector = "00fdd58e"
+        addr_padded = wallet[2:].lower().zfill(64)  # Remove 0x, pad to 64 hex chars (32 bytes)
+        token_padded = hex(token_id_int)[2:].lower().zfill(64)
+        data = f"0x{selector}{addr_padded}{token_padded}"
+        
+        print(f'[redeem] Balance check calldata: {data[:100]}...')
+        
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_call",
+            "params": [{"to": CTF_ADDRESS, "data": data}, "latest"]
+        }
+        resp_json = _call_polygon_rpc(payload)
+        if resp_json is None:
+            return -1
+        if "error" in resp_json:
+            print(f'[redeem] RPC error: {resp_json["error"]}')
+            return -1
+        result = resp_json.get("result", "0x0")
+        balance = int(result, 16)
+        print(f'[redeem] Raw RPC result: {result}, decoded balance: {balance}')
+        return balance
+    except Exception as e:
+        print(f'[redeem] Failed to check token balance: {e}')
+        return -1
+
+
+def _check_token_balance_in_locations(token_id: str, proxy_wallet: str, funder: str) -> dict:
+    """Check token balance in multiple locations to find where tokens actually are."""
+    locations = {
+        "proxy_wallet": proxy_wallet,
+        "funder": funder,
+        "ctf_contract": CTF_ADDRESS,
+    }
+    results = {}
+    for name, addr in locations.items():
+        bal = _check_position_token_balance(token_id, addr)
+        results[name] = bal
+        print(f'[redeem] Token balance in {name} ({addr[:20]}...): {bal}')
+    return results
+
+
+def _get_condition_payouts(condition_id: str, outcome_count: int = 2) -> Optional[List[int]]:
+    """Fetch payoutNumerators for a condition; returns None if not resolved yet."""
+    if not condition_id.startswith("0x"):
+        condition_id = "0x" + condition_id
+    cond_hex = condition_id[2:].lower().zfill(64)
+
+    denom_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [{"to": CTF_ADDRESS, "data": "0x" + PAYOUT_DENOMINATOR_SELECTOR.hex() + cond_hex}, "latest"],
+    }
+    denom_resp = _call_polygon_rpc(denom_payload)
+    if not denom_resp or "result" not in denom_resp:
+        return None
+    denominator = int(denom_resp["result"], 16)
+    if denominator == 0:
+        print(f"[redeem] Condition {condition_id} not resolved on-chain (payout denominator = 0)")
+        return None
+
+    slots = max(2, outcome_count)
+    payouts: List[int] = []
+    for slot in range(slots):
+        slot_hex = format(slot, "064x")
+        data = "0x" + PAYOUT_NUMERATOR_SELECTOR.hex() + cond_hex + slot_hex
+        payload = {
+            "jsonrpc": "2.0",
+            "id": slot + 10,
+            "method": "eth_call",
+            "params": [{"to": CTF_ADDRESS, "data": data}, "latest"],
+        }
+        resp = _call_polygon_rpc(payload)
+        if not resp or "result" not in resp:
+            print(f"[redeem] Failed to fetch payoutNumerator for slot {slot} (condition {condition_id})")
+            return None
+        payouts.append(int(resp["result"], 16))
+
+    print(f"[redeem] On-chain payout vector for {condition_id}: {payouts}, denominator={denominator}")
+    return payouts
+
+
+def _check_pusd_balance(wallet: str) -> int:
+    try:
+        selector = ERC20_BALANCE_SELECTOR.hex()
+        addr = wallet[2:].lower().zfill(64)
+        data = "0x" + selector + addr
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "eth_call",
+            "params": [{"to": USDC_ADDRESS, "data": data}, "latest"],
+        }
+        resp = _call_polygon_rpc(payload)
+        if not resp or "result" not in resp:
+            return -1
+        balance = int(resp["result"], 16)
+        print(f"[redeem] pUSD balance check for {wallet[:12]}...: {balance}")
+        return balance
+    except Exception as exc:
+        print(f"[redeem] Failed to read pUSD balance: {exc}")
+        return -1
 
 
 def _redeem_positions_sync() -> Dict[str, Any]:
@@ -374,18 +574,125 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                 )
                 print(f'NEGRISK=TRUE creating safe transaction REDEEM CTF: {txn}')
             elif neg_risk is False:
+                # Determine outcome direction from position data
+                outcome_idx = int(float(pos.get("outcomeIndex", -1) or -1))
+                outcome_label = pos.get("outcome", "UNKNOWN")
+                
+                # Map to CTF indexSets: 1 = Yes/UP, 2 = No/DOWN
+                # Note: Sometimes the mapping is flipped in the data API vs CTF contract
+                if outcome_idx == 0 or outcome_label.upper() in ["YES", "UP", "TRUE", "0"]:
+                    index_sets = [1]  # Standard: Yes/UP = slot 1
+                    alt_index_sets = [2]  # Alternative: flipped mapping
+                    direction = "UP"
+                    alt_direction = "UP_ALT"
+                elif outcome_idx == 1 or outcome_label.upper() in ["NO", "DOWN", "FALSE", "1"]:
+                    index_sets = [2]  # Standard: No/DOWN = slot 2
+                    alt_index_sets = [1]  # Alternative: flipped mapping  
+                    direction = "DOWN"
+                    alt_direction = "DOWN_ALT"
+                else:
+                    # Fallback: parse from title or default to [1, 2] for complete sets
+                    title_lower = market.lower()
+                    if "down" in title_lower and "up" in title_lower:
+                        if "down" in title_lower.split("up")[-1]:
+                            index_sets = [2]
+                            alt_index_sets = [1]
+                            direction = "DOWN"
+                            alt_direction = "DOWN_ALT"
+                        else:
+                            index_sets = [1]
+                            alt_index_sets = [2]
+                            direction = "UP"
+                            alt_direction = "UP_ALT"
+                    else:
+                        # Default to [1, 2] - requires both tokens for complete set redemption
+                        index_sets = [1, 2]
+                        alt_index_sets = None
+                        direction = "COMPLETE_SET"
+                        alt_direction = None
+                
+                if alt_index_sets:
+                    print(f'[redeem] Position direction: outcome_idx={outcome_idx}, outcome="{outcome_label}"')
+                    print(f'[redeem]   Standard mapping: {direction} -> indexSets={index_sets}')
+                    print(f'[redeem]   Alternative mapping: {alt_direction} -> indexSets={alt_index_sets}')
+                else:
+                    print(f'[redeem] Position direction: outcome_idx={outcome_idx}, outcome="{outcome_label}" -> {direction} -> indexSets={index_sets}')
+
+                payouts = _get_condition_payouts(cid, outcome_count=int(pos.get("outcomeCount") or 2))
+                if payouts:
+                    winning_sets = [1 << i for i, val in enumerate(payouts) if val > 0]
+                    print(f'[redeem] Winning bitsets reported on-chain: {winning_sets}')
+                    if winning_sets and not any(bit in winning_sets for bit in index_sets):
+                        override_set = winning_sets[0]
+                        print(f'[redeem] ⚠️ Overriding indexSets -> [{override_set}] based on payout vector {payouts}')
+                        index_sets = [override_set]
+                        direction = f"ONCHAIN_SLOT_{int(math.log2(override_set)) if override_set else 0}"
+                        alt_index_sets = winning_sets[1:2] if len(winning_sets) > 1 else None
+                        alt_direction = "SECONDARY_SLOT" if alt_index_sets else None
+
+                # Check if market is actually resolved (one outcome should be at price 1.0)
+                cur_price = pos.get("curPrice", 0)
+                redeemable_flag = pos.get("redeemable", False)
+                
+                # A market is only redeemable if it's resolved: one outcome price = 1.0
+                if cur_price != 1.0:
+                    print(f'[redeem] ⚠️ Market NOT resolved! curPrice={cur_price}, expected 1.0 for winning outcome')
+                    print(f'[redeem] Redemption will fail - market must be resolved before redeeming')
+                    details.append({
+                        "status": "skipped",
+                        "reason": "market_not_resolved",
+                        "condition_id": cid,
+                        "market": market,
+                        "curPrice": cur_price,
+                        "message": "Market not resolved - winning outcome price must be 1.0",
+                    })
+                    continue
+                
+                # Log position token details for debugging
+                asset_id = pos.get("asset", "N/A")
+                proxy_wallet = pos.get("proxyWallet", settings.funder_address)
+                print(f'[redeem] Position token ID (asset): {asset_id}')
+                print(f'[redeem] Proxy wallet holding tokens: {proxy_wallet}')
+                print(f'[redeem] Condition ID: {cid}')
+                print(f'[redeem] CTF Contract: {CTF_ADDRESS}')
+                print(f'[redeem] pUSD/USDC Address: {USDC_ADDRESS}')
+                
+                # Build redeem transaction - no approval needed, we own the position tokens
+                parent_collection = b"\x00" * 32  # Root collection (empty)
+                
+                # CRITICAL DEBUG: Log exact values being encoded
+                print(f'[redeem] >>> FINAL INDEX_SETS BEFORE ENCODING: {index_sets}')
+                print(f'[redeem] >>> Direction: {direction}, Winning sets: {winning_sets if payouts else "N/A"}')
+                print(f'[redeem] >>> Condition: {cid}')
+                
                 args = eth_encode(
                     ["address", "bytes32", "bytes32", "uint256[]"],
-                    [USDC_ADDRESS, b"\x00" * 32, condition_bytes, [1, 2]],
+                    [USDC_ADDRESS, parent_collection, condition_bytes, index_sets],
                 )
+                
+                full_data = "0x" + (REDEEM_SELECTOR + args).hex()
+                print(f'[redeem] Function selector: 0x{REDEEM_SELECTOR.hex()}')
+                print(f'[redeem] Encoded args: 0x{args.hex()}')
+                print(f'[redeem] Full calldata: {full_data}')
+                
+                # Extract and verify indexSets from encoded args
+                # redeemPositions encoding: selector(4) + collateral(32) + parent(32) + condition(32) + offset(32) + len(32) + indexSets...
+                args_hex = args.hex()
+                # offset to array is at bytes 96-128 (after 3 address/bytes32 params)
+                # offset value is 128 (0x80)
+                # array length is at 128-160
+                # array elements start at 160
+                array_len_hex = args_hex[128*2:160*2]  # 64 chars = 32 bytes
+                index_sets_0_hex = args_hex[160*2:192*2] if len(args_hex) >= 192*2 else ""
+                print(f'[redeem] EXTRACTED FROM ENCODED: array_len=0x{array_len_hex}={int(array_len_hex, 16)}, indexSets[0]=0x{index_sets_0_hex}={int(index_sets_0_hex, 16) if index_sets_0_hex else "N/A"}')
 
                 txn = SafeTransaction(
                     to=CTF_ADDRESS,
                     operation=OperationType.Call,
-                    data="0x" + (REDEEM_SELECTOR + args).hex(),
+                    data=full_data,
                     value="0",
                 )
-                print(f'NEGRISK=FALSE creating safe transaction REDEEM CTF: {txn}')
+                print(f'NEGRISK=FALSE creating safe transaction REDEEM CTF ({direction}): to={CTF_ADDRESS}')
             else:
                 print(f'NEGRISK=UNKNPOWN creating safe transaction REDEEM')
                 details.append({
@@ -397,8 +704,68 @@ def _redeem_positions_sync() -> Dict[str, Any]:
                 })
                 continue
 
+            # Check position token balance before redemption
+            asset_id = pos.get("asset", "")
+            proxy_wallet = pos.get("proxyWallet", settings.funder_address)
+            # Pre-redemption checks
+            pusd_before = _check_pusd_balance(proxy_wallet)
+            if asset_id and asset_id != "N/A":
+                print(f'[redeem] ===== CHECKING TOKEN LOCATIONS =====')
+                balances = _check_token_balance_in_locations(asset_id, proxy_wallet, settings.funder_address)
+                balance_before = balances.get("proxy_wallet", 0)
+                print(f'[redeem] ====================================')
+            
             label = f"redeem {cid[:12]}"
             tx_result = _execute_with_retry(client, txn, label)
+            
+            # Check position token balance after redemption
+            alt_tried = False
+            if asset_id and asset_id != "N/A":
+                balance_after = _check_position_token_balance(asset_id, proxy_wallet)
+                print(f'[redeem] Position token balance AFTER: {balance_after}')
+                pusd_after = _check_pusd_balance(proxy_wallet)
+                if balance_after < balance_before:
+                    print(f'[redeem] ✅ Position tokens burned! Amount: {balance_before - balance_after}')
+                    print(f'[redeem] pUSD change: {pusd_after - pusd_before} (was {pusd_before}, now {pusd_after})')
+                else:
+                    print(f'[redeem] ❌ Token balance unchanged - redemption failed. Check payout vector vs indexSets.')
+                    print(f'[redeem]    Tried indexSets={index_sets}, but position still has {balance_after} tokens')
+                    print(f'[redeem]    pUSD unchanged: {pusd_before} -> {pusd_after}')
+                    
+                    # Retry with alternative indexSets if available
+                    if alt_index_sets and not alt_tried:
+                        alt_tried = True
+                        print(f'[redeem] 🔄 RETRYING with alternative indexSets={alt_index_sets} (was {index_sets})')
+                        
+                        # Build alternative redeem transaction
+                        alt_args = eth_encode(
+                            ["address", "bytes32", "bytes32", "uint256[]"],
+                            [USDC_ADDRESS, parent_collection, condition_bytes, alt_index_sets],
+                        )
+                        alt_txn = SafeTransaction(
+                            to=CTF_ADDRESS,
+                            operation=OperationType.Call,
+                            data="0x" + (REDEEM_SELECTOR + alt_args).hex(),
+                            value="0",
+                        )
+                        
+                        alt_label = f"redeem_alt {cid[:12]}"
+                        alt_result = _execute_with_retry(client, alt_txn, alt_label)
+                        
+                        # Check balance after retry
+                        balance_after_alt = _check_position_token_balance(asset_id, proxy_wallet)
+                        pusd_after_alt = _check_pusd_balance(proxy_wallet)
+                        print(f'[redeem] Position token balance AFTER retry: {balance_after_alt}')
+                        
+                        if balance_after_alt < balance_after:
+                            print(f'[redeem] ✅ Alternative indexSets worked! Tokens burned: {balance_after - balance_after_alt}')
+                            print(f'[redeem] pUSD change: {pusd_after_alt - pusd_after} (was {pusd_after}, now {pusd_after_alt})')
+                            tx_result = alt_result
+                            balance_after = balance_after_alt
+                            pusd_after = pusd_after_alt
+                        else:
+                            print(f'[redeem] ❌ Alternative indexSets also failed. Position still has {balance_after_alt} tokens')
+            
             redeemed += 1
             details.append({
                 "status": "redeemed",

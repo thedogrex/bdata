@@ -148,3 +148,52 @@
     <div id="bc-table-full" class="card p-6 mb-4"></div>
     <div id="bc-summary" class="card p-6 mb-4"></div>
   </div>
+
+  <!-- ============ MODAL: BF PROFIT FINDER ============ -->
+  <div id="bf-profit-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60" onclick="if(event.target===this)bfCloseProfitModal()">
+    <div class="bg-slate-900 rounded-lg p-6 w-full max-w-4xl mx-4 max-h-[90vh] overflow-auto border border-slate-700">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h3 class="text-lg font-semibold">Bruteforce Profit Finder</h3>
+          <div id="bf-profit-label" class="text-xs text-slate-400 mt-1">Select a bruteforce session to begin.</div>
+        </div>
+        <button onclick="bfCloseProfitModal()" class="text-slate-400 hover:text-white text-2xl leading-none">&times;</button>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mt-4">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1" for="bf-profit-horizon">Horizon</label>
+          <input type="number" id="bf-profit-horizon" class="w-full" min="1" max="5" value="1">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1" for="bf-profit-bank">Starting Bank ($)</label>
+          <input type="number" id="bf-profit-bank" class="w-full" value="1000" min="10" step="10">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1" for="bf-profit-buy">Share Buy Price (¢)</label>
+          <input type="number" id="bf-profit-buy" class="w-full" value="52" min="1" max="99" step="0.5">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1" for="bf-profit-maxbet">Max Bet ($)</label>
+          <input type="number" id="bf-profit-maxbet" class="w-full" value="500" min="1" step="1">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1" for="bf-profit-betpct">Bet % of Bank (½ Kelly)</label>
+          <input type="number" id="bf-profit-betpct" class="w-full" value="1.70" min="0" max="20" step="0.05">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1" for="bf-profit-fee">Fee per Bet (%)</label>
+          <input type="number" id="bf-profit-fee" class="w-full" value="1.56" min="0" max="10" step="0.05">
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1" for="bf-profit-monthly">Min Accuracy Per Month (%)</label>
+          <input type="number" id="bf-profit-monthly" class="w-full" placeholder="51" min="0" max="100" step="0.5">
+        </div>
+      </div>
+      <div class="flex items-center gap-3 flex-wrap mt-4">
+        <button id="bf-profit-run-btn" onclick="bfRunProfitFinder()" class="btn btn-purple">Analyze Profit</button>
+        <button onclick="bfClearProfitResults()" class="btn btn-slate text-sm">Reset</button>
+        <div id="bf-profit-meta" class="text-xs text-slate-400"></div>
+      </div>
+      <div id="bf-profit-results" class="mt-4 text-sm text-slate-300"></div>
+    </div>
+  </div>

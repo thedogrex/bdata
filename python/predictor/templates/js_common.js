@@ -1171,11 +1171,14 @@ async function stopBf(bfId){
 
 // ===== HISTORY =====
 const histBfState={};
+const histBfSessionMeta={};
 
 // Standalone (non-BF) compare mode
 let histStandaloneCompareMode = false;
-let histStandaloneCompareSelected = new Set();
+let histStandaloneCompareSelected = null;
+let histStandaloneCompareModeSeq = 0;
 let histStandaloneRunCache = {}; // runId -> run (as returned by /api/history)
+const bfProfitModalState = { bfId: null, lastResponse: null };
 
 // Helper: shorten params for display (sorted keys, no vowels, tiny font)
 function histShortParams(params){
@@ -1410,6 +1413,182 @@ async function histSetBfWin(bfId, win){
   histRenderBfBody(bfId);
 }
 
+function bfOpenProfitModal(bfId){
+  const modal=document.getElementById('bf-profit-modal');
+  if(!modal){return;}
+  bfProfitModalState.bfId=bfId;
+  const meta=histBfSessionMeta[bfId]||{};
+  const label=document.getElementById('bf-profit-label');
+  if(label){
+    const horizonLabel=meta && meta.horizon!=null?`H${meta.horizon}`:'H?';
+    label.textContent=`BF#${bfId} · ${meta.strategy || 'unknown'} · ${horizonLabel}`;
+  }
+  const horizonInput=document.getElementById('bf-profit-horizon');
+  if(horizonInput){
+    const hVal=(meta && meta.horizon!=null)?meta.horizon:parseInt(horizonInput.value,10)||1;
+    horizonInput.value=hVal;
+  }
+  const metaEl=document.getElementById('bf-profit-meta');
+  if(metaEl){
+    const spanStart=meta && meta.test_start?meta.test_start:'?';
+    const spanEnd=meta && meta.test_end?meta.test_end:'?';
+    const runCount=(meta && meta.run_count!=null)?meta.run_count:(meta && meta.completed!=null?meta.completed:'?');
+    metaEl.textContent=`Window ${spanStart} → ${spanEnd} · ${runCount || 0} recorded runs`;
+  }
+  bfClearProfitResults();
+  modal.classList.remove('hidden');
+}
+
+function bfCloseProfitModal(){
+  const modal=document.getElementById('bf-profit-modal');
+  if(modal) modal.classList.add('hidden');
+}
+
+function bfClearProfitResults(){
+  bfProfitModalState.lastResponse=null;
+  const container=document.getElementById('bf-profit-results');
+  if(container){
+    container.innerHTML='<div class="p-3 rounded bg-slate-800 text-slate-300 text-sm">Adjust bankroll inputs and click <b>Analyze Profit</b>.</div>';
+  }
+}
+
+async function bfRunProfitFinder(){
+  const bfId=bfProfitModalState.bfId;
+  if(!bfId){alert('Open the profit finder from a bruteforce session first.');return;}
+  const btn=document.getElementById('bf-profit-run-btn');
+  const setBtnState=(loading)=>{
+    if(!btn) return;
+    btn.disabled=loading;
+    btn.textContent=loading?'Analyzing…':'Analyze Profit';
+  };
+  const readNumber=(id, fallback)=>{
+    const el=document.getElementById(id);
+    if(!el) return fallback;
+    const val=parseFloat(el.value);
+    return Number.isFinite(val)?val:fallback;
+  };
+  const horizonRaw=document.getElementById('bf-profit-horizon');
+  const horizon=Math.max(1, parseInt(horizonRaw?.value,10)||1);
+  const startBank=readNumber('bf-profit-bank',1000);
+  const buyPrice=readNumber('bf-profit-buy',52);
+  const maxBet=Math.max(0, readNumber('bf-profit-maxbet',500));
+  const betPct=readNumber('bf-profit-betpct',1.70);
+  const feePct=readNumber('bf-profit-fee',1.56);
+  const minMonthlyRaw=document.getElementById('bf-profit-monthly')?.value||'';
+  const minMonthly=(minMonthlyRaw!=='' && !isNaN(parseFloat(minMonthlyRaw)))?parseFloat(minMonthlyRaw):null;
+  const payload={
+    horizon,
+    start_bank:startBank,
+    buy_price_cents:buyPrice,
+    max_bet:maxBet,
+    bet_pct:betPct,
+    fee_pct:feePct,
+    min_monthly_pct:minMonthly,
+    limit:300
+  };
+  setBtnState(true);
+  const container=document.getElementById('bf-profit-results');
+  if(container){container.innerHTML='<div class="p-3 rounded bg-slate-800 text-slate-300">Analyzing bruteforce runs…</div>';}
+  try{
+    const res=await fetch(API+`/api/history/bruteforce/${bfId}/profit`,{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)
+    });
+    const data=await res.json();
+    if(!res.ok || data.error){throw new Error(data.error||'Failed to simulate bankroll');}
+    bfProfitModalState.lastResponse=data;
+    bfRenderProfitResults(data);
+  }catch(err){
+    console.error(err);
+    if(container){container.innerHTML=`<div class="p-3 rounded bg-rose-900/60 text-rose-200 text-sm">${err?.message||'Profit analysis failed.'}</div>`;}
+  }finally{
+    setBtnState(false);
+  }
+}
+
+function bfRenderProfitResults(resp){
+  const container=document.getElementById('bf-profit-results');
+  if(!container) return;
+  const runs=Array.isArray(resp?.runs)?resp.runs:[];
+  const config=resp?.config||{};
+  if(!runs.length){
+    container.innerHTML='<div class="p-3 rounded bg-slate-800 text-slate-200 text-sm">No runs matched your filters. Try lowering the minimum monthly accuracy or adjusting bankroll inputs.</div>';
+    return;
+  }
+  const best=runs[0];
+  const startBank=Number(config.start_bank||1000);
+  const buyPrice=Number(config.buy_price_cents||52);
+  const betPct=Number(config.bet_pct||1.7);
+  const feePct=Number(config.fee_pct||1.56);
+  const maxBet=Number(config.max_bet||0);
+  const minMonthly=config.min_monthly_pct!=null?Number(config.min_monthly_pct):null;
+  const totalMatched=Number(resp?.total||runs.length);
+  const breakeven=(buyPrice||0).toFixed(2);
+  const bestProfit=typeof best.profit==='number'?best.profit:best.final_bank-startBank;
+  const roiClass=bestProfit>=0?'text-emerald-300':'text-rose-300';
+
+  const summary=`<div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+    <div class="p-3 rounded-lg border border-slate-700 bg-slate-900/60">
+      <div class="text-[11px] text-slate-400 uppercase">Best Final Bank</div>
+      <div class="text-xl font-semibold text-emerald-300">$${(best.final_bank||0).toFixed(2)}</div>
+      <div class="text-[11px] text-slate-500">Start $${startBank.toFixed(2)}</div>
+    </div>
+    <div class="p-3 rounded-lg border border-slate-700 bg-slate-900/60">
+      <div class="text-[11px] text-slate-400 uppercase">Profit</div>
+      <div class="text-xl font-semibold ${roiClass}">${bestProfit>=0?'+':''}$${bestProfit.toFixed(2)}</div>
+      <div class="text-[11px] text-slate-500">ROI ${(best.roi_pct||0).toFixed(1)}%</div>
+    </div>
+    <div class="p-3 rounded-lg border border-slate-700 bg-slate-900/60">
+      <div class="text-[11px] text-slate-400 uppercase">Inputs</div>
+      <div class="text-sm text-slate-200">Buy ${buyPrice.toFixed(2)}¢ · Bet ${betPct.toFixed(2)}% · Fee ${feePct.toFixed(2)}% · Max $${maxBet.toFixed(0)}</div>
+      <div class="text-[11px] text-slate-500">Breakeven accuracy ≥ ${breakeven}%</div>
+    </div>
+  </div>`;
+
+  const monthlyFilter=minMonthly!=null?`&nbsp;•&nbsp;Min monthly ${minMonthly.toFixed(1)}%`:'';
+  const metaEl=document.getElementById('bf-profit-meta');
+  if(metaEl){
+    metaEl.textContent=`Showing top ${runs.length} of ${totalMatched} runs${minMonthly!=null?` (monthly ≥ ${minMonthly.toFixed(1)}%)`:''}`;
+  }
+
+  function worstMonthlyAcc(run){
+    let worst=null;
+    (run.monthly||[]).forEach(m=>{
+      const signals=Number(m?.signals||0);
+      if(signals<=0) return;
+      const acc=Number(m?.accuracy||0);
+      if(worst===null || acc<worst){worst=acc;}
+    });
+    return worst;
+  }
+
+  let table='<div class="overflow-x-auto mt-4"><table><thead><tr><th>#</th><th>Run</th><th>Accuracy</th><th>Signals</th><th>Final Bank</th><th>ROI</th><th>Profit</th><th>Worst Month</th><th>Months</th><th></th></tr></thead><tbody>';
+  runs.forEach((run, idx)=>{
+    const profit=typeof run.profit==='number'?run.profit:(run.final_bank-startBank);
+    const roiClassRow=profit>=0?'text-green-400':'text-red-400';
+    const worst=worstMonthlyAcc(run);
+    const worstLabel=worst==null?'—':`${worst.toFixed(1)}%`;
+    const monthsCount=run.monthly?run.monthly.length:0;
+    table+=`<tr>
+      <td>${idx+1}</td>
+      <td class="text-xs">
+        <div class="font-semibold">#${run.id}</div>
+        <div class="text-slate-400">${run.strategy||''}</div>
+      </td>
+      <td class="${accClass(run.accuracy_pct)} font-bold">${(run.accuracy_pct||0).toFixed(1)}%</td>
+      <td>${run.signals||0}</td>
+      <td class="font-mono">$${(run.final_bank||0).toFixed(0)}</td>
+      <td class="font-bold ${roiClassRow}">${(run.roi_pct||0).toFixed(1)}%</td>
+      <td class="font-mono ${roiClassRow}">${profit>=0?'+':''}$${profit.toFixed(0)}</td>
+      <td class="text-xs ${worst!=null && minMonthly!=null && worst<minMonthly?'text-red-300':'text-slate-200'}">${worstLabel}</td>
+      <td class="text-xs text-slate-400">${monthsCount}</td>
+      <td><button onclick="event.stopPropagation();showDetail(${run.id})" class="text-blue-400 text-xs hover:underline">View</button></td>
+    </tr>`;
+  });
+  table+='</tbody></table></div>';
+
+  container.innerHTML=summary+table+`<div class="text-xs text-slate-500 mt-2">Simulation uses half-Kelly bankroll sizing with your inputs${monthlyFilter}.</div>`;
+}
+
 async function loadHistory(){
   histUpdateHorizonButtons();
   const strategy=document.getElementById('hist-strategy')?.value||'';
@@ -1428,6 +1607,7 @@ async function loadHistory(){
     ]);
     const allRuns=await runsRes.json();
     const bfSessions=await bfRes.json();
+    Object.keys(histBfSessionMeta).forEach(key=>delete histBfSessionMeta[key]);
     const el=document.getElementById('history-list');
 
     const standalone=Array.isArray(allRuns)?allRuns:[];
@@ -1453,13 +1633,15 @@ async function loadHistory(){
       const bestAcc=s.best_accuracy||0;
       const horizonLabel = s.horizon!=null ? `H${s.horizon}` : 'H?';
       const summaryRuns = (s.run_count!=null ? s.run_count : (s.completed||0));
+      histBfSessionMeta[bfId] = s || {};
       html+=`<details class="mb-3 p-3 rounded-lg" style="background:#0f172a;border:1px solid #334155" ontoggle="histOnToggleBf(${bfId},this)">
         <summary class="cursor-pointer flex items-center justify-between">
           <span><span class="badge badge-bf">BF#${bfId}</span> <b class="ml-2">${s.strategy}</b> <span class="text-slate-400 text-xs ml-2">${horizonLabel} · <span id="hist-bf-runcount-${bfId}">${summaryRuns}</span> runs</span></span>
           <span class="${accClass(bestAcc)} font-bold">Best: ${bestAcc}%</span>
         </summary>
-        <div class="flex items-center justify-end mt-2">
-          <button onclick="event.stopPropagation();deleteBruteforceGroup(${bfId})" class="text-red-400 text-xs hover:underline">remove pack</button>
+        <div class="flex items-center justify-between mt-2 flex-wrap gap-2">
+          <button onclick="event.stopPropagation();bfOpenProfitModal(${bfId})" class="btn btn-amber text-xs">Profit Finder</button>
+          <button onclick="event.stopPropagation();deleteBruteforceGroup(${bfId})" class="text-red-400 text-xs hover:underline ml-auto">remove pack</button>
         </div>
         <div id="hist-bf-body-${bfId}"></div>
       </details>`;

@@ -2,7 +2,7 @@ import json
 import datetime
 import time
 import logging
-from typing import Optional
+from typing import Optional, Any
 from db import DbProvider
 import app.config as config
 
@@ -17,6 +17,154 @@ def _safe_json_loads(val, default):
         return json.loads(val)
     except Exception:
         return default
+
+
+def _normalize_monthly_entries(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        month = str(entry.get("month") or "")
+        total = entry.get("total")
+        if total in (None, ""):
+            for key in ("signals", "taken", "baseline_total", "rsi_signals_count", "total_signals"):
+                if entry.get(key) not in (None, ""):
+                    total = entry.get(key)
+                    break
+        try:
+            total_int = int(total or 0)
+        except (TypeError, ValueError):
+            total_int = 0
+
+        wins = entry.get("wins")
+        if wins in (None, ""):
+            for key in ("correct", "filtered_correct", "baseline_correct", "good_regime_correct", "total_correct"):
+                if entry.get(key) not in (None, ""):
+                    wins = entry.get(key)
+                    break
+        try:
+            wins_int = int(wins or 0)
+        except (TypeError, ValueError):
+            wins_int = 0
+
+        accuracy = entry.get("accuracy")
+        if accuracy in (None, "") and total_int > 0:
+            accuracy = round(wins_int / total_int * 100.0, 2)
+        try:
+            accuracy_val = float(accuracy or 0.0)
+        except (TypeError, ValueError):
+            accuracy_val = 0.0
+
+        vol_skips = entry.get("volatility_skips")
+        if vol_skips in (None, ""):
+            vol_skips = entry.get("skipped") or entry.get("vol_skip") or 0
+        try:
+            vol_skips_int = int(vol_skips or 0)
+        except (TypeError, ValueError):
+            vol_skips_int = 0
+
+        normalized.append({
+            "month": month or "?",
+            "signals": total_int,
+            "wins": wins_int,
+            "accuracy": accuracy_val,
+            "volatility_skips": vol_skips_int,
+        })
+
+    normalized.sort(key=lambda item: item.get("month") or "")
+    return normalized
+
+
+def _monthly_passes_threshold(monthly: list[dict[str, Any]], threshold: float | None) -> bool:
+    if threshold is None:
+        return True
+    try:
+        thr_val = float(threshold)
+    except (TypeError, ValueError):
+        thr_val = None
+    if thr_val is None:
+        return True
+    for bucket in monthly:
+        signals = int(bucket.get("signals") or 0)
+        if signals <= 0:
+            continue
+        accuracy = float(bucket.get("accuracy") or 0.0)
+        if accuracy < thr_val:
+            return False
+    return True
+
+
+def simulate_monthly_profit(
+    monthly: list[dict[str, Any]],
+    *,
+    start_bank: float,
+    buy_price_cents: float,
+    max_bet: float,
+    bet_fraction: float,
+    fee_rate: float,
+) -> dict[str, Any]:
+    cost = max(0.0001, min(float(buy_price_cents or 0) / 100.0, 0.9999))
+    profit_per_share = 1.0 - cost
+    odds = profit_per_share / cost if cost > 0 else 0.0
+    fee = max(0.0, float(fee_rate or 0.0))
+    max_bet_val = max(0.0, float(max_bet or 0.0))
+    bet_frac = max(0.0, float(bet_fraction or 0.0))
+    bank = float(start_bank or 0.0)
+
+    def _sim_month(cur_bank: float, n_signals: int, win_prob: float) -> tuple[float, float, float, int]:
+        ev_per_dollar = (win_prob * odds) - (1 - win_prob)
+        avg_stake = 0.0
+        max_stake_used = 0.0
+        edge_signals = 0
+        if not (bet_frac > 0) or n_signals <= 0 or cur_bank <= 0:
+            return cur_bank, avg_stake, max_stake_used, edge_signals
+        for _ in range(n_signals):
+            raw_stake = cur_bank * bet_frac
+            stake_cap = max_bet_val if max_bet_val > 0 else raw_stake
+            stake = max(0.0, min(raw_stake, stake_cap, cur_bank))
+            if stake <= 0:
+                break
+            cur_bank += stake * ev_per_dollar
+            cur_bank -= stake * fee
+            if cur_bank < 0.01:
+                cur_bank = 0.01
+            avg_stake += stake
+            if stake > max_stake_used:
+                max_stake_used = stake
+            edge_signals += 1
+        if edge_signals:
+            avg_stake /= edge_signals
+        return cur_bank, avg_stake, max_stake_used, edge_signals
+
+    month_entries: list[dict[str, Any]] = []
+    for bucket in monthly:
+        signals = int(bucket.get("signals") or 0)
+        accuracy = float(bucket.get("accuracy") or 0.0)
+        win_prob = max(0.0, min(1.0, accuracy / 100.0))
+        bank, avg_stake, max_stake_used, edge_signals = _sim_month(bank, signals, win_prob)
+        month_entries.append({
+            "month": bucket.get("month") or "?",
+            "bank": round(bank, 2),
+            "signals": signals,
+            "accuracy": round(accuracy, 2),
+            "avg_stake": round(avg_stake, 2),
+            "max_stake": round(max_stake_used, 2),
+            "edge_signals": edge_signals,
+            "volatility_skips": bucket.get("volatility_skips", 0),
+        })
+
+    final_bank = round(bank, 2)
+    start_val = float(start_bank or 0.0)
+    profit = round(final_bank - start_val, 2)
+    roi_pct = round(((final_bank - start_val) / start_val * 100.0), 2) if start_val else 0.0
+    return {
+        "final_bank": final_bank,
+        "profit": profit,
+        "roi_pct": roi_pct,
+        "month_entries": month_entries,
+    }
 
 
 async def save_backtest_run(result: dict) -> int:
@@ -198,6 +346,49 @@ async def get_history(limit: int = 100, strategy: Optional[str] = None,
         if len(results) >= limit:
             break
         results.append(runs_map[run_id])
+    return results
+
+
+async def get_bf_runs_with_monthly(
+    bruteforce_id: int,
+    horizon: int = 1,
+    min_monthly_pct: float | None = None,
+) -> list[dict]:
+    rows = await db.fetchall(
+        """
+        SELECT r.id, r.strategy, r.params_json, r.window_size,
+               h.accuracy_pct, h.signals, h.correct, h.wrong,
+               h.volatility_skips, h.max_win_streak, h.max_lose_streak,
+               r.total_time_sec, r.created_at, h.monthly_json
+        FROM backtest_runs r
+        JOIN backtest_horizons h ON h.run_id = r.id
+        WHERE r.bruteforce_id = %s AND h.horizon = %s
+        ORDER BY r.id DESC
+        """,
+        (bruteforce_id, horizon),
+    )
+
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        monthly = _normalize_monthly_entries(_safe_json_loads(row[13], []))
+        if not _monthly_passes_threshold(monthly, min_monthly_pct):
+            continue
+        results.append({
+            "id": row[0],
+            "strategy": row[1],
+            "params": json.loads(row[2]) if row[2] else {},
+            "window_size": row[3],
+            "accuracy_pct": row[4],
+            "signals": row[5],
+            "correct": row[6],
+            "wrong": row[7],
+            "volatility_skips": row[8],
+            "max_win_streak": row[9],
+            "max_lose_streak": row[10],
+            "total_time_sec": row[11],
+            "created_at": str(row[12]) if row[12] else "",
+            "monthly": monthly,
+        })
     return results
 
 

@@ -26,6 +26,7 @@ from predictor.db_history import (
     delete_run, clear_history,
     get_bruteforce_sessions, get_bruteforce_session_by_id, get_best_runs,
     get_runs_by_ids, delete_bruteforce_group, get_bf_runs_paginated,
+    get_bf_runs_with_monthly, simulate_monthly_profit,
 )
 from predictor.bruteforce import (
     run_bruteforce,
@@ -210,6 +211,17 @@ class TemplateUpdateRequest(BaseModel):
 class BestCompareRequest(BaseModel):
     run_ids: list[int]
     horizon: int = 1
+
+
+class BfProfitRequest(BaseModel):
+    horizon: int = 1
+    start_bank: float = 1000
+    buy_price_cents: float = 52
+    max_bet: float = 500
+    bet_pct: float = 1.70  # percent of bank per signal
+    fee_pct: float = 1.56
+    min_monthly_pct: float | None = None
+    limit: int = 100
 
 
 class BatchPredictRequest(BaseModel):
@@ -722,6 +734,54 @@ async def api_bf_runs_paginated(
     window_size: int | None = Query(None),
 ):
     return await get_bf_runs_paginated(bf_id, offset, limit, min_accuracy, window_size)
+
+
+@app.post("/api/history/bruteforce/{bf_id}/profit")
+async def api_bf_profit_analysis(bf_id: int, req: BfProfitRequest):
+    runs = await get_bf_runs_with_monthly(
+        bruteforce_id=bf_id,
+        horizon=req.horizon,
+        min_monthly_pct=req.min_monthly_pct,
+    )
+    if not runs:
+        return {"runs": [], "total": 0, "config": req.model_dump()}
+
+    bet_fraction = max(0.0, float(req.bet_pct or 0.0)) / 100.0
+    fee_rate = max(0.0, float(req.fee_pct or 0.0)) / 100.0
+    limit = max(1, min(int(req.limit or 0), 500))
+
+    results = []
+    for run in runs:
+        sim = simulate_monthly_profit(
+            run.get("monthly", []),
+            start_bank=req.start_bank,
+            buy_price_cents=req.buy_price_cents,
+            max_bet=req.max_bet,
+            bet_fraction=bet_fraction,
+            fee_rate=fee_rate,
+        )
+        results.append({
+            "id": run["id"],
+            "strategy": run["strategy"],
+            "params": run["params"],
+            "accuracy_pct": run["accuracy_pct"],
+            "signals": run["signals"],
+            "correct": run["correct"],
+            "wrong": run["wrong"],
+            "max_win_streak": run["max_win_streak"],
+            "max_lose_streak": run["max_lose_streak"],
+            "monthly": run.get("monthly", []),
+            "total_time_sec": run["total_time_sec"],
+            "created_at": run["created_at"],
+            **sim,
+        })
+
+    results.sort(key=lambda item: item.get("final_bank", 0), reverse=True)
+    return {
+        "runs": results[:limit],
+        "total": len(results),
+        "config": req.model_dump(),
+    }
 
 
 @app.get("/api/best")

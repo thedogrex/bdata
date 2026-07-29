@@ -7,3 +7,6 @@ venv
 venv/
 
 predictor/pred_data_logs
+
+.env
+.env.*

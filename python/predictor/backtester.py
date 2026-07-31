@@ -27,7 +27,7 @@ RULE_BASED_STRATEGIES = {"rsi_mean_reversion", "momentum", "stochastic_adx", "ca
 
 
 def _is_cpu_heavy_strategy(strategy_name: str) -> bool:
-    return strategy_name in {"xgboost", "lightgbm", "lstm"}
+    return strategy_name in {"xgboost", "lstm"}
 
 
 async def run_backtest(

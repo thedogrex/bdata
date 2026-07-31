@@ -4,7 +4,6 @@ from predictor.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
 from predictor.strategies.momentum_strategy import MomentumStrategy
 from predictor.strategies.pattern_sequence import PatternSequenceStrategy
 from predictor.strategies.ensemble_strategy import EnsembleStrategy
-from predictor.strategies.lightgbm_strategy import LightGBMStrategy
 from predictor.strategies.random_forest_strategy import RandomForestStrategy
 from predictor.strategies.lstm_strategy import LSTMStrategy
 from predictor.strategies.stochastic_adx_strategy import StochasticADXStrategy
@@ -16,7 +15,6 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "momentum": MomentumStrategy,
     "pattern_sequence": PatternSequenceStrategy,
     "ensemble": EnsembleStrategy,
-    "lightgbm": LightGBMStrategy,
     "random_forest": RandomForestStrategy,
     "lstm": LSTMStrategy,
     "stochastic_adx": StochasticADXStrategy,
@@ -40,7 +38,7 @@ def list_strategies() -> list[dict]:
             "default_params": cls.default_params(),
             "param_docs": cls.param_docs(),
             "recommended": RECOMMENDED_PARAMS.get(name, {}),
-            "needs_training": name in ("xgboost", "pattern_sequence", "ensemble", "lightgbm", "random_forest", "lstm"),
+            "needs_training": name in ("xgboost", "pattern_sequence", "ensemble", "random_forest", "lstm"),
         }
         result.append(info)
     return result
@@ -82,13 +80,6 @@ RECOMMENDED_PARAMS: dict[str, dict] = {
         "notes": "Combines all 4 strategies with weighted voting. Slowest but most stable. Weight tuning is key — higher xgboost_weight for ML-heavy, higher pattern_weight for pattern-heavy.",
         "fast_preset": {"xgboost_weight": 0.4, "rsi_weight": 0.15, "momentum_weight": 0.2, "pattern_weight": 0.25, "threshold": 0.53, "xgboost_params": {"n_estimators": 100, "max_depth": 3, "learning_rate": 0.08, "subsample": 0.8, "colsample_bytree": 0.8, "threshold": 0.53}, "rsi_params": {"rsi_period": 14, "rsi_oversold": 30, "rsi_overbought": 70, "use_bb_confirm": True, "bb_low": 0.2, "bb_high": 0.8}, "momentum_params": {"ema_fast": 5, "ema_slow": 20, "macd_weight": 0.35, "ema_weight": 0.3, "volume_weight": 0.2, "momentum_weight": 0.15, "volume_surge_threshold": 1.5}, "pattern_params": {"lookback_lengths": [3, 4, 5, 6, 7], "weights": [0.1, 0.15, 0.25, 0.25, 0.25], "min_occurrences": 5}},
         "brute_force_include": ["xgboost_weight", "rsi_weight", "momentum_weight", "pattern_weight", "threshold"],
-    },
-    "lightgbm": {
-        "notes": "Fast gradient boosting. Faster training than XGBoost with comparable accuracy. Good for brute-force due to speed. lambda_l1/lambda_l2 critical for noisy financial data.",
-        "fast_preset": {"n_estimators": 150, "max_depth": 5, "learning_rate": 0.05, "num_leaves": 31, "subsample": 0.8, "colsample_bytree": 0.8, "min_child_samples": 20, "lambda_l1": 0.0, "lambda_l2": 0.0, "threshold": 0.53, "deterministic": False},
-        "balanced_preset": {"n_estimators": 300, "max_depth": 5, "learning_rate": 0.03, "num_leaves": 31, "subsample": 0.8, "colsample_bytree": 0.8, "min_child_samples": 20, "lambda_l1": 0.1, "lambda_l2": 0.1, "threshold": 0.54, "deterministic": False},
-        "thorough_preset": {"n_estimators": 400, "max_depth": 7, "learning_rate": 0.02, "num_leaves": 63, "subsample": 0.8, "colsample_bytree": 0.8, "min_child_samples": 20, "lambda_l1": 0.5, "lambda_l2": 0.5, "threshold": 0.55, "deterministic": False},
-        "brute_force_include": ["n_estimators", "max_depth", "learning_rate", "num_leaves", "min_child_samples", "lambda_l1", "lambda_l2", "threshold"],
     },
     "random_forest": {
         "notes": "Robust ensemble of decision trees. Less prone to overfitting. Good baseline model.",

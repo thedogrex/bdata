@@ -19,7 +19,7 @@ from predictor.db_history import (
 )
 
 BF_COMBO_DELAY_SEC = 0.2
-THRESHOLD_SWEEP_STRATEGIES = {"lightgbm", "xgboost", "rsi_mean_reversion"}
+THRESHOLD_SWEEP_STRATEGIES = {"xgboost", "rsi_mean_reversion"}
 DEFAULT_BRUTEFORCE_PROCESSES = 1
 PARALLEL_MIN_CHUNKS_PER_WORKER = 4
 PARALLEL_MAX_COMBOS_PER_CHUNK = 1
@@ -72,19 +72,6 @@ PARAM_GRIDS: dict[str, dict[str, list]] = {
     "pattern_sequence": {
         "lookback_lengths": [[3, 4, 5], [4, 5, 6, 7], [3, 4, 5, 6, 7], [5, 6, 7, 8]],
         "min_occurrences": [3, 5, 10, 20],
-    },
-    "lightgbm": {
-        "n_estimators": [150, 250, 400, 600],
-        "max_depth": [-1, 3, 5, 7, 9],
-        "learning_rate": [0.01, 0.02, 0.03, 0.05, 0.08],
-        "num_leaves": [15, 31, 63, 127],
-        "subsample": [0.6, 0.7, 0.8, 0.9],
-        "colsample_bytree": [0.6, 0.7, 0.8, 0.9],
-        "min_child_samples": [5, 10, 20, 50, 100],
-        "lambda_l1": [0, 0.1, 0.5, 1.0],
-        "lambda_l2": [0, 0.1, 0.5, 1.0],
-        "threshold": [0.50, 0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59, 0.60],
-        "window_size": [2000, 3000, 5000, 8000, 12000],
     },
     "random_forest": {
         "n_estimators": [100, 200, 300],

@@ -24,7 +24,7 @@ import requests
 
 from db import DbProvider
 
-BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 INTERVAL_MS = 5 * 60 * 1000          # 300 000 ms

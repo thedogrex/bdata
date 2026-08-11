@@ -568,7 +568,7 @@ async def list_orders_4s(slug: Optional[str] = None, limit: int = 200) -> List[D
     sql = """
         SELECT id, slug, asset_id, outcome_side, side, order_type, price, amount,
                fill_shares, fill_total_spent_usd, fill_avg_price_cents,
-               clob_order_id, clob_status, clob_error_msg, prediction_direction, created_at
+               clob_order_id, clob_status, clob_error_msg, outcome_side AS prediction_direction, created_at
         FROM poly_live_orders
         WHERE is_4s_early=1
     """

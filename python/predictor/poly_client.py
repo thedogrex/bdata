@@ -69,7 +69,7 @@ def _get_clob_client():
     if _clob_client is not None:
         return _clob_client
 
-    from py_clob_client.client import ClobClient
+    from py_clob_client_v2.client import ClobClient
 
     host = os.getenv("POLY_CLOB_HOST", "https://clob.polymarket.com")
     chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
@@ -84,18 +84,17 @@ def _get_clob_client():
     logger.info("Initialising ClobClient  host=%s  chain=%d  sig_type=%d  funder=%s",
                 host, chain_id, sig_type, funder[:10] + "..." if funder else "(none)")
 
-    print(f"private: {private_key}")
     client = ClobClient(
         host,
         key=private_key,
         chain_id=chain_id,
         signature_type=sig_type,
-        #funder=funder or None,
+        funder=funder or None,
     )
 
     # Derive / load API credentials (HMAC key+secret+passphrase)
     try:
-        creds = client.create_or_derive_api_creds()
+        creds = client.create_or_derive_api_key()
         client.set_api_creds(creds)
         logger.info("API creds derived OK  api_key=%s...", creds.api_key[:12] if creds.api_key else "?")
     except Exception as e:
@@ -241,8 +240,8 @@ class PolymarketClient:
         Returns:
             CLOB API response dict  {success, orderID, status, errorMsg, ...}
         """
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
-        from py_clob_client.order_builder.constants import BUY
+        from py_clob_client_v2.clob_types import MarketOrderArgs, OrderType
+        from py_clob_client_v2.order_builder.constants import BUY
 
         tick_size = self.get_tick_size(token_id)
         neg_risk = self.get_neg_risk(token_id)
@@ -257,8 +256,6 @@ class PolymarketClient:
                     amount=amount,
                     price=worst_price,
                     side=BUY,
-                    fee_rate_bps=0,
-                    nonce=0,
                 )
             )
             logger.debug("Signed order created, posting to CLOB...")
@@ -282,8 +279,8 @@ class PolymarketClient:
         Returns:
             CLOB API response dict
         """
-        from py_clob_client.clob_types import OrderArgs, OrderType
-        from py_clob_client.order_builder.constants import BUY
+        from py_clob_client_v2.clob_types import OrderArgs, OrderType
+        from py_clob_client_v2.order_builder.constants import BUY
 
         tick_size = self.get_tick_size(token_id)
         neg_risk = self.get_neg_risk(token_id)
@@ -315,8 +312,8 @@ class PolymarketClient:
             shares:      Number of shares to sell
             worst_price: Min price per share (slippage protection)
         """
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
-        from py_clob_client.order_builder.constants import SELL
+        from py_clob_client_v2.clob_types import MarketOrderArgs, OrderType
+        from py_clob_client_v2.order_builder.constants import SELL
 
         tick_size = self.get_tick_size(token_id)
         neg_risk = self.get_neg_risk(token_id)
@@ -331,8 +328,6 @@ class PolymarketClient:
                     amount=shares,
                     price=worst_price,
                     side=SELL,
-                    fee_rate_bps=0,
-                    nonce=0,
                 )
             )
             resp = self._clob().post_order(signed, OrderType.FOK)
@@ -346,7 +341,7 @@ class PolymarketClient:
     def get_open_orders(self) -> List[Dict[str, Any]]:
         """Get all open orders for the authenticated user."""
         try:
-            from py_clob_client.clob_types import OpenOrderParams
+            from py_clob_client_v2.clob_types import OpenOrderParams
             orders = self._clob().get_orders(OpenOrderParams())
             logger.info("Open orders: %d", len(orders) if orders else 0)
             return orders or []
@@ -357,7 +352,8 @@ class PolymarketClient:
     # ---- cancel ----
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         try:
-            resp = self._clob().cancel(order_id)
+            from py_clob_client_v2.clob_types import OrderPayload
+            resp = self._clob().cancel_order(OrderPayload(orderID=order_id))
             logger.info("Cancel order %s: %s", order_id, resp)
             return resp
         except Exception as e:
@@ -466,7 +462,7 @@ class PolymarketClient:
 
                 # Prefer typed params object. Passing a dict can break on some SDK versions
                 # with errors like: "'dict' object has no attribute 'signature_type'".
-                from py_clob_client.clob_types import BalanceAllowanceParams
+                from py_clob_client_v2.clob_types import BalanceAllowanceParams
 
                 if hasattr(client, "get_balance_allowance"):
                     resp = client.get_balance_allowance(BalanceAllowanceParams(asset_type=asset_type))

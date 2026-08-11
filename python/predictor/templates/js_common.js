@@ -718,6 +718,12 @@ function renderWallet(data){
     summaryBlocks.push(`<div class="mb-2"><div class="text-slate-400 text-[11px]">Current Bank</div><div class="text-slate-100 text-[13px] font-semibold">$${Number(walletBankSnapshot.bank_usd).toFixed(2)}</div><div class="text-[10px] text-slate-500">Updated ${walletBankSnapshot.bank_updated_at || '—'}</div></div>`);
   }
 
+  if(data?.collateral_allowance_usd !== undefined && data?.collateral_allowance_usd !== null){
+    const all = Number(data.collateral_allowance_usd);
+    const allText = all > 1000000 ? "Max" : `$${all.toFixed(2)}`;
+    summaryBlocks.push(`<div class="mb-2"><div class="text-slate-400 text-[11px]">USDC Allowance</div><div class="text-slate-100 text-[12px] font-semibold">${allText}</div></div>`);
+  }
+
   if(data?.positions_value_address){
     summaryBlocks.push(`<div class="text-[10px] text-slate-500">Address: <span class="font-mono text-slate-300">${data.positions_value_address}</span></div>`);
   }

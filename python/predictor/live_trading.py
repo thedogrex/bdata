@@ -241,6 +241,7 @@ def _extract_collateral_balance_usd(balance_allowance: Any) -> Optional[float]:
         coll = balance_allowance.get("collateral")
         if not coll:
             return None
+
         def _norm_usdc(x: Any) -> Optional[float]:
             try:
                 if isinstance(x, str):
@@ -298,6 +299,40 @@ def _extract_collateral_balance_usd(balance_allowance: Any) -> Optional[float]:
                 return nv
     except Exception:
         return None
+    return None
+
+
+def _extract_collateral_allowance_usd(balance_allowance: Any) -> Optional[float]:
+    """Best-effort parse collateral allowance from CLOB get_balance_allowance response."""
+    try:
+        if not isinstance(balance_allowance, dict):
+            return None
+        coll = balance_allowance.get("collateral")
+        if not coll or not isinstance(coll, dict):
+            return None
+
+        # Handle new plural 'allowances'
+        allowances = coll.get("allowances")
+        if isinstance(allowances, dict) and allowances:
+            vals = []
+            for v in allowances.values():
+                try:
+                    if v is not None:
+                        vals.append(float(v))
+                except (ValueError, TypeError):
+                    continue
+            if vals:
+                return max(vals) / 1e6
+
+        # Handle old singular 'allowance'
+        allowance = coll.get("allowance")
+        if allowance is not None:
+            try:
+                return float(allowance) / 1e6
+            except (ValueError, TypeError):
+                pass
+    except Exception:
+        pass
     return None
 
 
@@ -458,6 +493,7 @@ _TABLES_SQL = [
       `avg_price` double NOT NULL DEFAULT 0,
       `total_cost` double NOT NULL DEFAULT 0,
       `status` varchar(16) NOT NULL DEFAULT 'open',
+      `last_order_id` varchar(128) DEFAULT NULL,
       `resolved_outcome` varchar(16) DEFAULT NULL,
       `pnl` double DEFAULT NULL,
       `snapshot_price_cents` double DEFAULT NULL,
@@ -494,6 +530,7 @@ _TABLES_SQL = [
     """ALTER TABLE `poly_live_trade_settings` ADD COLUMN `positions_value_usd` double DEFAULT NULL AFTER `collateral_usd`""",
     """ALTER TABLE `poly_live_trade_settings` ADD COLUMN `bank_usd` double DEFAULT NULL AFTER `positions_value_usd`""",
     """ALTER TABLE `poly_live_trade_settings` ADD COLUMN `bank_updated_at` datetime DEFAULT NULL AFTER `bank_usd`""",
+    """ALTER TABLE `poly_live_positions` ADD COLUMN `last_order_id` varchar(128) DEFAULT NULL AFTER `status`""",
 ]
 
 
@@ -712,7 +749,7 @@ async def _submit_market_order(
         try:
             existing = await db.fetchone(
                 "SELECT id, shares, total_cost FROM poly_live_positions "
-                "WHERE slug=%s AND asset_id=%s AND closed=0 LIMIT 1",
+                "WHERE slug=%s AND asset_id=%s AND status='open' LIMIT 1",
                 (slug, asset_id),
             )
             if existing:
@@ -727,7 +764,7 @@ async def _submit_market_order(
                 position_info = {"id": pos_id, "shares": shares_new, "total_cost": cost_new, "avg_price": avg_new}
             else:
                 pos_id = await db.execute(
-                    "INSERT INTO poly_live_positions (slug, asset_id, outcome_side, shares, avg_price, total_cost, closed, last_order_id) VALUES (%s,%s,%s,%s,%s,%s,0,%s)",
+                    "INSERT INTO poly_live_positions (slug, asset_id, outcome_side, shares, avg_price, total_cost, status, last_order_id) VALUES (%s,%s,%s,%s,%s,%s,'open',%s)",
                     (slug, asset_id, outcome_side, float(actual_shares), actual_avg_price, float(actual_cost), order_id),
                 )
                 position_info = {"id": pos_id, "shares": float(actual_shares), "total_cost": float(actual_cost), "avg_price": actual_avg_price}
@@ -994,6 +1031,7 @@ async def wallet_summary(limit: int = 25) -> Dict[str, Any]:
     loop = asyncio.get_event_loop()
     balance = await loop.run_in_executor(None, trading_client.get_balance_allowance)
     collateral_usd = _extract_collateral_balance_usd(balance)
+    allowance_usd = _extract_collateral_allowance_usd(balance)
     positions = await list_open_positions()
     orders = await list_orders(limit=limit)
     wallet_address = _resolve_wallet_address_for_positions()
@@ -1021,6 +1059,7 @@ async def wallet_summary(limit: int = 25) -> Dict[str, Any]:
         "positions_value": bank_snapshot.get("positions_value_usd"),
         "positions_value_address": wallet_address,
         "collateral_usd": bank_snapshot.get("collateral_usd"),
+        "collateral_allowance_usd": allowance_usd,
         "bank_usd": bank_snapshot.get("bank_usd"),
         "bank_updated_at": bank_snapshot.get("bank_updated_at"),
         "bet_size_usd": bank_snapshot.get("bet_size_usd"),

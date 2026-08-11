@@ -84,12 +84,13 @@ def _get_clob_client():
     logger.info("Initialising ClobClient  host=%s  chain=%d  sig_type=%d  funder=%s",
                 host, chain_id, sig_type, funder[:10] + "..." if funder else "(none)")
 
+    print(f"private: {private_key}")
     client = ClobClient(
         host,
         key=private_key,
         chain_id=chain_id,
         signature_type=sig_type,
-        funder=funder or None,
+        #funder=funder or None,
     )
 
     # Derive / load API credentials (HMAC key+secret+passphrase)

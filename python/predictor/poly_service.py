@@ -56,7 +56,7 @@ _low_cash_alert_sent = False
 LOW_CASH_THRESHOLD_MULTIPLIER = 4.0
 
 BET_SIZE_PCT_MIN = 0.001
-BET_SIZE_PCT_MAX = 0.2
+BET_SIZE_PCT_MAX = 0.035
 DEFAULT_LIVE_TRADE_SETTINGS = {
     "auto_place": False,
     "bet_size_usd": 5.0,

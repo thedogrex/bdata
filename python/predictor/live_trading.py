@@ -55,7 +55,7 @@ def format_order_flow_totals_message(totals: Dict[str, Any], day_label: str) -> 
 
 
 async def get_today_order_flow_report_text() -> str:
-    today = datetime.utcnow().date().isoformat()
+    today = (datetime.utcnow() + MSK_UTC_OFFSET).date().isoformat()
     data = await order_flow_analytics(date_from=today, date_to=today)
     totals = (data or {}).get("totals") or {}
     return format_order_flow_totals_message(totals, day_label=today)

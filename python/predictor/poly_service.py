@@ -1000,8 +1000,8 @@ async def poll_loop(stop_event: asyncio.Event, orderbook_interval_sec: int = 3) 
                     for chat_id in getattr(config, "TELEGRAM_ORDER_FLOW_INFO", []) or []:
                         try:
                             await telegram_bot.send_message(chat_id, text)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning("[poll_loop] order flow send to %s failed: %s", chat_id, exc)
                 except Exception as exc:
                     logger.warning("[poll_loop] order flow telegram report failed: %s", exc)
 

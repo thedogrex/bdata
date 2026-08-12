@@ -35,7 +35,7 @@ if not LOGGER.handlers:
 LOGGER.propagate = False
 
 BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
-BINANCE_WS_BASE_URL = "wss://stream.binance.com:9443/ws"
+BINANCE_WS_BASE_URL = "wss://data-stream.binance.vision/ws" #"wss://stream.binance.com:9443/ws"
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 SNAPSHOT_TARGETS = {

@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS `poly_predictions_4s` (
 
 _ADD_IS_4S_EARLY_COL = """
 ALTER TABLE `poly_live_orders`
-  ADD COLUMN IF NOT EXISTS `is_4s_early` tinyint(1) NOT NULL DEFAULT 0
+  ADD COLUMN `is_4s_early` tinyint(1) NOT NULL DEFAULT 0
   AFTER `template_id`
 """
 

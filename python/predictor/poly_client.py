@@ -10,7 +10,7 @@ Wraps py_clob_client SDK to:
 Env vars required in .env:
   POLY_PRIVATE_KEY     - Wallet private key for signing
   POLY_FUNDER          - Address that holds funds (proxy wallet address)
-  POLY_SIGNATURE_TYPE  - 0=EOA, 1=email/Magic, 2=browser proxy (default 0)
+  POLY_SIGNATURE_TYPE  - 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE, 3=DEPOSIT_WALLET (default 0)
 """
 
 import json

@@ -16,7 +16,7 @@ class Core:
         self.client = ClobClient(self.host,
                                  key=config.API_KEY,
                                  chain_id=self.chain_id,
-                                 signature_type=1,
+                                 signature_type=3,
                                  funder=config.WALLET_ADDRESS)
 
 

@@ -70,12 +70,18 @@ def _get_clob_client():
         return _clob_client
 
     from py_clob_client_v2.client import ClobClient
+    from py_clob_client_v2.clob_types import ApiCreds
+    import py_clob_client_v2.http_helpers.helpers as hh
+    import httpx
+
+    # Set robust HTTP client timeout to prevent read timeouts on CLOB endpoints
+    hh._http_client = httpx.Client(http2=False, timeout=30.0)
 
     host = os.getenv("POLY_CLOB_HOST", "https://clob.polymarket.com")
     chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
     private_key = os.getenv("POLY_PRIVATE_KEY", "")
     funder = os.getenv("POLY_FUNDER", "")
-    sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "0"))
+    sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "3"))
 
     if not private_key:
         logger.error("POLY_PRIVATE_KEY is not set in .env — trading disabled")
@@ -92,13 +98,43 @@ def _get_clob_client():
         funder=funder or None,
     )
 
-    # Derive / load API credentials (HMAC key+secret+passphrase)
-    try:
-        creds = client.create_or_derive_api_key()
-        client.set_api_creds(creds)
-        logger.info("API creds derived OK  api_key=%s...", creds.api_key[:12] if creds.api_key else "?")
-    except Exception as e:
-        logger.error("Failed to derive API creds: %s", e, exc_info=True)
+    # Load cached API credentials if available, otherwise derive & cache
+    creds = None
+    cache_file = os.path.join(os.path.dirname(__file__), "..", ".poly_api_creds.json")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r") as f:
+                d = json.load(f)
+                if d.get("apiKey") and d.get("secret") and d.get("passphrase"):
+                    creds = ApiCreds(
+                        api_key=d["apiKey"],
+                        api_secret=d["secret"],
+                        api_passphrase=d["passphrase"],
+                    )
+                    client.set_api_creds(creds)
+                    logger.info("Loaded API creds from cache  api_key=%s...", creds.api_key[:12])
+        except Exception as e:
+            logger.warning("Could not read API creds cache: %s", e)
+
+    if not creds:
+        for attempt in range(3):
+            try:
+                creds = client.create_or_derive_api_key()
+                client.set_api_creds(creds)
+                logger.info("API creds derived OK  api_key=%s...", creds.api_key[:12] if creds.api_key else "?")
+                # Save to cache
+                try:
+                    with open(cache_file, "w") as f:
+                        json.dump({"apiKey": creds.api_key, "secret": creds.api_secret, "passphrase": creds.api_passphrase}, f)
+                except Exception:
+                    pass
+                break
+            except Exception as e:
+                logger.warning("Attempt %d to derive API creds failed: %s", attempt + 1, e)
+                time.sleep(1)
+
+    if not creds:
+        logger.error("Failed to obtain API creds")
         return None
 
     _clob_client = client

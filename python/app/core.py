@@ -1,4 +1,5 @@
 import logging
+import os
 import app.config as config
 from py_clob_client_v2.client import ClobClient
 
@@ -12,11 +13,11 @@ class Core:
         print(config.API_KEY)
         print(config.WALLET_ADDRESS)
 
-
+        sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "3"))
         self.client = ClobClient(self.host,
                                  key=config.API_KEY,
                                  chain_id=self.chain_id,
-                                 signature_type=3,
+                                 signature_type=sig_type,
                                  funder=config.WALLET_ADDRESS)
 
 

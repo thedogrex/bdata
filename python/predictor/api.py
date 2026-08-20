@@ -215,6 +215,9 @@ async def startup_event():
     asyncio.create_task(poly_service.poll_loop(poly_stop_event, orderbook_interval_sec=3))
     telegram_bot.start_polling()
     start_snapshot_collector()
+    if os.getenv("POLY_AUTO_REDEEM_ENABLED", "false").lower() in ("1", "true", "yes", "on"):
+        from predictor.polymarket_redeemer import start_auto_redeem
+        start_auto_redeem()
 
 
 @app.on_event("shutdown")
@@ -226,6 +229,8 @@ async def shutdown_event():
         poly_stop_event.set()
     await telegram_bot.stop_polling()
     await stop_snapshot_collector()
+    from predictor.polymarket_redeemer import stop_auto_redeem
+    stop_auto_redeem()
 
 
 @app.get("/api/poly/markets")

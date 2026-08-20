@@ -214,7 +214,7 @@ def _fetch_redeemable_positions(funder: str, max_positions: int) -> List[dict]:
         "user": funder,
         "redeemable": "true",
         "sizeThreshold": 0,
-        "limit": 30,
+        "limit": max(50, max_positions),
         "sortBy": "TITLE",
         "sortDirection": "DESC",
     }
@@ -232,9 +232,9 @@ def _fetch_redeemable_positions(funder: str, max_positions: int) -> List[dict]:
         if not isinstance(data, list):
             raise RuntimeError(f"Unexpected positions payload: {data}")
 
-        # Filter: size > 0 AND currentValue > 0
-        filtered = [p for p in data if float(p.get("size", 0)) > 0 and float(p.get("currentValue", 0)) > 0]
-        print(f"[redeem] After filtering size>0 AND currentValue>0: {len(filtered)}/{len(data)} positions remain")
+        # Filter: size > 0 (all active non-zero positions)
+        filtered = [p for p in data if float(p.get("size", 0) or 0) > 0]
+        print(f"[redeem] After filtering size>0: {len(filtered)}/{len(data)} positions remain")
 
         # Debug: print filtered positions JSON
         print("[redeem] ===== FILTERED POSITIONS JSON =====")
@@ -780,7 +780,7 @@ async def _auto_redeem_loop():
     if _AUTO_REDEEM_STOP_EVENT is None:
         _AUTO_REDEEM_STOP_EVENT = asyncio.Event()
 
-    interval_sec = int(os.getenv("POLY_AUTO_REDEEM_INTERVAL_SEC", str(420)))
+    interval_sec = int(os.getenv("POLY_AUTO_REDEEM_INTERVAL_SEC", "300"))
     logger.info("[auto_redeem] Starting auto-redeem loop (interval=%ds)", interval_sec)
 
     while not _AUTO_REDEEM_STOP_EVENT.is_set():
@@ -808,10 +808,11 @@ async def _auto_redeem_loop():
 
 def start_auto_redeem():
     """Start the auto-redeem background task if not already running."""
-    global _AUTO_REDEEM_TASK
+    global _AUTO_REDEEM_TASK, _AUTO_REDEEM_STOP_EVENT
     if _AUTO_REDEEM_TASK is not None and not _AUTO_REDEEM_TASK.done():
         logger.info("[auto_redeem] Already running")
         return
+    _AUTO_REDEEM_STOP_EVENT = asyncio.Event()
     _AUTO_REDEEM_TASK = asyncio.create_task(_auto_redeem_loop())
     logger.info("[auto_redeem] Started background task")
 

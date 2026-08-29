@@ -13,7 +13,7 @@ from predictor.utils.async_utils import resolve_awaitable
 # Minimal feature blocks needed per strategy for preloading.
 # Strategies not listed here get ALL features.
 _STRATEGY_MINIMAL_FEATURES: dict[str, set[str]] = {
-    "rsi_mean_reversion": {"rsi", "bollinger"},
+    "rsi_mean_reversion": {"rsi", "bollinger", "volatility"},
     "momentum": {"macd", "momentum", "volume", "moving_averages"},
     "stochastic_adx": {"stochastic", "adx_dmi"},
     "candlestick_pattern": {"candlestick_patterns", "volume", "moving_averages"},

@@ -223,11 +223,32 @@ class RSIMeanReversionStrategy(BaseStrategy):
         if "close" not in df.columns:
             return None
 
-        close = df["close"].astype(float)
-        returns = np.log(close / close.shift(1))
-
         fast_window = max(2, int(self.params.get("vol_fast_window", 20)))
         slow_window = max(fast_window + 1, int(self.params.get("vol_slow_window", 50)))
+
+        fast_col = f"vol_fast_{fast_window}" if f"vol_fast_{fast_window}" in df.columns else (f"vol_std_{fast_window}" if f"vol_std_{fast_window}" in df.columns else None)
+        slow_col = f"vol_slow_{slow_window}" if f"vol_slow_{slow_window}" in df.columns else (f"vol_std_{slow_window}" if f"vol_std_{slow_window}" in df.columns else None)
+
+        if fast_col and slow_col:
+            vf = df[fast_col].values.astype(float)
+            vs = df[slow_col].values.astype(float)
+            ratio_col = f"vol_ratio_{fast_window}_{slow_window}"
+            if ratio_col in df.columns:
+                vr = df[ratio_col].values.astype(float)
+            else:
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    vr = np.where(vs != 0, vf / vs, np.nan)
+            return {
+                "fast": vf,
+                "slow": vs,
+                "ratio": vr,
+            }
+
+        close = df["close"].astype(float)
+        if "log_ret" in df.columns:
+            returns = df["log_ret"].astype(float)
+        else:
+            returns = np.log(close / close.shift(1))
 
         vol_fast = returns.rolling(fast_window).std()
         vol_slow = returns.rolling(slow_window).std()

@@ -89,6 +89,15 @@ def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
         df["volatility_5"] = df["close"].rolling(5).std()
         df["volatility_20"] = df["close"].rolling(20).std()
         df["atr_14"] = _atr(df, 14)
+        close_float = df["close"].astype(float)
+        log_ret = np.log(close_float / close_float.shift(1))
+        df["log_ret"] = log_ret
+        for w in [10, 20, 30, 50, 100]:
+            df[f"vol_std_{w}"] = log_ret.rolling(w).std()
+        df["vol_fast_20"] = df["vol_std_20"]
+        df["vol_slow_50"] = df["vol_std_50"]
+        vol_ratio = df["vol_std_20"] / df["vol_std_50"].replace(0, np.nan)
+        df["vol_ratio_20_50"] = vol_ratio.replace([np.inf, -np.inf], np.nan)
 
     # --- Momentum ---
     if FEATURE_USAGE["momentum"]:

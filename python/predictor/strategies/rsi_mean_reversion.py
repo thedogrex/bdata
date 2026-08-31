@@ -163,8 +163,8 @@ class RSIMeanReversionStrategy(BaseStrategy):
 
             if self.params["use_bb_confirm"] and bb_arr is not None:
                 bb_chunk = np.nan_to_num(bb_arr[chunk], nan=0.5)
-                proba_chunk[bb_chunk < self.params["bb_low"]] += 0.05
-                proba_chunk[bb_chunk > self.params["bb_high"]] -= 0.05
+                proba_chunk[os_mask & (bb_chunk < self.params["bb_low"])] += 0.05
+                proba_chunk[ob_mask & (bb_chunk > self.params["bb_high"])] -= 0.05
 
             if vol_fast is not None and vol_slow is not None and vol_ratio is not None:
                 vf = vol_fast[chunk]
